@@ -43,6 +43,7 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
     struct Clip { int l, t, r, b; float lDip, tDip, rDip, bDip; };
     std::vector<Clip> clips;
     std::vector<uint32_t> saved;  // pixels around a glyph run that crosses the clip rect
+    std::vector<int> xmap;        // DrawImage: source column of each visible column
     uint8_t curDefault = P_TEXT;
 
     GdiCanvas(IDWriteFactory3* fac, int w, int h, float d) : f(fac) {
@@ -101,7 +102,11 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
     HDC DC() override { return dc; }
     void Clear(uint8_t pal) override {
         uint32_t c = g_pal[pal];
-        for (int y = 0; y < H; y++) { uint32_t* p = Row(y); for (int x = 0; x < W; x++) p[x] = c; }
+        // bounds in locals: a pixel store may alias the int members, so with W / H in the loop the compiler re-read W
+        // after every pixel and wrote one pixel per iteration; now it emits rep stosd (≈0.4 ms less per full-screen
+        // frame at 3440×1440; hand-written SSE2 stores, streaming or not, were slower than rep stosd)
+        const int w = W, h = H;
+        for (int y = 0; y < h; y++) { uint32_t* p = Row(y); for (int x = 0; x < w; x++) p[x] = c; }
     }
     void FillRect(float l, float t, float r, float b, uint8_t pal) override {
         float s = S();
@@ -202,19 +207,26 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
         if (dw <= 0 || dh <= 0) return;
         int cx0 = x0, cy0 = y0, cx1 = x1, cy1 = y1;
         ClipPx(cx0, cy0, cx1, cy1);
+        if (cx0 >= cx1) return;
+        // the nearest source column of every visible column, once per call: a 64-bit division per pixel cost ≈0.5 ms
+        // per frame with large images in a full-screen window
+        const int sw = im.pxW, sh = im.pxH, n = cx1 - cx0;
+        xmap.resize(n);
+        for (int i = 0; i < n; i++) xmap[i] = (int)((int64_t)(cx0 + i - x0) * sw / dw);
+        const int* xm = xmap.data();
+        const uint32_t* src = im.px.data();
         for (int y = cy0; y < cy1; y++) {
-            uint32_t* p = Row(y);
-            int sy = (int)((int64_t)(y - y0) * im.pxH / dh);
-            const uint32_t* srow = im.px.data() + (size_t)sy * im.pxW;
-            for (int x = cx0; x < cx1; x++) {
-                uint32_t sp = srow[(int64_t)(x - x0) * im.pxW / dw];  // nearest (1:1 at 100 %)
+            uint32_t* p = Row(y) + cx0;
+            const uint32_t* srow = src + (size_t)((int64_t)(y - y0) * sh / dh) * sw;
+            for (int i = 0; i < n; i++) {
+                uint32_t sp = srow[xm[i]];  // nearest (1:1 at 100 %)
                 uint32_t a = sp >> 24;
-                if (a == 255) p[x] = sp & 0xffffff;
+                if (a == 255) p[i] = sp & 0xffffff;
                 else if (a) {  // premultiplied over opaque
-                    uint32_t d = p[x], ia = 255 - a;
+                    uint32_t d = p[i], ia = 255 - a;
                     uint32_t rb = (sp & 0xff00ff) + ((((d & 0xff00ff) * ia) >> 8) & 0xff00ff);
                     uint32_t g = (sp & 0x00ff00) + ((((d & 0x00ff00) * ia) >> 8) & 0x00ff00);
-                    p[x] = (rb & 0xff00ff) | (g & 0x00ff00);
+                    p[i] = (rb & 0xff00ff) | (g & 0x00ff00);
                 }
             }
         }
