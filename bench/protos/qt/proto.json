@@ -1,0 +1,55 @@
+{
+  "id": "qt",
+  "name": "Qt 6.12 Widgets (C++): QTextBrowser + md4c -> QTextDocument via QTextCursor",
+  "build": "build.ps1",
+  "variants": [
+    {
+      "id": "qt",
+      "exe": "out-static/fastmd-qt-static.exe",
+      "args": [
+        "--id=qt"
+      ],
+      "env": {},
+      "dist_dir": "out-static",
+      "mode": "self",
+      "notes": "best: locally built static Qt 6.12 qtbase (static CRT) linked into fastmd_core.dll + 107 KB stub exe (a 21 MB exe would cost ~35-40 ms of Defender scan inside CreateProcess), rarely used system DLLs delay-loaded. md4c builds the QTextDocument directly (no HTML/CSS); first ~8 KB chunk (up to the next heading) before the first paint; after it a worker thread builds the complete document, which is swapped in (scroll position kept) and laid out in ~16k-char steps; own font fallback (Qt never scans all fonts), Qt::Dialog top-level (skips Qt's per-window Direct3D9 GPU probe), IME off, resize before setDocument (one layout pass)"
+    },
+    {
+      "id": "qt-dll",
+      "exe": "out/fastmd-qt.exe",
+      "args": [
+        "--id=qt-dll"
+      ],
+      "env": {},
+      "dist_dir": "out",
+      "mode": "self",
+      "notes": "same app code and knobs as qt, but against the official Qt 6.12.0 DLLs (windeployqt: Core/Gui/Widgets + qwindows + qmodernwindowsstyle, system UCRT). Builder saw ~10-20 ms slower than qt in pooled medians; audit (clean interleaved runs without qt-stock) saw no measurable difference (<=5 ms either way), only +54 MB peak commit; no Qt build needed, LGPL-friendly"
+    },
+    {
+      "id": "qt-full",
+      "exe": "out-static/fastmd-qt-static.exe",
+      "args": [
+        "--id=qt-full",
+        "--chunk=0"
+      ],
+      "env": {},
+      "dist_dir": "out-static",
+      "mode": "self",
+      "notes": "as qt, but the whole document is built before the first paint (no first-chunk trick); layout below the viewport still continues after the first paint"
+    },
+    {
+      "id": "qt-stock",
+      "exe": "out/fastmd-qt.exe",
+      "args": [
+        "--id=qt-stock",
+        "--stock",
+        "--window",
+        "--ime"
+      ],
+      "env": {},
+      "dist_dir": "out",
+      "mode": "self",
+      "notes": "naive Qt with the official DLLs: QTextDocument::setMarkdown (Qt's built-in md4c importer), Qt default look, whole document, Qt font fallback, plain Qt::Window (GPU probe), IME on. REFERENCE ONLY, NOT for interleaved runs with other variants: after it (its font fallback scans all ~350 families) the NEXT Qt process pays +35-130 ms in QFontDatabase population, one-shot, still seen 30 s later (audit: results/audit-run.json, the qt run right after it was ~100 ms slower than the identical qt-full). Measure it separately, after everything else"
+    }
+  ]
+}

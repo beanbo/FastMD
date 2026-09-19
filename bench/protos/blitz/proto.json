@@ -1,0 +1,34 @@
+{
+  "id": "blitz",
+  "name": "Rust + DioxusLabs Blitz 0.3.0-beta.2 (html5ever + Stylo + Taffy + Parley + vello_cpu) + comrak 0.52, own shell pipeline",
+  "build": "build.ps1",
+  "variants": [
+    {
+      "id": "blitz",
+      "exe": "out/cpu/fastmd-blitz.exe",
+      "args": ["--variant", "blitz"],
+      "env": {},
+      "dist_dir": "out/cpu",
+      "mode": "self",
+      "notes": "vello_cpu + softbuffer; window created while worker threads build fonts + DOM + layout of the first ~12 KB; rest of the document (256 KB stage, then full) parsed/styled/laid out on a background thread and swapped in; patched winit-win32 (no sync keyboard-layout cache on first focus); fat LTO opt-s, static CRT"
+    },
+    {
+      "id": "blitz-full",
+      "exe": "out/cpu/fastmd-blitz.exe",
+      "args": ["--variant", "blitz-full", "--full"],
+      "env": {},
+      "dist_dir": "out/cpu",
+      "mode": "self",
+      "notes": "same exe and pipeline, but the whole document is parsed/styled/laid out before the first frame (no chunking)"
+    },
+    {
+      "id": "blitz-gpu",
+      "exe": "out/gpu/fastmd-blitz-gpu.exe",
+      "args": ["--variant", "blitz-gpu"],
+      "env": {"WGPU_BACKEND": "dx12", "WGPU_POWER_PREF": "high"},
+      "dist_dir": "out/gpu",
+      "mode": "self",
+      "notes": "vello_hybrid on wgpu 29 (DX12 only, RTX 5070), same pipeline; wgpu device + pipelines take ~0.7 s"
+    }
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "id": "cpp-richedit",
+  "name": "C++ Win32 + inbox RichEdit 8 (msftedit.dll) + md4c -> RTF",
+  "build": "build.ps1",
+  "variants": [
+    {
+      "id": "cpp-richedit-wl-mt",
+      "exe": "out/windowless/fastmd-richedit-wl.exe",
+      "args": [
+        "--id=cpp-richedit-wl-mt",
+        "--render=gdi",
+        "--ts-thread"
+      ],
+      "env": {},
+      "dist_dir": "out/windowless",
+      "mode": "self",
+      "notes": "BEST. Windowless RichEdit (CreateTextServices + own ITextHost2, GDI TxDraw into a memory DC). Text services created + first viewport chunk streamed on a helper thread while the UI thread creates/shows the window; ImmDisableIME; whole doc loaded later on the helper into a 2nd instance and swapped in"
+    },
+    {
+      "id": "cpp-richedit",
+      "exe": "out/windowed/fastmd-richedit.exe",
+      "args": [
+        "--id=cpp-richedit"
+      ],
+      "env": {},
+      "dist_dir": "out/windowed",
+      "mode": "self",
+      "notes": "classic windowed RICHEDIT50W child control (GDI/Uniscribe), md4c on a worker thread, first viewport chunk streamed before first paint, rest reloaded after; ImmDisableIME, read-only by input filtering (no EM_SETREADONLY)"
+    },
+    {
+      "id": "cpp-richedit-d2d",
+      "exe": "out/windowless/fastmd-richedit-wl.exe",
+      "args": [
+        "--id=cpp-richedit-d2d",
+        "--render=d2d-sw",
+        "--ts-thread",
+        "--warm-d2d"
+      ],
+      "env": {},
+      "dist_dir": "out/windowless",
+      "mode": "self",
+      "notes": "windowless RichEdit with TXTBIT_D2DDWRITE: ITextServices2::TxDrawD2D (DirectWrite) into a software ID2D1DCRenderTarget; helper thread for text services + 3rd thread warming D2D/DWrite. Hardware HwndRenderTarget is ~180 ms slower (D3D device), see README"
+    },
+    {
+      "id": "cpp-richedit-full",
+      "exe": "out/windowed/fastmd-richedit.exe",
+      "args": [
+        "--id=cpp-richedit-full",
+        "--full"
+      ],
+      "env": {},
+      "dist_dir": "out/windowed",
+      "mode": "self",
+      "notes": "windowed control, whole document streamed before the first paint (no first-viewport chunk): shows the cost of the naive approach on large docs"
+    }
+  ]
+}

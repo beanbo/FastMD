@@ -1,0 +1,15 @@
+{
+  "id": "wpf",
+  "name": "C# .NET 8 WPF + Markdig -> FlowDocument (code-built) in FlowDocumentScrollViewer",
+  "build": "build.ps1",
+  "variants": [
+    { "id": "wpf", "exe": "out/r2r/fastmd-wpf.exe", "args": ["--id=wpf"], "env": {}, "dist_dir": "out/r2r", "mode": "self",
+      "notes": "best: native launcher (preloads the D3D9 GPU driver, hosts .NET via hostfxr) + framework-dependent R2R; parallel render-thread boot + font warm-up, code templates (no Aero2 theme), no IME, software rendering" },
+    { "id": "wpf-hw", "exe": "out/r2r/fastmd-wpf.exe", "args": ["--id=wpf-hw", "--hw"], "env": {}, "dist_dir": "out/r2r", "mode": "self",
+      "notes": "same as wpf but GPU (D3D9) rendering" },
+    { "id": "wpf-apphost", "exe": "out/r2r/FastMdWpf.exe", "args": ["--id=wpf-apphost"], "env": {}, "dist_dir": "out/r2r", "mode": "self",
+      "notes": "same knobs as wpf but the stock .NET apphost (pure managed, no native launcher)" },
+    { "id": "wpf-plain", "exe": "out/jit/FastMdWpf.exe", "args": ["--id=wpf-plain", "--plain"], "env": {}, "dist_dir": "out/jit", "mode": "self",
+      "notes": "textbook WPF startup: stock apphost, IL/JIT, Aero2 theme, IME, GPU, sequential boot (same renderer code) - reference point" }
+  ]
+}

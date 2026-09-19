@@ -1,0 +1,47 @@
+{
+  "id": "cpp-d2d",
+  "name": "C++20 Win32 + DirectWrite custom renderer (GDI DIB / Direct2D back-ends) + md4c",
+  "build": "build.ps1",
+  "variants": [
+    {
+      "id": "cpp-d2d",
+      "exe": "out/fastmd-d2d.exe",
+      "args": ["--backend=gdi", "--no-ime", "--no-anim", "--id=cpp-d2d"],
+      "env": {},
+      "dist_dir": "out",
+      "mode": "self",
+      "notes": "best: DirectWrite glyphs -> GDI DIB (no D2D/D3D/GPU driver), first viewport laid out+rendered on a worker thread while the window is created; IME disabled for the UI thread; /O2 /GL /MT"
+    },
+    {
+      "id": "cpp-d2d-warp",
+      "exe": "out/fastmd-d2d.exe",
+      "args": ["--backend=dxgi", "--warp", "--no-ime", "--no-anim", "--id=cpp-d2d-warp"],
+      "env": {},
+      "dist_dir": "out",
+      "mode": "self",
+      "notes": "Direct2D device context on a D3D11 WARP (CPU) device + DXGI flip swap chain; device created on a worker thread"
+    },
+    {
+      "id": "cpp-d2d-gpu",
+      "exe": "out/fastmd-d2d.exe",
+      "args": ["--backend=dxgi", "--no-ime", "--no-anim", "--id=cpp-d2d-gpu"],
+      "env": {},
+      "dist_dir": "out",
+      "mode": "self",
+      "notes": "classic Direct2D: D3D11 hardware device (default adapter = RTX 5070) + DXGI flip swap chain; device created on a worker thread"
+    },
+    {
+      "id": "cpp-d2d-resident",
+      "exe": "out-resident/fastmd-d2d.exe",
+      "args": ["--forward"],
+      "env": {},
+      "dist_dir": "out-resident",
+      "mode": "self",
+      "resident": {
+        "exe": "out-resident/fastmd-d2d.exe",
+        "args": ["--resident", "--backend=gdi", "--no-ime", "--no-anim", "--id=cpp-d2d-resident"]
+      },
+      "notes": "RESIDENT (pre-started process, not comparable with cold start): 'fastmd-d2d.exe --forward' hands the path via WM_COPYDATA to a running 'fastmd-d2d.exe --resident' (warm DirectWrite factory/fonts/glyph cache, spare window pre-created and pre-shown DWM-cloaked) and exits; same GDI back-end as cpp-d2d. Separate exe copy (out-resident/) so the resident does not warm the image of the cold variants"
+    }
+  ]
+}

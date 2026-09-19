@@ -1,0 +1,170 @@
+{
+ "meta": {
+  "when": "2026-09-19T00:57:56",
+  "host": "KSA",
+  "os": "Windows-11-10.0.26200-SP0",
+  "cpu_count": 32,
+  "python": "3.13.14",
+  "args": {
+   "cmd": "run",
+   "variant": "baseline-win32",
+   "doc": "medium",
+   "runs": 5,
+   "gap": 400,
+   "order": "interleaved",
+   "skip": null,
+   "timeout": 30,
+   "out": null
+  }
+ },
+ "summary": [
+  {
+   "variant": "baseline-win32",
+   "doc": "medium",
+   "runs": 6,
+   "failed": 0,
+   "first_ms": 168.02,
+   "median_ms": 119.6,
+   "p90_ms": 155.2,
+   "min_ms": 94.5,
+   "stdev_ms": 28.1,
+   "window_ms": 116.2,
+   "observed_ms": 64.2,
+   "cpu_ms": 46.9,
+   "peak_commit_mb": 3.3,
+   "ws_mb": 15.8,
+   "processes": 1,
+   "dist_mb": 0.15,
+   "dist_files": 1,
+   "errors": []
+  }
+ ],
+ "runs": [
+  {
+   "variant": "baseline-win32",
+   "doc": "medium",
+   "ok": true,
+   "error": null,
+   "launch_overhead_ms": 43.42,
+   "cpu_ms": 78.1,
+   "processes": 1,
+   "peak_commit_mb": 3.3,
+   "content_ms": 168.02,
+   "window_ms": 158.76,
+   "ws_mb": 15.8,
+   "marks_ms": {
+    "main": 58.66
+   },
+   "notes": "GDI floor, no markdown",
+   "observed_ms": 80.85,
+   "clean_exit": true,
+   "exit_code": 0,
+   "run": 0
+  },
+  {
+   "variant": "baseline-win32",
+   "doc": "medium",
+   "ok": true,
+   "error": null,
+   "launch_overhead_ms": 24.92,
+   "cpu_ms": 46.9,
+   "processes": 1,
+   "peak_commit_mb": 3.3,
+   "content_ms": 119.59,
+   "window_ms": 116.19,
+   "ws_mb": 15.8,
+   "marks_ms": {
+    "main": 39.15
+   },
+   "notes": "GDI floor, no markdown",
+   "observed_ms": 64.21,
+   "clean_exit": true,
+   "exit_code": 0,
+   "run": 1
+  },
+  {
+   "variant": "baseline-win32",
+   "doc": "medium",
+   "ok": true,
+   "error": null,
+   "launch_overhead_ms": 29.21,
+   "cpu_ms": 62.5,
+   "processes": 1,
+   "peak_commit_mb": 3.3,
+   "content_ms": 142.7,
+   "window_ms": 135.45,
+   "ws_mb": 15.8,
+   "marks_ms": {
+    "main": 44.58
+   },
+   "notes": "GDI floor, no markdown",
+   "observed_ms": 71.63,
+   "clean_exit": true,
+   "exit_code": 0,
+   "run": 2
+  },
+  {
+   "variant": "baseline-win32",
+   "doc": "medium",
+   "ok": true,
+   "error": null,
+   "launch_overhead_ms": 21.84,
+   "cpu_ms": 15.6,
+   "processes": 1,
+   "peak_commit_mb": 3.3,
+   "content_ms": 104.98,
+   "window_ms": 98.37,
+   "ws_mb": 15.8,
+   "marks_ms": {
+    "main": 35.21
+   },
+   "notes": "GDI floor, no markdown",
+   "observed_ms": 53.77,
+   "clean_exit": true,
+   "exit_code": 0,
+   "run": 3
+  },
+  {
+   "variant": "baseline-win32",
+   "doc": "medium",
+   "ok": true,
+   "error": null,
+   "launch_overhead_ms": 22.96,
+   "cpu_ms": 46.9,
+   "processes": 1,
+   "peak_commit_mb": 3.3,
+   "content_ms": 163.59,
+   "window_ms": 153.88,
+   "ws_mb": 15.8,
+   "marks_ms": {
+    "main": 40.59
+   },
+   "notes": "GDI floor, no markdown",
+   "observed_ms": 73.38,
+   "clean_exit": true,
+   "exit_code": 0,
+   "run": 4
+  },
+  {
+   "variant": "baseline-win32",
+   "doc": "medium",
+   "ok": true,
+   "error": null,
+   "launch_overhead_ms": 21.24,
+   "cpu_ms": 46.9,
+   "processes": 1,
+   "peak_commit_mb": 3.3,
+   "content_ms": 94.45,
+   "window_ms": 92.37,
+   "ws_mb": 15.8,
+   "marks_ms": {
+    "main": 33.89
+   },
+   "notes": "GDI floor, no markdown",
+   "observed_ms": 54.48,
+   "clean_exit": true,
+   "exit_code": 0,
+   "run": 5
+  }
+ ]
+}

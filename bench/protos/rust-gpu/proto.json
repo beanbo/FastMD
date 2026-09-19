@@ -1,0 +1,75 @@
+{
+  "id": "rust-gpu",
+  "name": "Rust immediate-mode UI: egui 0.36 + egui_commonmark 0.25 (own winit 0.30 host, wgpu 30 DX12 / CPU first frame) and iced 0.14 markdown widget (tiny-skia CPU; wgpu build documented in README)",
+  "build": "build.ps1",
+  "variants": [
+    {
+      "id": "rust-gpu-egui-softfirst",
+      "exe": "out/egui/fastmd-egui.exe",
+      "args": [
+        "--variant",
+        "rust-gpu-egui-softfirst",
+        "--first",
+        "soft",
+        "--adapter",
+        "high",
+        "--paint-on-show",
+        "1"
+      ],
+      "env": {},
+      "dist_dir": "out/egui",
+      "mode": "self",
+      "notes": "HYBRID: frame 0 = egui meshes rasterized on the CPU (own ~200-line rasterizer, soft.rs) + GDI SetDIBitsToDevice; the GPU (wgpu 30 DX12, RTX 5070 via patched wgpu-hal) is initialized only AFTER t_content and takes over from the next frames (in bench mode the GPU is never touched before t_content). Paint-on-show: the prepared frame is blitted from a thread WH_CALLWNDPROC hook at the first message the window gets once visible (before activation/IME work inside ShowWindow), then GdiFlush + DwmFlush -> t_content. egui 0.36 + egui_commonmark 0.25 (typography patches), own winit 0.30 host (patched: size applied before show, no keyboard-layout cache, no system-menu copy, no key-state scan on first focus); the layout thread (egui pass + tessellation + CPU raster of the first viewport) runs while the main thread creates the window; static CRT. AUDIT 2026-09-19: t_content is protocol-compliant (real document frame, GdiFlush + DwmFlush); note that paint-on-show takes it inside ShowWindow before activation, ~10 ms earlier than --paint-on-show 0, while the on-screen reveal is identical (Windows 11 open animation reveals any window ~95 ms after it becomes visible; README section 'Аудит')"
+    },
+    {
+      "id": "rust-gpu-egui-softfirst-noime",
+      "exe": "out/egui/fastmd-egui.exe",
+      "args": [
+        "--variant",
+        "rust-gpu-egui-softfirst-noime",
+        "--first",
+        "soft",
+        "--adapter",
+        "high",
+        "--ime",
+        "off",
+        "--paint-on-show",
+        "1"
+      ],
+      "env": {},
+      "dist_dir": "out/egui",
+      "mode": "self",
+      "notes": "same as rust-gpu-egui-softfirst + ImmDisableIME(0) on the UI thread before its first window: no IMM/TSF initialization/activation (EventLoop::new + ShowWindow, ~5-15 ms). Trade-off: no IME (CJK input) in any text field of the UI thread; applicable to any Win32-based stack. AUDIT: same paint-on-show caveat as rust-gpu-egui-softfirst"
+    },
+    {
+      "id": "rust-gpu-egui-wgpu",
+      "exe": "out/egui/fastmd-egui.exe",
+      "args": [
+        "--variant",
+        "rust-gpu-egui-wgpu",
+        "--first",
+        "gpu",
+        "--adapter",
+        "high"
+      ],
+      "env": {},
+      "dist_dir": "out/egui",
+      "mode": "self",
+      "notes": "pure GPU: same exe, frame 0 rendered by wgpu 30 DX12 on the RTX 5070 (single-adapter wgpu-hal patch, device created on a thread in parallel with window + layout); t_content after present + device.poll(wait) + DwmFlush"
+    },
+    {
+      "id": "rust-gpu-iced-tinyskia",
+      "exe": "out/iced/fastmd-iced.exe",
+      "args": [
+        "--variant",
+        "rust-gpu-iced-tinyskia",
+        "--renderer",
+        "tiny-skia"
+      ],
+      "env": {},
+      "dist_dir": "out/iced",
+      "mode": "self",
+      "notes": "CPU renderer: iced 0.14 built with the tiny-skia backend only (softbuffer present, no wgpu compiled in); markdown + syntect highlighter, own Viewer (GitHub table, headings, quotes); first 8 KB parsed for the first frame, rest appended after; t_content at the 2nd window::frames() message + DwmFlush. The iced GPU build (out/iced-wgpu, wgpu 27 DX12) is ~4x slower, see README"
+    }
+  ]
+}

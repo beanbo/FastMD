@@ -1,0 +1,30 @@
+#pragma code_page(65001)
+#include <winver.h>
+
+1 ICON "fastmd.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 0,1,0,0
+ PRODUCTVERSION 0,1,0,0
+ FILEFLAGSMASK 0x3fL
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "041904b0"
+        BEGIN
+            VALUE "CompanyName", "FastMD"
+            VALUE "FileDescription", "FastMD — мгновенный просмотр Markdown"
+            VALUE "FileVersion", "0.1.0"
+            VALUE "InternalName", "FastMD"
+            VALUE "OriginalFilename", "FastMD.exe"
+            VALUE "ProductName", "FastMD"
+            VALUE "ProductVersion", "0.1.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x419, 1200
+    END
+END

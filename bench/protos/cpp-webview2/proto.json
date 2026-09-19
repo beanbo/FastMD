@@ -1,0 +1,38 @@
+{
+  "id": "cpp-webview2",
+  "name": "C++ Win32 host + WebView2 (evergreen runtime, static loader) + md4c-html",
+  "build": "build.ps1",
+  "variants": [
+    {
+      "id": "cpp-webview2",
+      "exe": "out/fastmd-wv2.exe",
+      "args": ["--variant=cpp-webview2"],
+      "env": {},
+      "dist_dir": "out",
+      "mode": "self",
+      "notes": "best honest cold start: env+controller started first on a parking HWND, md4c on a worker thread, first ~24 KB of HTML via NavigateToString, rest appended by postMessage after the first frame; browser args: --disable-gpu --in-process-gpu NetworkServiceInProcess + disabled background features; persistent UDF in %LOCALAPPDATA%"
+    },
+    {
+      "id": "cpp-webview2-default",
+      "exe": "out/fastmd-wv2.exe",
+      "args": ["--variant=cpp-webview2-default", "--untuned", "--chunk=0"],
+      "env": {},
+      "dist_dir": "out",
+      "mode": "self",
+      "notes": "untuned WebView2 reference: no environment/controller options, no browser args, GPU process on, whole document in one page (NavigateToString, >1.5 MB via WebResourceRequested). Host-side tricks are still on (controller started on a parking HWND before the window, md4c on a worker thread), so this is 'stock WebView2 settings', not the plain Microsoft sample"
+    },
+    {
+      "id": "cpp-webview2-resident",
+      "exe": "out/fastmd-open.exe",
+      "args": [],
+      "env": {},
+      "dist_dir": "out",
+      "mode": "self",
+      "notes": "RESIDENT (PROTOCOL 6): pre-started fastmd-wv2.exe --resident keeps the environment + a hidden controller with the shell page; fastmd-open.exe forwards path + FASTMD_BENCH_* via WM_COPYDATA; document goes in by PostWebMessageAsString; GPU compositing on",
+      "resident": {
+        "exe": "out/fastmd-wv2.exe",
+        "args": ["--resident", "--variant=cpp-webview2-resident"]
+      }
+    }
+  ]
+}

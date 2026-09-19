@@ -1,0 +1,25 @@
+{
+  "id": "fastmd-app",
+  "name": "FastMD product build (app/): C++20 Win32 + DirectWrite → GDI DIB + md4c",
+  "build": "../../../app/build.ps1",
+  "variants": [
+    {
+      "id": "fastmd-app",
+      "exe": "../../../app/out/Release/FastMD.exe",
+      "args": ["--id=fastmd-app", "--light"],
+      "env": {},
+      "dist_dir": "../../../app/out/Release",
+      "mode": "self",
+      "notes": "product build: light theme forced for comparability with the style spec; settings not loaded in bench mode"
+    },
+    {
+      "id": "fastmd-app-dark",
+      "exe": "../../../app/out/Release/FastMD.exe",
+      "args": ["--id=fastmd-app-dark", "--dark"],
+      "env": {},
+      "dist_dir": "../../../app/out/Release",
+      "mode": "self",
+      "notes": "same build, dark theme"
+    }
+  ]
+}

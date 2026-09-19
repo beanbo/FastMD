@@ -1,0 +1,43 @@
+{
+  "id": "winui3",
+  "name": "C# .NET 8 + WinUI 3 (Windows App SDK 1.8, unpackaged) + Markdig",
+  "build": "build.ps1",
+  "variants": [
+    {
+      "id": "winui3",
+      "exe": "out/aot/fastmd-winui3.exe",
+      "args": ["--id", "winui3"],
+      "env": {},
+      "dist_dir": "out/aot",
+      "mode": "self",
+      "notes": "best: NativeAOT (OptimizationPreference=Speed), WinAppSDK 1.8 self-contained (xcopy, 58 MB), custom Main, no XamlControlsResources, no Mica; Markdig -> XAML in code, first viewport first (+ head-first parse for files > 256 KB)"
+    },
+    {
+      "id": "winui3-webview2",
+      "exe": "out/aot/fastmd-winui3.exe",
+      "args": ["--id", "winui3-webview2", "--webview"],
+      "env": {},
+      "dist_dir": "out/aot",
+      "mode": "self",
+      "notes": "same exe; WinUI WebView2 control + Markdig HTML + bench/common/style.css; environment created before the XAML window, lean browser args (--disable-gpu --in-process-gpu ...); first viewport via NavigateToString, rest via PostWebMessageAsString"
+    },
+    {
+      "id": "winui3-r2r",
+      "exe": "out/r2r/fastmd-winui3.exe",
+      "args": ["--id", "winui3-r2r"],
+      "env": {},
+      "dist_dir": "out/r2r",
+      "mode": "self",
+      "notes": "classic .NET: JIT + ReadyToRun, framework-dependent .NET 8 (installed runtime), WinAppSDK self-contained; same code as winui3"
+    },
+    {
+      "id": "winui3-fluent",
+      "exe": "out/aot-pri/fastmd-winui3.exe",
+      "args": ["--id", "winui3-fluent", "--fluent", "--mica"],
+      "env": {},
+      "dist_dir": "out/aot-pri",
+      "mode": "self",
+      "notes": "'typical Fluent app' cost: NativeAOT + app PRI + XamlControlsResources + MicaBackdrop with content in the title bar"
+    }
+  ]
+}

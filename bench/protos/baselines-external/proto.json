@@ -1,0 +1,42 @@
+{
+  "id": "baselines-external",
+  "name": "Third-party baselines (external-title: time until a visible window titled with the file name)",
+  "build": "build.ps1",
+  "variants": [
+    {
+      "id": "ext-notepad",
+      "exe": "C:/Windows/System32/notepad.exe",
+      "args": [],
+      "env": {},
+      "mode": "external-title",
+      "notes": "Windows 11 Notepad (Store app 11.2607.14.0), plain text (Markdown syntax mode). System32 stub hands off to the packaged app. It restores the user's own session tabs on every launch and the harness closes its window (WM_CLOSE) — SKIP when the user has Notepad open; measure only the medium doc (every new file becomes a tab in the user's session)."
+    },
+    {
+      "id": "ext-vscode",
+      "exe": "%LOCALAPPDATA%/Programs/Microsoft VS Code/Code.exe",
+      "args": ["--new-window", "--user-data-dir", "{proto_dir}/profiles/vscode/data", "--extensions-dir", "{proto_dir}/profiles/vscode/ext", "--disable-workspace-trust"],
+      "env": {},
+      "dist_dir": "%LOCALAPPDATA%/Programs/Microsoft VS Code",
+      "mode": "external-title",
+      "notes": "VS Code 1.113.0 (signed), isolated empty profile (never touches the user's instance); opens the text editor with Markdown syntax colouring, not the rendered preview"
+    },
+    {
+      "id": "ext-cursor",
+      "exe": "%LOCALAPPDATA%/Programs/cursor/Cursor.exe",
+      "args": ["--new-window", "--user-data-dir", "{proto_dir}/profiles/cursor/data", "--extensions-dir", "{proto_dir}/profiles/cursor/ext", "--disable-workspace-trust"],
+      "env": {},
+      "dist_dir": "%LOCALAPPDATA%/Programs/cursor",
+      "mode": "external-title",
+      "notes": "Cursor 2.5.26 (VS Code fork), isolated empty profile. CAVEAT: a not-logged-in profile shows the Sign Up / Log In screen over the workbench; the number is 'workbench window titled with the file name', the text itself is not visible"
+    },
+    {
+      "id": "ext-void",
+      "exe": "C:/Program Files/Void/Void.exe",
+      "args": ["--new-window", "--user-data-dir", "{proto_dir}/profiles/void/data", "--extensions-dir", "{proto_dir}/profiles/void/ext", "--disable-workspace-trust"],
+      "env": {},
+      "dist_dir": "C:/Program Files/Void",
+      "mode": "external-title",
+      "notes": "Void 1.99.30039 (VS Code fork, unsigned; the user's current .md association), isolated empty profile. CAVEAT: a fresh profile shows the 'Welcome to Void' onboarding over the workbench; the number is 'workbench window titled with the file name', the text itself is not visible"
+    }
+  ]
+}

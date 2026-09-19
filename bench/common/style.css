@@ -1,0 +1,30 @@
+/* FastMD shared stylesheet for web-engine prototypes (PROTOCOL.md §5). Inline it into the page. */
+:root { color-scheme: light; }
+html, body { margin: 0; background: #ffffff; }
+body {
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 15px; line-height: 1.6; color: #1f2328;
+  -webkit-font-smoothing: auto; text-rendering: optimizeLegibility;
+}
+.markdown-body { max-width: 860px; margin: 0 auto; padding: 24px 32px 64px; box-sizing: border-box; word-wrap: break-word; }
+.markdown-body > :first-child { margin-top: 0; }
+h1, h2, h3, h4, h5, h6 { font-weight: 600; line-height: 1.25; margin: 24px 0 16px; }
+h1 { font-size: 30px; padding-bottom: .3em; border-bottom: 1px solid #d1d9e0; }
+h2 { font-size: 24px; padding-bottom: .3em; border-bottom: 1px solid #d1d9e0; }
+h3 { font-size: 20px; } h4 { font-size: 17px; } h5 { font-size: 15px; } h6 { font-size: 14px; color: #59636e; }
+p, blockquote, ul, ol, table, pre, hr { margin: 0 0 16px; }
+a { color: #0969da; text-decoration: none; } a:hover { text-decoration: underline; }
+code, pre { font-family: "Cascadia Mono", Consolas, monospace; font-size: 13.5px; }
+:not(pre) > code { background: rgba(129,139,152,.12); border-radius: 4px; padding: .2em .4em; font-size: 85%; }
+pre { background: #f6f8fa; border-radius: 6px; padding: 16px; overflow: auto; line-height: 1.45; }
+pre code { background: none; padding: 0; }
+blockquote { padding: 0 1em; color: #59636e; border-left: 4px solid #d1d9e0; margin-left: 0; }
+ul, ol { padding-left: 2em; } li + li { margin-top: .25em; }
+li > input[type=checkbox] { margin: 0 .3em .2em -1.4em; vertical-align: middle; }
+ul.contains-task-list { list-style: none; }
+hr { height: 2px; border: 0; background: #d1d9e0; }
+table { border-collapse: collapse; display: block; width: max-content; max-width: 100%; overflow: auto; }
+th, td { border: 1px solid #d1d9e0; padding: 6px 13px; }
+th { font-weight: 600; } tr:nth-child(2n) { background: #f6f8fa; }
+img { max-width: 100%; }
+del { color: #59636e; }

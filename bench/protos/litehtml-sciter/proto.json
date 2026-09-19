@@ -1,0 +1,34 @@
+{
+  "id": "litehtml-sciter",
+  "name": "Lightweight HTML engines: litehtml 0.10 + own Direct2D/DirectWrite container, and Sciter.JS 6.0.5.0 host (C++); md4c-html + style.css",
+  "build": "build.ps1",
+  "variants": [
+    {
+      "id": "litehtml-sciter-litehtml",
+      "exe": "out/litehtml/fastmd-litehtml.exe",
+      "args": ["--id=litehtml-sciter-litehtml", "--rt=sw", "--no-ime"],
+      "env": {},
+      "dist_dir": "out/litehtml",
+      "mode": "self",
+      "notes": "best: litehtml 0.10 layout + own D2D/DirectWrite container; first 8 KB of markdown (cut at a heading) parsed+laid out on a worker while the window is created, D2D software (WARP) DC target initialised on a 2nd thread in parallel and the first viewport rasterized into a DIB there; WM_PAINT = BitBlt; IME disabled; after the first frame the rest is laid out as ~16 KB chunk documents by 4 threads (far chunks evicted); /O2 /GL /MT"
+    },
+    {
+      "id": "litehtml-sciter-litehtml-gpu",
+      "exe": "out/litehtml/fastmd-litehtml.exe",
+      "args": ["--id=litehtml-sciter-litehtml-gpu", "--rt=hwnd", "--no-ime"],
+      "env": {},
+      "dist_dir": "out/litehtml",
+      "mode": "self",
+      "notes": "same layout pipeline, but classic Direct2D ID2D1HwndRenderTarget (hardware D3D device on the default adapter = RTX 5070) created and drawn on the UI thread"
+    },
+    {
+      "id": "litehtml-sciter-sciter",
+      "exe": "out/sciter/fastmd-sciter.exe",
+      "args": ["--id=litehtml-sciter-sciter", "--no-ime"],
+      "env": {},
+      "dist_dir": "out/sciter",
+      "mode": "self",
+      "notes": "Sciter.JS 6.0.5.0 (sciter.dll 19.3 MB) via SciterCreateWindow + SCITER_APP_LOOP, default gfx layer; page = style.css + first 4 KB of markdown (cut at a heading), the rest appended in 16 KB slices after the first frame; t_content = rAF x2 -> Window.this.xcall -> DwmFlush; IME disabled"
+    }
+  ]
+}

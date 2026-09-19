@@ -1,0 +1,47 @@
+[1/39] cpp-webview2-resident        small   #0  content=126.47 ms  window=69.95  obs=31.06  ok
+[2/39] cpp-webview2-resident        small   #1  content=83.6 ms  window=72.39  obs=32.71  ok
+[3/39] cpp-webview2-resident        small   #2  content=62.1 ms  window=49.03  obs=30.74  ok
+[4/39] cpp-webview2-resident        small   #3  content=65.15 ms  window=59.36  obs=29.18  ok
+[5/39] cpp-webview2-resident        small   #4  content=65.27 ms  window=48.9  obs=29.53  ok
+[6/39] cpp-webview2-resident        small   #5  content=63.75 ms  window=58.75  obs=28.93  ok
+[7/39] cpp-webview2-resident        small   #6  content=70.81 ms  window=49.06  obs=30.15  ok
+[8/39] cpp-webview2-resident        small   #7  content=65.95 ms  window=56.54  obs=30.96  ok
+[9/39] cpp-webview2-resident        small   #8  content=63.27 ms  window=47.09  obs=28.68  ok
+[10/39] cpp-webview2-resident        small   #9  content=64.83 ms  window=57.91  obs=29.34  ok
+[11/39] cpp-webview2-resident        small   #10 content=68.58 ms  window=49.21  obs=29.25  ok
+[12/39] cpp-webview2-resident        small   #11 content=71.45 ms  window=60.36  obs=32.53  ok
+[13/39] cpp-webview2-resident        small   #12 content=65.28 ms  window=48.59  obs=29.77  ok
+[14/39] cpp-webview2-resident        medium  #0  content=82.31 ms  window=58.23  obs=31.16  ok
+[15/39] cpp-webview2-resident        medium  #1  content=63.91 ms  window=49.63  obs=28.96  ok
+[16/39] cpp-webview2-resident        medium  #2  content=64.62 ms  window=56.63  obs=28.79  ok
+[17/39] cpp-webview2-resident        medium  #3  content=64.58 ms  window=50.17  obs=30.98  ok
+[18/39] cpp-webview2-resident        medium  #4  content=66.49 ms  window=56.51  obs=31.06  ok
+[19/39] cpp-webview2-resident        medium  #5  content=69.28 ms  window=52.85  obs=31.08  ok
+[20/39] cpp-webview2-resident        medium  #6  content=65.25 ms  window=59.61  obs=28.82  ok
+[21/39] cpp-webview2-resident        medium  #7  content=64.95 ms  window=50.54  obs=31.61  ok
+[22/39] cpp-webview2-resident        medium  #8  content=65.98 ms  window=60.2  obs=29.73  ok
+[23/39] cpp-webview2-resident        medium  #9  content=64.27 ms  window=53.19  obs=32.9  ok
+[24/39] cpp-webview2-resident        medium  #10 content=64.0 ms  window=58.35  obs=28.98  ok
+[25/39] cpp-webview2-resident        medium  #11 content=64.2 ms  window=49.0  obs=28.41  ok
+[26/39] cpp-webview2-resident        medium  #12 content=70.0 ms  window=60.62  obs=29.81  ok
+[27/39] cpp-webview2-resident        large   #0  content=83.31 ms  window=70.88  obs=51.32  ok
+[28/39] cpp-webview2-resident        large   #1  content=84.0 ms  window=77.7  obs=47.77  ok
+[29/39] cpp-webview2-resident        large   #2  content=82.39 ms  window=66.5  obs=47.6  ok
+[30/39] cpp-webview2-resident        large   #3  content=89.07 ms  window=78.11  obs=48.58  ok
+[31/39] cpp-webview2-resident        large   #4  content=81.73 ms  window=66.99  obs=47.69  ok
+[32/39] cpp-webview2-resident        large   #5  content=83.55 ms  window=73.61  obs=47.83  ok
+[33/39] cpp-webview2-resident        large   #6  content=87.79 ms  window=72.64  obs=50.74  ok
+[34/39] cpp-webview2-resident        large   #7  content=84.02 ms  window=75.76  obs=47.68  ok
+[35/39] cpp-webview2-resident        large   #8  content=89.81 ms  window=70.36  obs=49.02  ok
+[36/39] cpp-webview2-resident        large   #9  content=83.09 ms  window=78.75  obs=47.04  ok
+[37/39] cpp-webview2-resident        large   #10 content=82.79 ms  window=69.14  obs=49.05  ok
+[38/39] cpp-webview2-resident        large   #11 content=82.85 ms  window=75.08  obs=48.6  ok
+[39/39] cpp-webview2-resident        large   #12 content=87.91 ms  window=72.9  obs=49.24  ok
+
+| variant | doc | n | fail | first | median | p90 | min | sd | win | obs | cpu | commitMB | wsMB | procs | distMB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| cpp-webview2-resident | large | 13 | 0 | 83.31 | 83.8 | 89.0 | 81.7 | 2.9 | 73.3 | 48.2 | 15.6 | 1.7 | 30.4 | 1.0 | 0.52 |
+| cpp-webview2-resident | medium | 13 | 0 | 82.31 | 64.8 | 69.0 | 63.9 | 2.0 | 54.8 | 29.8 | 15.6 | 1.7 | 23.4 | 1.0 | 0.52 |
+| cpp-webview2-resident | small | 13 | 0 | 126.47 | 65.3 | 71.4 | 62.1 | 5.8 | 52.9 | 29.6 | 15.6 | 1.7 | 23.4 | 1.0 | 0.52 |
+
+saved bench\results\final\res-wv2.json

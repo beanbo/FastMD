@@ -1,0 +1,16 @@
+{
+  "id": "baseline-win32",
+  "name": "Calibration floor: Win32 + GDI window with one line of text (no markdown)",
+  "build": "build.ps1",
+  "variants": [
+    {
+      "id": "baseline-win32",
+      "exe": "out/baseline.exe",
+      "args": [],
+      "env": {},
+      "dist_dir": "out",
+      "mode": "self",
+      "notes": "C, /O2 /MT, GDI DrawText; floor of process start + window + first DWM frame"
+    }
+  ]
+}

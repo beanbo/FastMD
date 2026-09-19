@@ -1,0 +1,60 @@
+{
+  "id": "rust-webview",
+  "name": "Rust: wry 0.57 (raw Win32 host / tao 0.37) and Tauri 2.11 -> WebView2 153; pulldown-cmark 0.13 (GFM)",
+  "build": "build.ps1",
+  "variants": [
+    {
+      "id": "rust-webview",
+      "exe": "out/wry/fastmd-wry.exe",
+      "args": [
+        "--id",
+        "rust-webview"
+      ],
+      "env": {},
+      "dist_dir": "out/wry",
+      "mode": "self",
+      "notes": "best (safe): wry 0.57 + minimal raw Win32 host window created hidden and shown from inside wry's controller-creation pump (overlaps show/activation with msedgewebview2 launch); env created first; custom protocol http://fastmd.localhost/ serves a first 64 KB HTML chunk, rest appended after first paint; chrome.webview.postMessage; persistent UDF %LOCALAPPDATA%/FastMD/wry; sandbox on"
+    },
+    {
+      "id": "rust-webview-tao",
+      "exe": "out/wry/fastmd-wry.exe",
+      "args": [
+        "--id",
+        "rust-webview-tao",
+        "--tao"
+      ],
+      "env": {},
+      "dist_dir": "out/wry",
+      "mode": "self",
+      "notes": "same as rust-webview but the host window is a tao 0.37 window (the canonical wry setup); tao's first WM_SETFOCUS builds a keyboard-layout cache (~250-400 ms, measured), overlapped with the WebView2 launch by showing the window inside the pump"
+    },
+    {
+      "id": "rust-webview-tauri",
+      "exe": "out/tauri/fastmd-tauri.exe",
+      "args": [
+        "--id",
+        "rust-webview-tauri"
+      ],
+      "env": {},
+      "dist_dir": "out/tauri",
+      "mode": "self",
+      "notes": "minimal Tauri 2.11.5 app (tauri-build, default features, no plugins): same mdcore page via register_asynchronous_uri_scheme_protocol, invoke('msg') -> DwmFlush; UDF %LOCALAPPDATA%/FastMD/tauri; t_window is conservative (after window+webview build)"
+    },
+    {
+      "id": "rust-webview-single",
+      "exe": "out/wry/fastmd-wry.exe",
+      "args": [
+        "--id",
+        "rust-webview-single",
+        "--data",
+        "wry-single",
+        "--extra-args",
+        "--single-process"
+      ],
+      "env": {},
+      "dist_dir": "out/wry",
+      "mode": "self",
+      "notes": "UNSAFE / unsupported, for measurement only: rust-webview + Chromium --single-process (renderer+GPU inside the browser process, no sandbox); separate UDF %LOCALAPPDATA%/FastMD/wry-single"
+    }
+  ]
+}

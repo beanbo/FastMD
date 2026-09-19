@@ -1,0 +1,47 @@
+[1/39] cpp-d2d-resident             small   #0  content=30.54 ms  window=22.02  obs=24.16  ok
+[2/39] cpp-d2d-resident             small   #1  content=28.15 ms  window=24.07  obs=25.38  ok
+[3/39] cpp-d2d-resident             small   #2  content=28.76 ms  window=21.55  obs=22.87  ok
+[4/39] cpp-d2d-resident             small   #3  content=27.46 ms  window=19.96  obs=21.19  ok
+[5/39] cpp-d2d-resident             small   #4  content=28.65 ms  window=21.45  obs=22.04  ok
+[6/39] cpp-d2d-resident             small   #5  content=28.89 ms  window=21.65  obs=23.04  ok
+[7/39] cpp-d2d-resident             small   #6  content=27.56 ms  window=19.92  obs=21.63  ok
+[8/39] cpp-d2d-resident             small   #7  content=28.82 ms  window=21.02  obs=22.31  ok
+[9/39] cpp-d2d-resident             small   #8  content=28.69 ms  window=22.56  obs=24.39  ok
+[10/39] cpp-d2d-resident             small   #9  content=28.79 ms  window=21.77  obs=22.96  ok
+[11/39] cpp-d2d-resident             small   #10 content=29.39 ms  window=21.68  obs=23.43  ok
+[12/39] cpp-d2d-resident             small   #11 content=26.99 ms  window=23.59  obs=25.67  ok
+[13/39] cpp-d2d-resident             small   #12 content=29.0 ms  window=21.3  obs=22.46  ok
+[14/39] cpp-d2d-resident             medium  #0  content=29.49 ms  window=23.8  obs=25.08  ok
+[15/39] cpp-d2d-resident             medium  #1  content=28.32 ms  window=19.15  obs=20.48  ok
+[16/39] cpp-d2d-resident             medium  #2  content=28.26 ms  window=19.61  obs=22.01  ok
+[17/39] cpp-d2d-resident             medium  #3  content=28.46 ms  window=21.05  obs=22.65  ok
+[18/39] cpp-d2d-resident             medium  #4  content=28.01 ms  window=20.78  obs=22.36  ok
+[19/39] cpp-d2d-resident             medium  #5  content=29.37 ms  window=21.73  obs=22.79  ok
+[20/39] cpp-d2d-resident             medium  #6  content=28.67 ms  window=22.26  obs=23.5  ok
+[21/39] cpp-d2d-resident             medium  #7  content=29.37 ms  window=20.37  obs=21.2  ok
+[22/39] cpp-d2d-resident             medium  #8  content=27.76 ms  window=23.19  obs=24.15  ok
+[23/39] cpp-d2d-resident             medium  #9  content=28.24 ms  window=22.04  obs=23.27  ok
+[24/39] cpp-d2d-resident             medium  #10 content=28.01 ms  window=21.37  obs=22.25  ok
+[25/39] cpp-d2d-resident             medium  #11 content=28.15 ms  window=24.27  obs=26.38  ok
+[26/39] cpp-d2d-resident             medium  #12 content=28.76 ms  window=20.91  obs=21.88  ok
+[27/39] cpp-d2d-resident             large   #0  content=28.62 ms  window=24.01  obs=25.82  ok
+[28/39] cpp-d2d-resident             large   #1  content=26.88 ms  window=23.0  obs=24.7  ok
+[29/39] cpp-d2d-resident             large   #2  content=29.13 ms  window=23.05  obs=23.73  ok
+[30/39] cpp-d2d-resident             large   #3  content=29.01 ms  window=22.98  obs=23.69  ok
+[31/39] cpp-d2d-resident             large   #4  content=26.46 ms  window=23.04  obs=25.28  ok
+[32/39] cpp-d2d-resident             large   #5  content=31.21 ms  window=24.07  obs=25.53  ok
+[33/39] cpp-d2d-resident             large   #6  content=34.02 ms  window=23.8  obs=24.73  ok
+[34/39] cpp-d2d-resident             large   #7  content=27.94 ms  window=23.29  obs=24.1  ok
+[35/39] cpp-d2d-resident             large   #8  content=29.23 ms  window=24.17  obs=25.65  ok
+[36/39] cpp-d2d-resident             large   #9  content=28.02 ms  window=23.73  obs=24.8  ok
+[37/39] cpp-d2d-resident             large   #10 content=27.39 ms  window=23.5  obs=23.93  ok
+[38/39] cpp-d2d-resident             large   #11 content=29.14 ms  window=23.0  obs=25.07  ok
+[39/39] cpp-d2d-resident             large   #12 content=30.02 ms  window=22.17  obs=23.1  ok
+
+| variant | doc | n | fail | first | median | p90 | min | sd | win | obs | cpu | commitMB | wsMB | procs | distMB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| cpp-d2d-resident | large | 13 | 0 | 28.62 | 29.1 | 31.1 | 26.5 | 2.1 | 23.2 | 24.7 | 0.0 | 1.8 | 30.2 | 1.0 | 0.4 |
+| cpp-d2d-resident | medium | 13 | 0 | 29.49 | 28.3 | 29.3 | 27.8 | 0.5 | 21.2 | 22.5 | 15.6 | 1.8 | 18.6 | 1.0 | 0.4 |
+| cpp-d2d-resident | small | 13 | 0 | 30.54 | 28.7 | 29.0 | 27.0 | 0.7 | 21.6 | 22.9 | 15.6 | 1.8 | 17.9 | 1.0 | 0.4 |
+
+saved bench\results\final\res-d2d.json

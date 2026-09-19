@@ -1,0 +1,152 @@
+{
+ "meta": {
+  "when": "2026-09-19T00:51:26",
+  "host": "KSA",
+  "os": "Windows-11-10.0.26200-SP0",
+  "cpu_count": 32,
+  "python": "3.13.14",
+  "args": {
+   "cmd": "run",
+   "variant": "rust-gpu-egui-glow",
+   "doc": "medium",
+   "runs": 3,
+   "gap": 400,
+   "order": "interleaved",
+   "skip": null,
+   "timeout": 30,
+   "out": null
+  }
+ },
+ "summary": [
+  {
+   "variant": "rust-gpu-egui-glow",
+   "doc": "medium",
+   "runs": 4,
+   "failed": 0,
+   "first_ms": 4360.98,
+   "median_ms": 1858.9,
+   "p90_ms": 2070.5,
+   "min_ms": 1697.0,
+   "stdev_ms": 215.2,
+   "window_ms": 1848.3,
+   "observed_ms": 1559.5,
+   "cpu_ms": 718.8,
+   "peak_commit_mb": 123.0,
+   "ws_mb": 68.2,
+   "processes": 1,
+   "dist_mb": 9.15,
+   "dist_files": 1,
+   "errors": []
+  }
+ ],
+ "runs": [
+  {
+   "variant": "rust-gpu-egui-glow",
+   "doc": "medium",
+   "ok": true,
+   "error": null,
+   "launch_overhead_ms": 2281.17,
+   "cpu_ms": 734.4,
+   "processes": 1,
+   "peak_commit_mb": 162.1,
+   "content_ms": 4360.98,
+   "window_ms": 4351.98,
+   "ws_mb": 116.5,
+   "marks_ms": {
+    "main": 2310.31,
+    "read": 2310.57,
+    "parsed": 2311.23,
+    "fonts": 2311.7,
+    "app_created": 4008.18,
+    "ui_first": 4016.45,
+    "ui_first_end": 4033.09
+   },
+   "notes": "fonts(mmap): SegUIVar.ttf,CascadiaMono.ttf,seguiemj.ttf,msyh.ttc,seguisym.ttf; glow dx12",
+   "observed_ms": 4043.01,
+   "clean_exit": true,
+   "exit_code": 0,
+   "run": 0
+  },
+  {
+   "variant": "rust-gpu-egui-glow",
+   "doc": "medium",
+   "ok": true,
+   "error": null,
+   "launch_overhead_ms": 90.72,
+   "cpu_ms": 671.9,
+   "processes": 1,
+   "peak_commit_mb": 123.0,
+   "content_ms": 2123.38,
+   "window_ms": 2115.63,
+   "ws_mb": 68.2,
+   "marks_ms": {
+    "main": 123.5,
+    "read": 123.78,
+    "parsed": 124.79,
+    "fonts": 139.52,
+    "app_created": 1635.68,
+    "ui_first": 1643.07,
+    "ui_first_end": 1665.05
+   },
+   "notes": "fonts(mmap): SegUIVar.ttf,CascadiaMono.ttf,seguiemj.ttf,msyh.ttc,seguisym.ttf; glow dx12",
+   "observed_ms": 1678.81,
+   "clean_exit": true,
+   "exit_code": 0,
+   "run": 1
+  },
+  {
+   "variant": "rust-gpu-egui-glow",
+   "doc": "medium",
+   "ok": true,
+   "error": null,
+   "launch_overhead_ms": 57.96,
+   "cpu_ms": 765.6,
+   "processes": 1,
+   "peak_commit_mb": 123.8,
+   "content_ms": 1696.99,
+   "window_ms": 1687.53,
+   "ws_mb": 68.3,
+   "marks_ms": {
+    "main": 82.14,
+    "read": 82.38,
+    "parsed": 82.96,
+    "fonts": 83.3,
+    "app_created": 1193.94,
+    "ui_first": 1196.96,
+    "ui_first_end": 1210.68
+   },
+   "notes": "fonts(mmap): SegUIVar.ttf,CascadiaMono.ttf,seguiemj.ttf,msyh.ttc,seguisym.ttf; glow dx12",
+   "observed_ms": 1219.92,
+   "clean_exit": true,
+   "exit_code": 0,
+   "run": 2
+  },
+  {
+   "variant": "rust-gpu-egui-glow",
+   "doc": "medium",
+   "ok": true,
+   "error": null,
+   "launch_overhead_ms": 78.43,
+   "cpu_ms": 718.8,
+   "processes": 1,
+   "peak_commit_mb": 123.0,
+   "content_ms": 1858.89,
+   "window_ms": 1848.31,
+   "ws_mb": 68.1,
+   "marks_ms": {
+    "main": 108.42,
+    "read": 108.73,
+    "parsed": 109.41,
+    "fonts": 109.78,
+    "app_created": 1525.86,
+    "ui_first": 1532.27,
+    "ui_first_end": 1547.43
+   },
+   "notes": "fonts(mmap): SegUIVar.ttf,CascadiaMono.ttf,seguiemj.ttf,msyh.ttc,seguisym.ttf; glow dx12",
+   "observed_ms": 1559.55,
+   "clean_exit": true,
+   "exit_code": 0,
+   "run": 3
+  }
+ ]
+}

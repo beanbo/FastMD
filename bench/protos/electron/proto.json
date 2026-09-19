@@ -1,0 +1,34 @@
+{
+  "id": "electron",
+  "name": "Electron 44.4.3 (Chromium 152 / Node 24.21 / V8 15.2) + markdown-it 15 + highlight.js 11 — Typora/Obsidian/MarkText class",
+  "build": "build.ps1",
+  "variants": [
+    {
+      "id": "electron",
+      "exe": "out/FastMD/FastMD.exe",
+      "args": ["--fastmd-variant=electron"],
+      "env": {},
+      "dist_dir": "out/FastMD",
+      "mode": "self",
+      "notes": "tuned (best): packaged app (FastMD.exe + resources/app, no default_app), esbuild bundle, no app menu, disableHardwareAcceleration + --disable-software-rasterizer (software compositing, no GL/WARP init) + --in-process-gpu (no GPU process), navigation started before show(), first ~4K chars parsed while the renderer boots (files > 256 KB: only the head is read before the first paint), rest appended after the first paint in content-visibility:auto sections, sandbox + contextIsolation on, highlight.js core + 19 lazily registered languages"
+    },
+    {
+      "id": "electron-gpu",
+      "exe": "out/FastMD/FastMD.exe",
+      "args": ["--fastmd-variant=electron-gpu"],
+      "env": {"FASTMD_OPTS": "gpu,gpuproc"},
+      "dist_dir": "out/FastMD",
+      "mode": "self",
+      "notes": "= electron, but Chromium graphics defaults: hardware acceleration ON (GPU compositing/raster via ANGLE D3D11) in a separate GPU process — shows the cost of the GPU process on the first frame"
+    },
+    {
+      "id": "electron-default",
+      "exe": "node_modules/electron/dist/electron.exe",
+      "args": ["{proto_dir}/out/app-default", "--fastmd-variant=electron-default"],
+      "env": {},
+      "dist_dir": "node_modules/electron/dist",
+      "mode": "self",
+      "notes": "plain 'typical Electron app': electron.exe <app dir> (default_app.asar), require() from node_modules, default menu / GPU / webPreferences, whole document parsed + full highlight.js (all languages) before the window is created, temp HTML file + loadFile; t_content = first viewport of the progressively parsed page in the DOM + double rAF (audit fix: it used to wait for DOMContentLoaded, ~2 s too late on large.md)"
+    }
+  ]
+}

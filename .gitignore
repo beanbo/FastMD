@@ -1,0 +1,21 @@
+# build outputs
+app/build/
+app/out/
+app/tests/out/
+*.pdb
+*.ilk
+*.obj
+
+# research / benchmark tooling and artefacts (tens of GB: toolchains, prototype builds, downloads)
+bench/.tools/
+bench/results/tmp/
+research/lab/
+
+# prototypes: keep only their description (README.md with numbers and audit) and harness registration
+# (proto.json); the calibration floor and the product registration are kept whole
+bench/protos/**
+!bench/protos/*/
+!bench/protos/*/README.md
+!bench/protos/*/proto.json
+!bench/protos/baseline-win32/**
+bench/protos/baseline-win32/out/

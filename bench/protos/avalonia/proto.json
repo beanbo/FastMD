@@ -1,0 +1,15 @@
+{
+  "id": "avalonia",
+  "name": "C# .NET 8 Avalonia 12.1.2 (Skia) + Markdig -> Avalonia controls, NativeAOT",
+  "build": "build.ps1",
+  "variants": [
+    { "id": "avalonia", "exe": "out/aot-lib/fastmd-avalonia.exe", "args": ["--id", "avalonia", "--render", "software"], "env": {}, "dist_dir": "out/aot-lib", "mode": "self",
+      "notes": "best: NativeAOT shared lib fastmd-core.dll + 100 KB C launcher, Skia software renderer, code-only minimal theme, virtualized first-viewport-first, big files: prefix parse first" },
+    { "id": "avalonia-exe", "exe": "out/aot/fastmd-avalonia.exe", "args": ["--id", "avalonia-exe", "--render", "software"], "env": {}, "dist_dir": "out/aot", "mode": "self",
+      "notes": "same as avalonia but the usual single 14 MB NativeAOT exe (no launcher) - shows the Defender per-MB CreateProcess cost" },
+    { "id": "avalonia-gpu", "exe": "out/aot-lib/fastmd-avalonia.exe", "args": ["--id", "avalonia-gpu", "--render", "angle"], "env": {}, "dist_dir": "out/aot-lib", "mode": "self",
+      "notes": "same as avalonia but Avalonia's default GPU renderer (ANGLE/EGL on D3D11)" },
+    { "id": "avalonia-stock", "exe": "out/jit-fluent/fastmd-avalonia.exe", "args": ["--id", "avalonia-stock", "--render", "angle"], "env": {}, "dist_dir": "out/jit-fluent", "mode": "self",
+      "notes": "Avalonia defaults: JIT + ReadyToRun (framework-dependent, needs .NET 8 runtime), FluentTheme, ANGLE; same Markdown builder" }
+  ]
+}
