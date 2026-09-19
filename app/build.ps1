@@ -15,5 +15,5 @@ if (-not (Test-Path 'res\fastmd.ico')) { python tools\make_icon.py }
 if ($LASTEXITCODE -ne 0) { throw 'cmake configure failed' }
 & $msvc cmake --build $build
 if ($LASTEXITCODE -ne 0) { throw 'build failed' }
-$exe = Join-Path $PSScriptRoot "out\$Config\FastMD.exe"
+$exe = Join-Path $PSScriptRoot "build\$Config\FastMD.exe"
 Write-Host "built $exe ($((Get-Item $exe).Length) bytes)"

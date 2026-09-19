@@ -31,11 +31,30 @@ static DWORD RegGetDword(const wchar_t* name, DWORD def) {
 }
 static void RegSetDword(const wchar_t* name, DWORD v) { RegSetKeyValueW(HKEY_CURRENT_USER, kRegKey, name, REG_DWORD, &v, sizeof(v)); }
 
+// Window placement of the last closed window (HKCU\Software\FastMD\Window, one binary value = one registry read).
+struct SavedWindow {
+    uint32_t version;     // 1
+    RECT normal;          // restored (non-maximized) rect, workspace coordinates (GetWindowPlacement)
+    int32_t clientW, clientH;  // client size at close (px) — the doc thread lays out for it before the window exists
+    uint32_t dpi;         // DPI of the window at close
+    uint32_t maximized;
+};
+static SavedWindow g_saved{};
+static bool g_haveSaved = false;
+static bool g_sizeFromArgs = false;  // --size=WxH (tests): ignore the saved placement
+
 static void LoadSettings() {
     g.cfg.theme = (ThemeMode)std::min<DWORD>(RegGetDword(L"Theme", TM_SYSTEM), TM_DARK);
     g.cfg.zoom = std::clamp(RegGetDword(L"ZoomPercent", 100), 50ul, 300ul) / 100.f;
-    g.cfg.sizeW = (int)std::clamp(RegGetDword(L"Width", 1000), 400ul, 4000ul);
-    g.cfg.sizeH = (int)std::clamp(RegGetDword(L"Height", 800), 300ul, 3000ul);
+    DWORD sz = sizeof(g_saved);
+    g_haveSaved = RegGetValueW(HKEY_CURRENT_USER, kRegKey, L"Window", RRF_RT_REG_BINARY, nullptr, &g_saved, &sz) ==
+                      ERROR_SUCCESS &&
+                  sz == sizeof(g_saved) && g_saved.version == 1 && g_saved.normal.right - g_saved.normal.left >= 200 &&
+                  g_saved.normal.bottom - g_saved.normal.top >= 150 && g_saved.dpi >= 48 && g_saved.dpi <= 960;
+    if (!g_haveSaved) {  // v0.1 stored only the client size (DIP)
+        g.cfg.sizeW = (int)std::clamp(RegGetDword(L"Width", 1000), 400ul, 4000ul);
+        g.cfg.sizeH = (int)std::clamp(RegGetDword(L"Height", 800), 300ul, 3000ul);
+    }
 }
 
 static void SaveSettings() {
@@ -43,12 +62,52 @@ static void SaveSettings() {
     RegSetDword(L"Theme", g.cfg.theme);
     RegSetDword(L"ZoomPercent", (DWORD)std::lround(g.cfg.zoom * 100));
     WINDOWPLACEMENT wp{sizeof(wp)};
-    if (g.hwnd && GetWindowPlacement(g.hwnd, &wp) && wp.showCmd == SW_SHOWNORMAL) {
+    if (!g.hwnd || !GetWindowPlacement(g.hwnd, &wp)) return;
+    SavedWindow s{};
+    s.version = 1;
+    s.normal = wp.rcNormalPosition;
+    s.dpi = GetDpiForWindow(g.hwnd);
+    s.maximized = wp.showCmd == SW_SHOWMAXIMIZED || (wp.showCmd == SW_SHOWMINIMIZED && (wp.flags & WPF_RESTORETOMAXIMIZED));
+    if (wp.showCmd == SW_SHOWMINIMIZED && !s.maximized) {  // minimized: derive the client size from the normal rect
+        RECT fr{0, 0, 0, 0};
+        AdjustWindowRectExForDpi(&fr, WS_OVERLAPPEDWINDOW, FALSE, 0, s.dpi);
+        s.clientW = (s.normal.right - s.normal.left) - (fr.right - fr.left);
+        s.clientH = (s.normal.bottom - s.normal.top) - (fr.bottom - fr.top);
+    } else {
         RECT rc;
         GetClientRect(g.hwnd, &rc);
-        RegSetDword(L"Width", (DWORD)std::lround(rc.right * 96.f / g.dpi));
-        RegSetDword(L"Height", (DWORD)std::lround(rc.bottom * 96.f / g.dpi));
+        s.clientW = rc.right;
+        s.clientH = rc.bottom;
     }
+    RegSetKeyValueW(HKEY_CURRENT_USER, kRegKey, L"Window", REG_BINARY, &s, sizeof(s));
+}
+
+// Where to create the window: the saved normal rect (workspace → screen coordinates), shifted diagonally while another
+// FastMD window already sits exactly there (several documents opened at once cascade instead of stacking).
+// Returns false when there is no usable saved placement (first run, or its monitor is gone).
+static bool RestoredRect(RECT* out) {
+    if (!g_haveSaved || g_sizeFromArgs) return false;
+    RECT r = g_saved.normal;
+    HMONITOR mon = MonitorFromRect(&r, MONITOR_DEFAULTTONULL);
+    if (!mon) return false;
+    MONITORINFO mi{sizeof(mi)};
+    if (!GetMonitorInfoW(mon, &mi)) return false;
+    OffsetRect(&r, mi.rcWork.left - mi.rcMonitor.left, mi.rcWork.top - mi.rcMonitor.top);  // workspace → screen
+    int step = MulDiv(28, (int)g_saved.dpi, 96);
+    for (int k = 0; k < 12; k++) {
+        bool taken = false;
+        for (HWND h = FindWindowExW(nullptr, nullptr, kClass, nullptr); h && !taken; h = FindWindowExW(nullptr, h, kClass, nullptr)) {
+            RECT o;
+            taken = GetWindowRect(h, &o) && o.left == r.left && o.top == r.top;
+        }
+        if (!taken) break;
+        OffsetRect(&r, step, step);
+        if (r.right > mi.rcWork.right || r.bottom > mi.rcWork.bottom) {  // wrapped past the work area: back to its corner
+            OffsetRect(&r, mi.rcWork.left - r.left + step * (k % 4), mi.rcWork.top - r.top + step * (k % 4));
+        }
+    }
+    *out = r;
+    return true;
 }
 
 // ------------------------------------------------------------------------------------------------ theme
@@ -759,6 +818,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SaveSettings();
         DestroyWindow(hwnd);
         return 0;
+    case WM_ENDSESSION:  // logoff / shutdown / restart: no WM_CLOSE is sent
+        if (wp) SaveSettings();
+        return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -835,17 +897,27 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         else if (a == L"--ime") g.cfg.noIme = false;
         else if (a == L"--anim") g.cfg.noAnim = false;
         else if (a.rfind(L"--zoom=", 0) == 0) g.cfg.zoom = std::clamp((float)_wtof(a.c_str() + 7) / 100.f, 0.5f, 3.f);
-        else if (a.rfind(L"--size=", 0) == 0) swscanf_s(a.c_str() + 7, L"%dx%d", &g.cfg.sizeW, &g.cfg.sizeH);
+        else if (a.rfind(L"--size=", 0) == 0) {
+            swscanf_s(a.c_str() + 7, L"%dx%d", &g.cfg.sizeW, &g.cfg.sizeH);
+            g_sizeFromArgs = true;
+        }
         else if (a.rfind(L"--scroll-test=", 0) == 0) g.cfg.scrollTest = _wtoi(a.c_str() + 14);
         else if (a.rfind(L"--", 0) != 0) path = a;
     }
     if (bench) { g.cfg.sizeW = 1000; g.cfg.sizeH = 800; }  // PROTOCOL.md §5: 1000×800 DIP
     SetDarkPalette(WantDark());
 
-    // geometry guess (the doc thread lays out for it before the window exists)
-    g.dpi = (float)GetDpiForSystem();
-    g.pxW = MulDiv(g.cfg.sizeW, (int)g.dpi, 96);
-    g.pxH = MulDiv(g.cfg.sizeH, (int)g.dpi, 96);
+    // geometry guess (the doc thread lays out for it before the window exists): the last closed window's client size
+    bool restore = g_haveSaved && !g_sizeFromArgs && !bench;
+    if (restore) {
+        g.dpi = (float)g_saved.dpi;
+        g.pxW = g_saved.clientW;
+        g.pxH = g_saved.clientH;
+    } else {
+        g.dpi = (float)GetDpiForSystem();
+        g.pxW = MulDiv(g.cfg.sizeW, (int)g.dpi, 96);
+        g.pxH = MulDiv(g.cfg.sizeH, (int)g.dpi, 96);
+    }
     if (!path.empty()) {
         wchar_t full[MAX_PATH * 4];
         g.path = GetFullPathNameW(path.c_str(), MAX_PATH * 4, full, nullptr) ? full : path;
@@ -863,18 +935,37 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
     RegisterClassExW(&wc);
 
-    RECT r{0, 0, g.pxW, g.pxH};
-    AdjustWindowRectExForDpi(&r, WS_OVERLAPPEDWINDOW, FALSE, 0, (UINT)g.dpi);
+    // position / size: the last closed window's placement (cascaded if another FastMD window sits there), created
+    // directly at its final rect — no extra move/resize before the first frame
+    RECT wr;
+    bool placed = restore && RestoredRect(&wr);
+    int x = CW_USEDEFAULT, y = CW_USEDEFAULT, w, h;
+    if (placed) {
+        x = wr.left;
+        y = wr.top;
+        w = wr.right - wr.left;
+        h = wr.bottom - wr.top;
+    } else {
+        UINT sdpi = GetDpiForSystem();
+        int cw = restore ? MulDiv(g_saved.clientW, (int)sdpi, (int)g_saved.dpi) : MulDiv(g.cfg.sizeW, (int)sdpi, 96);
+        int ch = restore ? MulDiv(g_saved.clientH, (int)sdpi, (int)g_saved.dpi) : MulDiv(g.cfg.sizeH, (int)sdpi, 96);
+        RECT r{0, 0, cw, ch};
+        AdjustWindowRectExForDpi(&r, WS_OVERLAPPEDWINDOW, FALSE, 0, sdpi);
+        w = r.right - r.left;
+        h = r.bottom - r.top;
+    }
     std::wstring title = WindowTitle();
-    g.hwnd = CreateWindowExW(0, kClass, title.c_str(), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                             r.right - r.left, r.bottom - r.top, nullptr, nullptr, inst, nullptr);
+    g.hwnd = CreateWindowExW(0, kClass, title.c_str(), WS_OVERLAPPEDWINDOW, x, y, w, h, nullptr, nullptr, inst, nullptr);
     Mark("window_created");
     if (g.cfg.noAnim) {
         BOOL on = TRUE;  // content appears at full opacity immediately instead of the ~200 ms open animation
         DwmSetWindowAttribute(g.hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &on, sizeof(on));
     }
     ApplyWindowChrome(g.hwnd);
-    ShowWindow(g.hwnd, show);
+    int cmd = show;
+    bool plainShow = show == SW_SHOWNORMAL || show == SW_SHOWDEFAULT || show == SW_SHOW;
+    if (placed && g_saved.maximized && plainShow) cmd = SW_SHOWMAXIMIZED;
+    ShowWindow(g.hwnd, cmd);
     Mark("shown");
     UpdateWindow(g.hwnd);
     return MessageLoop();

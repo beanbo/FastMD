@@ -7,8 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 option(FASTMD_CFG "Control Flow Guard (+ /GS)" ON)
 option(FASTMD_COMCTL6 "comctl32 v6 dependency in the process manifest (themed message boxes)" ON)
-set(FASTMD_OUT_DIR "${CMAKE_SOURCE_DIR}/out/${CMAKE_BUILD_TYPE}" CACHE PATH "output directory")
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${FASTMD_OUT_DIR})
+# dev builds stay in the build tree (build/<Config>/FastMD.exe); publish.ps1 copies a build to out/Release, the
+# copy the .md association points to — so an open document never locks the file the next build writes
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 if(FASTMD_COMCTL6)
     set(FASTMD_MANIFEST ${CMAKE_SOURCE_DIR}/res/fastmd.manifest)
 else()

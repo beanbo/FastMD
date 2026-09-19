@@ -11,7 +11,7 @@ import time
 from PIL import Image
 
 HERE = pathlib.Path(__file__).resolve().parent
-EXE = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / "out" / "Release" / "FastMD.exe"
+EXE = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / "build" / "Release" / "FastMD.exe"
 OUT = HERE / "out"
 
 u32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -157,6 +157,62 @@ def check(name, cond, info=""):
     return cond
 
 
+def window_rect(hwnd):
+    r = wt.RECT()
+    u32.GetWindowRect(hwnd, ctypes.byref(r))
+    return (r.left, r.top, r.right, r.bottom)
+
+
+def close_and_wait(proc, hwnd):
+    post(hwnd, 0x0010, 0, 0, 0.1)  # WM_CLOSE → the viewer saves its placement
+    try:
+        proc.wait(5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def test_placement(doc):
+    """last closed window's rect is restored; a second window cascades; maximized state is restored"""
+    ok = True
+    u32.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wt.UINT]
+    a = subprocess.Popen([str(EXE), "--light", str(doc)])
+    ha = find_window(a.pid)
+    time.sleep(0.5)
+    target = (180, 140, 180 + 900, 140 + 680)
+    u32.SetWindowPos(ha, None, target[0], target[1], target[2] - target[0], target[3] - target[1], 0x0014)  # NOZORDER|NOACTIVATE
+    time.sleep(0.3)
+    close_and_wait(a, ha)
+
+    b = subprocess.Popen([str(EXE), "--light", str(doc)])
+    hb = find_window(b.pid)
+    time.sleep(0.4)
+    rb = window_rect(hb)
+    ok &= check("placement restored after reopen", all(abs(rb[i] - target[i]) <= 1 for i in range(4)), f"{rb} vs {target}")
+    c = subprocess.Popen([str(EXE), "--light", str(doc)])
+    hc = find_window(c.pid)
+    time.sleep(0.4)
+    rc = window_rect(hc)
+    ok &= check("second window cascades", rc[0] == rb[0] + 28 and rc[1] == rb[1] + 28 and rc[2] - rc[0] == rb[2] - rb[0],
+                f"{rc} vs {rb}")
+    close_and_wait(c, hc)
+    u32.ShowWindow(hb, 3)  # SW_MAXIMIZE
+    time.sleep(0.3)
+    close_and_wait(b, hb)
+
+    d = subprocess.Popen([str(EXE), "--light", str(doc)])
+    hd = find_window(d.pid)
+    time.sleep(0.4)
+    ok &= check("maximized state restored", bool(u32.IsZoomed(hd)))
+    u32.ShowWindow(hd, 9)  # SW_RESTORE
+    time.sleep(0.3)
+    rd = window_rect(hd)
+    ok &= check("restore returns to the saved normal rect", all(abs(rd[i] - target[i]) <= 1 for i in range(4)), f"{rd}")
+    u32.SetWindowPos(hd, None, 120, 100, 1016, 839, 0x0014)  # leave a sane placement behind
+    time.sleep(0.2)
+    close_and_wait(d, hd)
+    return ok
+
+
 def main():
     OUT.mkdir(exist_ok=True)
     doc = OUT / "features.md"
@@ -253,6 +309,7 @@ def main():
         shot(hwnd, "11-reloaded-end")
     finally:
         proc.kill()
+    ok &= test_placement(doc)
     print("RESULT", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 

@@ -5,7 +5,7 @@
   "variants": [
     {
       "id": "fastmd-app",
-      "exe": "../../../app/out/Release/FastMD.exe",
+      "exe": "../../../app/build/Release/FastMD.exe",
       "args": ["--id=fastmd-app", "--light"],
       "env": {},
       "dist_dir": "../../../app/out/Release",
@@ -14,7 +14,7 @@
     },
     {
       "id": "fastmd-app-dark",
-      "exe": "../../../app/out/Release/FastMD.exe",
+      "exe": "../../../app/build/Release/FastMD.exe",
       "args": ["--id=fastmd-app-dark", "--dark"],
       "env": {},
       "dist_dir": "../../../app/out/Release",

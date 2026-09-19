@@ -1,5 +1,5 @@
 @echo off
-rem Final serial measurement. Launched through explorer.exe (research/lab/startup/bin/launch.exe --mode explorer)
+rem Final serial measurement. Launched through explorer.exe (bench/tools/explorer-launch/launch.exe --mode explorer)
 rem so that nothing inherits the Claude Desktop MSIX AppData/HKCU virtualization (research/05 section 11.1).
 title FastMD final benchmark - do not close
 cd /d C:\Main\Projects\FastMD

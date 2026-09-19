@@ -1,0 +1,2 @@
+# benchmark corpus: byte-exact (line endings are part of what the parser measures)
+bench/corpus/** -text
