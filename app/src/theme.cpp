@@ -2,7 +2,7 @@
 #include "theme.h"
 
 namespace {
-const uint32_t kLight[P_COUNT] = {
+const uint32_t kLight[] = {
     0x1f2328,  // P_DEFAULT (unused)
     0x1f2328,  // P_TEXT
     0x59636e,  // P_MUTED
@@ -23,6 +23,10 @@ const uint32_t kLight[P_COUNT] = {
     0xffffff,  // P_OVERLAY_BG
     0x1f2328,  // P_OVERLAY_TEXT
     0xd1d9e0,  // P_OVERLAY_BORDER
+    0xf6f8fa,  // P_PANEL
+    0xe7ebef,  // P_HOVER (neutral.muted over the panel)
+    0xddf4ff,  // P_CURRENT (accent.subtle)
+    0xbf8700,  // P_MARK
     0x0969da,  // P_ALERT_NOTE
     0x1a7f37,  // P_ALERT_TIP
     0x8250df,  // P_ALERT_IMPORTANT
@@ -36,7 +40,7 @@ const uint32_t kLight[P_COUNT] = {
     0x953800,  // P_TYPE
     0x953800,  // P_VAR
 };
-const uint32_t kDark[P_COUNT] = {
+const uint32_t kDark[] = {
     0xf0f6fc,  // P_DEFAULT (unused)
     0xf0f6fc,  // P_TEXT
     0x9198a1,  // P_MUTED
@@ -57,6 +61,10 @@ const uint32_t kDark[P_COUNT] = {
     0x1c2129,  // P_OVERLAY_BG
     0xf0f6fc,  // P_OVERLAY_TEXT
     0x3d444d,  // P_OVERLAY_BORDER
+    0x010409,  // P_PANEL (canvas.inset)
+    0x262c36,  // P_HOVER
+    0x122844,  // P_CURRENT
+    0xd29922,  // P_MARK
     0x4493f8,  // P_ALERT_NOTE
     0x3fb950,  // P_ALERT_TIP
     0xab7df8,  // P_ALERT_IMPORTANT
@@ -70,6 +78,7 @@ const uint32_t kDark[P_COUNT] = {
     0xffa657,  // P_TYPE
     0xffa657,  // P_VAR
 };
+static_assert(std::size(kLight) == P_COUNT && std::size(kDark) == P_COUNT, "one colour per Pal");
 bool g_dark = false;
 }  // namespace
 

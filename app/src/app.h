@@ -1,10 +1,19 @@
 // FastMD application state (one document window per process) and the functions shared by the modules:
-//   view.cpp   — geometry, virtualised layout, drawing, hit-testing, selection, find
-//   loader.cpp — document loading (start-up doc thread, open / reload / history), background measure + images, file watch
-//   window.cpp — Win32 window, input, commands, menus, settings, association, wWinMain
+//   view.cpp        — geometry, virtualised layout, drawing, hit-testing, selection, horizontal scrolling, link focus
+//   find.cpp        — find: matching, the find bar, its IME-capable input box (own thread)
+//   toc.cpp         — outline panel
+//   home.cpp        — start screen: recent documents
+//   loader.cpp      — document loading (start-up doc thread, open / reload / history), background measure + images,
+//                     file watch, reading positions
+//   store.cpp       — settings (registry), reading positions + recent documents (positions.bin), editor detection
+//   shell.cpp       — links, clipboard, editor / Explorer / dialogs, .md association
+//   settings_ui.cpp — settings window
+//   strings.cpp     — UI strings (ru / en)
+//   window.cpp      — Win32 window, input, commands, menus, wWinMain
 #pragma once
 #include "canvas.h"
 #include "layout.h"
+#include "strings.h"
 #include <unordered_map>
 
 enum : UINT {
@@ -12,17 +21,52 @@ enum : UINT {
     WM_APP_IMAGES,                 // image thread finished
     WM_APP_FULLDOC,                // full parse of a big document ready (first screen came from a prefix)
     WM_APP_FILECHANGED,            // watcher: the open file changed on disk
+    WM_APP_POSITIONS,              // positions.bin read after the first frame (lParam = std::vector<PosEntry>*)
+    WM_APP_FINDINPUT,              // find input box → UI thread: wParam = FI_*, lParam = event data
+    WM_APP_QUERY = WM_APP + 64,    // automation / UI tests: wParam = Query → LRESULT (read-only state)
 };
-enum : UINT_PTR { TIMER_TOAST = 1, TIMER_RELOAD = 2, TIMER_AUTOSCROLL = 3 };
+enum : UINT_PTR { TIMER_TOAST = 1, TIMER_RELOAD = 2, TIMER_AUTOSCROLL = 3, TIMER_HBAR = 4 };
+
+// WM_COMMAND ids (menus; tests and automation drive the viewer with them too — keep the numbers stable)
+enum Cmd : UINT {
+    CMD_COPY = 100, CMD_SELECT_ALL, CMD_OPEN, CMD_RELOAD, CMD_EDIT, CMD_FOLDER, CMD_FIND,
+    CMD_THEME_SYSTEM, CMD_THEME_LIGHT, CMD_THEME_DARK, CMD_ZOOM_IN, CMD_ZOOM_OUT, CMD_ZOOM_RESET,
+    CMD_BACK, CMD_FORWARD, CMD_LINK_COPY, CMD_ASSOCIATE,
+    CMD_TOC, CMD_COL_NARROW, CMD_COL_NORMAL, CMD_COL_WIDE, CMD_COL_FULL, CMD_COL_NARROWER, CMD_COL_WIDER,
+    CMD_WRAP, CMD_SETTINGS, CMD_LINK_OPEN, CMD_IMG_COPY, CMD_IMG_OPEN,
+    CMD_FIND_CASE, CMD_FIND_WORD, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_FIND_CLOSE, CMD_LINK_NEXT, CMD_LINK_PREV,
+};
+
+// WM_APP_QUERY ids (tests): pixel values are client pixels
+enum Query : UINT {
+    Q_SCROLLY = 1, Q_DOCH, Q_TOC_OPEN, Q_TOC_DOCKED, Q_TOC_COUNT, Q_TOC_CURRENT, Q_TOC_ITEM_Y /* lp = item */,
+    Q_HSCROLL_BLOCK /* first h-scrollable block or -1 */, Q_HSCROLL_X /* lp = block */, Q_FOCUS_LINK, Q_MATCHES,
+    Q_CUR_MATCH, Q_TEXT_LEFT, Q_TEXT_W, Q_RECENT_COUNT, Q_FIND_EDIT, Q_SETTINGS_HWND, Q_FIND_OPEN, Q_COLUMN,
+    Q_FONT_SIZE, Q_WRAP, Q_LANG, Q_FIND_PART_X /* lp = part → x | y << 16 */, Q_BLOCK_Y /* lp = block */,
+    Q_RESTORED, Q_THEME_DARK, Q_TARGETY, Q_SETTINGS_HIT /* lp = row * 100 + option */, Q_FONT_FAMILY_SITKA,
+};
+
+enum ColumnPreset : uint8_t { COL_NARROW = 0, COL_NORMAL, COL_WIDE, COL_FULL };
+enum LangSetting : uint8_t { LANG_AUTO = 0, LANG_RU, LANG_EN };
 
 struct Config {
-    bool noIme = true;          // ImmDisableIME(0) on the UI thread: ~10–30 ms saved, no TSF stalls (the find box takes WM_CHAR)
+    bool noIme = true;          // ImmDisableIME(0) on the UI thread: ~10–30 ms saved; the find box lives on its own thread
     bool noAnim = true;         // DWMWA_TRANSITIONS_FORCEDISABLED: document visible at once, no fade/zoom-in
     ThemeMode theme = TM_SYSTEM;
     float zoom = 1.f;
     int sizeW = 1000, sizeH = 800;  // initial client size (DIP)
     wchar_t id[64] = L"";       // bench variant id (window title suffix required by bench/PROTOCOL.md)
     int scrollTest = 0;         // debug: render N scrolling frames after the first one, log to %TEMP%
+    // v0.2 settings (store.cpp)
+    uint8_t column = COL_NORMAL;
+    bool wrapCode = false;
+    bool tocOpen = false;       // outline was open when the last window closed
+    uint8_t font = FONT_SEGOE;
+    int fontSize = 16;          // body text (DIP); scales the whole type ramp
+    bool smoothScroll = true;
+    uint8_t language = LANG_AUTO;
+    std::wstring editor;        // exe for Ctrl+E; "" = the system "edit" verb
+    bool findCase = false, findWord = false;
 };
 
 struct MeasureJob {
@@ -33,6 +77,18 @@ struct MeasureJob {
 
 struct HistoryEntry { std::wstring path; float scrollY; };
 
+// reading position of one file (positions.bin): exact place when the file is unchanged, the nearest section when not
+struct PosEntry {
+    std::wstring path;
+    uint64_t size = 0, mtime = 0, opened = 0;  // file stamp at save; last opened (FILETIME ticks)
+    uint32_t block = 0;
+    float blockOff = 0;                        // DIP from the top of `block` to the top of the viewport
+    std::wstring slug;                         // nearest heading at or above the viewport top ("" = none)
+    float slugOff = 0;                         // DIP from that heading to the viewport top
+};
+
+struct TocItem { uint32_t block; uint8_t level; std::wstring text; IDWriteTextLayout* layout = nullptr; };
+
 struct App {
     Config cfg;
     HINSTANCE inst = nullptr;
@@ -41,7 +97,7 @@ struct App {
     int pxW = 0, pxH = 0;          // client size in pixels
 
     // ---- document
-    std::wstring path;             // "" = empty state (no document)
+    std::wstring path;             // "" = start screen (no document)
     std::wstring src;              // UTF-16 source (immutable while workers run)
     Doc doc;
     std::atomic<Doc*> fullDoc{nullptr};
@@ -49,6 +105,7 @@ struct App {
     FILETIME fileTime{};
     uint64_t fileSize = 0;
     std::vector<HistoryEntry> back, fwd;
+    uint32_t docSerial = 0;        // bumped whenever g.doc is replaced (outline / link caches key on it)
 
     // ---- text & layout
     IDWriteFactory3* dwf = nullptr;
@@ -60,6 +117,7 @@ struct App {
     float textW = 0, wideW = 0;    // layout widths (DIP) the cache was built for
     uint32_t cachedCount = 0;
     std::unordered_map<uint32_t, IDWriteTextLayout*> numLayouts;
+    std::vector<float> hx;         // per block: horizontal scroll of a wide code block / table (DIP)
 
     // ---- rendering
     Canvas* canvas = nullptr;
@@ -69,7 +127,8 @@ struct App {
     HANDLE docThread = nullptr;
     std::vector<HANDLE> workers;
     SRWLOCK workersLock = SRWLOCK_INIT;
-    std::atomic<uint32_t> gen{0};  // bumped whenever the document / widths change → stale jobs stop
+    std::atomic<uint32_t> gen{0};     // layout generation: bumped whenever the document / widths change → measure jobs stop
+    std::atomic<uint32_t> docGen{0};  // document generation: bumped only when the document changes → full parse / images stop
     std::atomic<bool> closing{false};
     int jobsPending = 0;
     HANDLE watchThread = nullptr, watchStop = nullptr;
@@ -90,6 +149,33 @@ struct App {
     std::wstring lowerText;         // lazily built lower-case copy of doc.text
     std::vector<uint32_t> matches;  // match start offsets, sorted
     int curMatch = -1;
+    int findHot = -1;               // hovered find-bar part (FindPart)
+
+    // ---- outline
+    bool tocOpen = false;
+    float tocScroll = 0;
+    int tocHover = -1;              // item index, -2 = the panel's close button
+    bool tocBtnHot = false;
+    std::vector<TocItem> toc;
+    uint32_t tocSerial = UINT32_MAX;  // docSerial the items were built for
+
+    // ---- keyboard link focus / context menu target
+    int focusLink = -1;
+    int ctxLink = -1, ctxImage = -1;
+
+    // ---- start screen
+    std::vector<PosEntry> recentAll;  // positions.bin, most recently opened first
+    std::wstring recentFilter;
+    std::vector<int> recentShown;     // indices into recentAll
+    int recentSel = 0, recentHover = -1;
+
+    // ---- reading position
+    std::vector<PosEntry> positions;  // loaded after the first frame
+    bool positionsLoaded = false;
+    bool userMoved = false;           // the reader scrolled / navigated: a late position restore must not jump
+    int restoreBlock = -1;            // pending restore target (re-resolved while heights are measured)
+    float restoreOff = 0;
+    bool restored = false;
 
     // ---- mouse / overlays
     bool draggingThumb = false, hotScroll = false, downOnLink = false;
@@ -98,6 +184,13 @@ struct App {
     int hoverLink = -1;             // link index under the mouse
     int hoverCode = -1;             // code block under the mouse (copy button)
     bool hoverCopyBtn = false;
+    int hoverHBlock = -1;           // wide block under the mouse (its horizontal scrollbar is shown)
+    bool hotHBar = false;
+    int dragHBlock = -1;            // horizontal thumb being dragged
+    float dragHGrab = 0;
+    int hbarFlash = -1;             // block whose horizontal scrollbar shows briefly after it scrolled
+    DWORD hbarFlashUntil = 0;
+    std::wstring tip;               // tooltip pill (buttons)
     std::wstring toast;
     DWORD toastUntil = 0;
 };
@@ -108,10 +201,15 @@ float Scale();                       // pixels per DIP (DPI / 96 × zoom)
 float ViewW();
 float ViewH();
 float MaxScroll();
-void UpdateColumns();                // textW / wideW for the current window width
+float DocLeft();                     // left edge of the document area (the docked outline takes the rest)
+float DocW();
+float TextLeft();
+float WideLeft();
+void UpdateColumns();                // textW / wideW for the current window width and column preset
 float LayoutWidthFor(const Block& b, float textW, float wideW);
 void BlockBox(uint32_t i, float* x, float* w);  // drawn box of a block (DIP, document x)
 uint32_t FirstVisible(float y);
+uint32_t BlockOfPos(uint32_t pos);   // last block whose textOff <= pos
 void InitGeometry();
 void RecomputeY();
 void EnsureVisible();
@@ -121,10 +219,20 @@ void ClearLayoutCache();
 void TrimCache();
 void Render();                       // draw the full frame into the canvas
 void WithAnchor(void (*fn)());       // keep the top visible block in place while heights change
+void DrawPill(const std::wstring& s, float x, float y, bool centered);
+IDWriteTextLayout* UiLayout(const std::wstring& s, float maxW, IDWriteTextFormat* fmt = nullptr);
+
+// horizontal scrolling of code blocks / tables wider than their box
+bool HScrollInfo(uint32_t i, float* visX, float* visW, float* contentW);
+float HScrollOf(uint32_t i);         // clamped offset
+void HScrollSet(uint32_t i, float x);
+int HScrollBlockAt(float x, float y, bool* onBar);  // wide block (or its scrollbar) under the point
+bool HScrollBarRect(uint32_t i, float* l, float* t, float* r, float* b, float* thumbL, float* thumbR);  // client DIP
 
 // positions & links
 bool HitTestDoc(float x, float y, uint32_t* pos, bool* inside);  // client DIP → absolute text offset
 int LinkAt(float x, float y);        // link index or -1
+int ImageAt(float x, float y);       // image block index or -1
 int CodeBlockAt(float x, float y, bool* onCopyButton);
 void SelectAll();
 void SelectWordAt(uint32_t pos);
@@ -134,17 +242,61 @@ std::wstring SelectionText();
 std::wstring BlockPlainText(uint32_t i);
 int HeadingBlockBySlug(const std::wstring& slug);
 void ScrollToBlock(uint32_t i, bool animate);
-
-// find
-void FindUpdate(bool keepCurrent);
-void FindStep(int dir);
+void RevealTextPos(uint32_t pos, bool center);  // scroll (and h-scroll a wide block) so a text position is visible
+bool LinkRange(int li, uint32_t* start, uint32_t* end);  // text range of a link (first run … last run)
+void FocusLinkStep(int dir);         // Tab / Shift+Tab
 
 // overlays
 void ShowToast(const std::wstring& text, DWORD ms = 1200);
 
+// ------------------------------------------------------------------------------------------------ find.cpp
+enum FindPart { FP_NONE = -1, FP_BAR, FP_FIELD, FP_TEXT, FP_CASE, FP_WORD, FP_COUNT, FP_PREV, FP_NEXT, FP_CLOSE };
+enum FindInputEvent : WPARAM { FI_TEXT = 1, FI_KEY, FI_FOCUS };
+void FindOpen();
+void FindClose();
+void FindUpdate(bool keepCurrent);
+void FindStep(int dir);
+void FindToggleCase();
+void FindToggleWord();
+void DrawFindBar();
+void DrawFindMarks(float x0, float x1);       // match ticks on the scrollbar track
+int FindPartAt(float x, float y);             // FindPart or FP_NONE
+void FindPartRect(int part, float* l, float* t, float* r, float* b);
+void FindClick(int part);
+void FindOnInput(WPARAM ev, LPARAM lp);       // WM_APP_FINDINPUT
+void FindRelayoutInput();                     // window size / zoom / theme / language changed
+bool FindTypeChar(wchar_t c);                 // WM_CHAR on the document while the bar is open
+bool FindInputFocused();
+void FindFocusInput();
+HWND FindEditHwnd();                          // the box's EDIT (tests type into it)
+
+// ------------------------------------------------------------------------------------------------ toc.cpp
+bool TocAvailable();                 // the document has headings
+bool TocWideEnough();                // the window can keep the column beside the panel
+bool TocDocked();                    // open and the window is wide enough to keep the column beside it
+bool TocOverlayOpen();               // shown as a drawer over the text (narrow window)
+float TocPanelW();
+void TocSetOpen(bool open);
+void TocSync();                      // rebuild the items after the document changed
+int TocCurrent();
+void DrawToc();
+bool TocHit(float x, float y, int* item);    // point in the panel; item index, -2 = close button, -1 = none
+bool TocButtonHit(float x, float y);         // the floating outline button (panel closed)
+void TocClick(int item);
+void TocWheel(float dy);
+float TocItemY(int item);            // client DIP of an item's centre (tests)
+
+// ------------------------------------------------------------------------------------------------ home.cpp
+void HomeRebuild();                  // recentShown for the current filter
+void DrawHome();
+int HomeItemAt(float x, float y);
+void HomeOpen(int shownIndex);
+bool HomeKey(WPARAM vk);
+bool HomeChar(wchar_t c);
+
 // ------------------------------------------------------------------------------------------------ loader.cpp
 DWORD WINAPI StartupDocThread(void*);
-void OpenDocument(const std::wstring& path, bool pushHistory, float scrollY);  // runtime (UI thread)
+void OpenDocument(const std::wstring& path, bool pushHistory, float scrollY, bool restorePosition = false);
 void ReloadDocument();
 void NavigateBack();
 void NavigateForward();
@@ -158,10 +310,53 @@ void StartWatcher();
 void StopWatcher();
 HANDLE Spawn(LPTHREAD_START_ROUTINE fn, void* arg, int prio = THREAD_PRIORITY_NORMAL, SIZE_T stack = 0);
 std::wstring WindowTitle();
+void LoadPositionsAsync();           // after the first frame
+void OnPositionsLoaded(std::vector<PosEntry>* list);
+void SaveReadingPosition();          // current document → positions.bin
+void ResolveRestore();               // re-aim a pending position restore after heights changed
 
-// ------------------------------------------------------------------------------------------------ window.cpp
-void Invalidate();
-void ScrollTo(float y, bool animate);
+// ------------------------------------------------------------------------------------------------ store.cpp
+const wchar_t* RegKeyPath();         // HKCU\Software\FastMD (FASTMD_REGKEY overrides: tests)
+std::wstring DataDir();              // %LOCALAPPDATA%\FastMD\ (FASTMD_DATA overrides: tests), with trailing backslash
+void LoadConfig(Config& c, std::wstring* findQuery);  // everything but the window placement
+void SaveConfig(const Config& c, const std::wstring& findQuery);
+bool RegReadBinary(const wchar_t* name, void* data, DWORD size);
+void RegWriteBinary(const wchar_t* name, const void* data, DWORD size);
+bool PositionsLoad(std::vector<PosEntry>& out);             // most recently opened first
+void PositionsSave(const PosEntry& e, bool keepPosition);   // merge one entry (keepPosition: only touch `opened`)
+void PositionsRemove(const std::wstring& path);
+uint64_t FileTimeU64(const FILETIME& ft);
+struct EditorInfo { std::wstring name, exe; };
+std::vector<EditorInfo> DetectEditors();
+
+// ------------------------------------------------------------------------------------------------ shell.cpp
 void OpenLink(int linkIndex);
 void CopyToClipboard(const std::wstring& text);
+bool CopyImageToClipboard(uint32_t imageBlock);
+void OpenImageFile(uint32_t imageBlock);
+void OpenInEditor();
+void ShowInFolder();
+void OpenDialog();
+std::wstring PickExeDialog(HWND owner);
+bool RegisterAssociation(bool openSettings);
+void UnregisterAssociation();
+std::wstring UrlDecode(const std::wstring& s);
+
+// ------------------------------------------------------------------------------------------------ settings_ui.cpp
+void SettingsOpen();
+void SettingsRefresh();              // settings changed elsewhere (menu, shortcut, other window)
+HWND SettingsHwnd();
+LRESULT SettingsHitCenter(int id);   // tests: control centre (client px), -1 if absent
+
+// ------------------------------------------------------------------------------------------------ window.cpp
+enum SettingsChange : uint32_t {
+    SC_THEME = 1, SC_TYPE = 2 /* font, size, wrap */, SC_COLUMN = 4, SC_LANGUAGE = 8, SC_OTHER = 16, SC_ALL = 31,
+};
+void Invalidate();
+void Relayout();                     // column widths / typography changed: drop layouts, re-estimate, re-measure
+bool KeyCommand(WPARAM vk, bool ctrl, bool shift, bool alt);  // keyboard shortcuts (also forwarded by the find box)
+void ScrollTo(float y, bool animate);
+void UserScrollTo(float y, bool animate);  // reader-initiated: cancels a pending position restore
 void ApplyTheme();                   // re-evaluate system / forced theme, repaint
+void ApplySettings(uint32_t changed, bool persist);  // g.cfg changed → re-layout / repaint (+ save, notify other windows)
+void Command(UINT id);

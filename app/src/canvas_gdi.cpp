@@ -40,8 +40,9 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
     long stride = 0;  // in pixels, negative for bottom-up
     uint32_t* row0 = nullptr;
     ColorEffect fx[P_COUNT];
-    struct Clip { int l, t, r, b; float rDip; };
+    struct Clip { int l, t, r, b; float lDip, tDip, rDip, bDip; };
     std::vector<Clip> clips;
+    std::vector<uint32_t> saved;  // pixels around a glyph run that crosses the clip rect
     uint8_t curDefault = P_TEXT;
 
     GdiCanvas(IDWriteFactory3* fac, int w, int h, float d) : f(fac) {
@@ -194,7 +195,7 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
         layout->Draw(nullptr, this, x, y);
     }
     void DrawImage(::Image& im, float l, float t, float r, float b) override {
-        if (im.state.load() != 2 || im.px.empty()) return;
+        if (im.state.load() != 2 || im.pxW <= 0 || im.pxH <= 0 || im.px.size() < (size_t)im.pxW * im.pxH) return;
         float s = S();
         int x0 = (int)std::lround(l * s), y0 = (int)std::lround(t * s), x1 = (int)std::lround(r * s), y1 = (int)std::lround(b * s);
         int dw = x1 - x0, dh = y1 - y0;
@@ -203,10 +204,10 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
         ClipPx(cx0, cy0, cx1, cy1);
         for (int y = cy0; y < cy1; y++) {
             uint32_t* p = Row(y);
-            int sy = (int)((int64_t)(y - y0) * im.h / dh);
-            const uint32_t* srow = im.px.data() + (size_t)sy * im.w;
+            int sy = (int)((int64_t)(y - y0) * im.pxH / dh);
+            const uint32_t* srow = im.px.data() + (size_t)sy * im.pxW;
             for (int x = cx0; x < cx1; x++) {
-                uint32_t sp = srow[(int64_t)(x - x0) * im.w / dw];  // nearest (1:1 at 100 %)
+                uint32_t sp = srow[(int64_t)(x - x0) * im.pxW / dw];  // nearest (1:1 at 100 %)
                 uint32_t a = sp >> 24;
                 if (a == 255) p[x] = sp & 0xffffff;
                 else if (a) {  // premultiplied over opaque
@@ -220,11 +221,12 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
     }
     void PushClip(float l, float t, float r, float b) override {
         float s = S();
-        Clip c{(int)std::lround(l * s), (int)std::lround(t * s), (int)std::lround(r * s), (int)std::lround(b * s), r};
+        Clip c{(int)std::lround(l * s), (int)std::lround(t * s), (int)std::lround(r * s), (int)std::lround(b * s), l, t, r, b};
         if (!clips.empty()) {
             const Clip& p = clips.back();
             c.l = std::max(c.l, p.l); c.t = std::max(c.t, p.t); c.r = std::min(c.r, p.r); c.b = std::min(c.b, p.b);
-            c.rDip = std::min(c.rDip, p.rDip);
+            c.lDip = std::max(c.lDip, p.lDip); c.tDip = std::max(c.tDip, p.tDip);
+            c.rDip = std::min(c.rDip, p.rDip); c.bDip = std::min(c.bDip, p.bDip);
         }
         clips.push_back(c);
     }
@@ -254,17 +256,57 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
         return curDefault;
     }
     static COLORREF Ref(uint32_t rgb) { return RGB((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255); }
+    // Text is rasterised by DirectWrite straight into the DIB, which knows nothing about our clip rects. Inside a clip:
+    // glyphs far outside are dropped (long code lines cost nothing), and a run that crosses the clip edge is drawn
+    // with the pixels around it saved and restored outside the clip — a pixel-exact clip for scrolled code / tables.
     HRESULT STDMETHODCALLTYPE DrawGlyphRun(void*, FLOAT x, FLOAT y, DWRITE_MEASURING_MODE mode, const DWRITE_GLYPH_RUN* run,
                                            const DWRITE_GLYPH_RUN_DESCRIPTION* desc, IUnknown* effect) override {
+        if (clips.empty()) return DrawRun(x, y, mode, *run, desc, effect);
+        const Clip& c = clips.back();
         DWRITE_GLYPH_RUN gr = *run;
-        if (!clips.empty() && !gr.isSideways && !(gr.bidiLevel & 1)) {  // glyph-granular horizontal clip (code blocks)
-            float right = clips.back().rDip, pen = x;
+        float em = gr.fontEmSize, top = y - em * 1.3f, bottom = y + em * 0.6f;
+        if (top > c.bDip || bottom < c.tDip) return S_OK;
+        bool rtl = (gr.bidiLevel & 1) != 0;
+        if (!gr.isSideways && !rtl && gr.glyphAdvances) {
+            UINT32 k = 0;
+            while (k < gr.glyphCount && x + gr.glyphAdvances[k] < c.lDip - em) x += gr.glyphAdvances[k++];
+            if (k) {
+                gr.glyphIndices += k;
+                gr.glyphAdvances += k;
+                if (gr.glyphOffsets) gr.glyphOffsets += k;
+                gr.glyphCount -= k;
+                desc = nullptr;  // cluster map no longer matches
+            }
             UINT32 n = 0;
-            while (n < gr.glyphCount && pen < right) pen += gr.glyphAdvances[n++];
-            if (n < gr.glyphCount && pen > right && n > 0) n--;  // last glyph crosses the edge
-            if (n == 0) return S_OK;
-            gr.glyphCount = n;
+            float pen = x;
+            while (n < gr.glyphCount && pen < c.rDip + em) pen += gr.glyphAdvances[n++];
+            if (n < gr.glyphCount) { gr.glyphCount = n; desc = nullptr; }
+            if (!gr.glyphCount) return S_OK;
         }
+        float runW = 0;
+        for (UINT32 k = 0; k < gr.glyphCount && gr.glyphAdvances; k++) runW += gr.glyphAdvances[k];
+        float s = S(), l = rtl ? x - runW - em : x - em, r = rtl ? x + em : x + runW + em;
+        if (gr.isSideways) { l = x - em * 2; r = x + runW + em * 2; }
+        int L = std::max(0, (int)std::floor(l * s)), T = std::max(0, (int)std::floor(top * s));
+        int R = std::min(W, (int)std::ceil(r * s)), B = std::min(H, (int)std::ceil(bottom * s));
+        if (L >= R || T >= B) return S_OK;
+        if (L >= c.l && R <= c.r && T >= c.t && B <= c.b) return DrawRun(x, y, mode, gr, desc, effect);
+        int w = R - L;
+        saved.resize((size_t)w * (B - T));
+        for (int yy = T; yy < B; yy++) memcpy(&saved[(size_t)(yy - T) * w], Row(yy) + L, w * 4);
+        HRESULT hr = DrawRun(x, y, mode, gr, desc, effect);
+        GdiFlush();
+        for (int yy = T; yy < B; yy++) {
+            uint32_t* p = Row(yy);
+            const uint32_t* sp = &saved[(size_t)(yy - T) * w];
+            if (yy < c.t || yy >= c.b) { memcpy(p + L, sp, w * 4); continue; }
+            for (int xx = L; xx < std::min(R, c.l); xx++) p[xx] = sp[xx - L];
+            for (int xx = std::max(L, c.r); xx < R; xx++) p[xx] = sp[xx - L];
+        }
+        return hr;
+    }
+    HRESULT DrawRun(FLOAT x, FLOAT y, DWRITE_MEASURING_MODE mode, const DWRITE_GLYPH_RUN& gr,
+                    const DWRITE_GLYPH_RUN_DESCRIPTION* desc, IUnknown* effect) {
         COLORREF c = Ref(g_pal[PalOf(effect)]);
         if (brt3) return brt3->DrawGlyphRunWithColorSupport(x, y, mode, &gr, params, c, 0, nullptr);
         // colour fonts (Segoe UI Emoji): draw the COLR v0 layers one by one
@@ -302,8 +344,10 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
         FillRect(x, y + st->offset, x + st->width, y + st->offset + std::max(st->thickness, 1.f / scale), PalOf(effect));
         return S_OK;
     }
-    HRESULT STDMETHODCALLTYPE DrawInlineObject(void*, FLOAT, FLOAT, IDWriteInlineObject*, BOOL, BOOL, IUnknown*) override {
-        return S_OK;
+    // inline objects: the ellipsis trimming sign (outline items, recent documents) draws itself through this renderer
+    HRESULT STDMETHODCALLTYPE DrawInlineObject(void* ctx, FLOAT x, FLOAT y, IDWriteInlineObject* obj, BOOL sideways, BOOL rtl,
+                                               IUnknown* effect) override {
+        return obj ? obj->Draw(ctx, this, x, y, sideways, rtl, effect) : S_OK;
     }
 };
 }  // namespace

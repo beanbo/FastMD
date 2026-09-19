@@ -1,6 +1,6 @@
-// Win32 window, input, commands, context menu, settings, .md association, entry point.
+// Win32 window: input routing, keyboard shortcuts, commands, context menu, settings application, window placement,
+// automation queries, entry point.
 #include "app.h"
-#include <commdlg.h>
 #include <dwmapi.h>
 #include <imm.h>
 #include <shellapi.h>
@@ -10,28 +10,16 @@
 #define GET_Y(lp) ((int)(short)HIWORD(lp))
 
 static const wchar_t kClass[] = L"FastMD.Document";
-static const wchar_t kRegKey[] = L"Software\\FastMD";
 static const float kZoomSteps[] = {0.5f, 0.67f, 0.75f, 0.8f, 0.9f, 1.f, 1.1f, 1.25f, 1.5f, 1.75f, 2.f, 2.5f, 3.f};
-
-enum Cmd : UINT {
-    CMD_COPY = 100, CMD_SELECT_ALL, CMD_OPEN, CMD_RELOAD, CMD_EDIT, CMD_FOLDER, CMD_FIND,
-    CMD_THEME_SYSTEM, CMD_THEME_LIGHT, CMD_THEME_DARK, CMD_ZOOM_IN, CMD_ZOOM_OUT, CMD_ZOOM_RESET,
-    CMD_BACK, CMD_FORWARD, CMD_COPY_LINK, CMD_ASSOCIATE,
-};
+static UINT g_msgSettings = 0;      // registered "settings changed" message between FastMD windows
+static bool g_findHadFocus = false;  // the find box had the keyboard when the window was deactivated
 
 void Invalidate() {
     if (g.hwnd) InvalidateRect(g.hwnd, nullptr, FALSE);
 }
 
-// ------------------------------------------------------------------------------------------------ settings
-static DWORD RegGetDword(const wchar_t* name, DWORD def) {
-    DWORD v = def, sz = sizeof(v);
-    if (RegGetValueW(HKEY_CURRENT_USER, kRegKey, name, RRF_RT_REG_DWORD, nullptr, &v, &sz) != ERROR_SUCCESS) return def;
-    return v;
-}
-static void RegSetDword(const wchar_t* name, DWORD v) { RegSetKeyValueW(HKEY_CURRENT_USER, kRegKey, name, REG_DWORD, &v, sizeof(v)); }
-
-// Window placement of the last closed window (HKCU\Software\FastMD\Window, one binary value = one registry read).
+// ------------------------------------------------------------------------------------------------ window placement
+// Placement of the last closed window (HKCU\Software\FastMD\Window, one binary value = one registry read).
 struct SavedWindow {
     uint32_t version;     // 1
     RECT normal;          // restored (non-maximized) rect, workspace coordinates (GetWindowPlacement)
@@ -43,24 +31,13 @@ static SavedWindow g_saved{};
 static bool g_haveSaved = false;
 static bool g_sizeFromArgs = false;  // --size=WxH (tests): ignore the saved placement
 
-static void LoadSettings() {
-    g.cfg.theme = (ThemeMode)std::min<DWORD>(RegGetDword(L"Theme", TM_SYSTEM), TM_DARK);
-    g.cfg.zoom = std::clamp(RegGetDword(L"ZoomPercent", 100), 50ul, 300ul) / 100.f;
-    DWORD sz = sizeof(g_saved);
-    g_haveSaved = RegGetValueW(HKEY_CURRENT_USER, kRegKey, L"Window", RRF_RT_REG_BINARY, nullptr, &g_saved, &sz) ==
-                      ERROR_SUCCESS &&
-                  sz == sizeof(g_saved) && g_saved.version == 1 && g_saved.normal.right - g_saved.normal.left >= 200 &&
-                  g_saved.normal.bottom - g_saved.normal.top >= 150 && g_saved.dpi >= 48 && g_saved.dpi <= 960;
-    if (!g_haveSaved) {  // v0.1 stored only the client size (DIP)
-        g.cfg.sizeW = (int)std::clamp(RegGetDword(L"Width", 1000), 400ul, 4000ul);
-        g.cfg.sizeH = (int)std::clamp(RegGetDword(L"Height", 800), 300ul, 3000ul);
-    }
+static void LoadPlacement() {
+    g_haveSaved = RegReadBinary(L"Window", &g_saved, sizeof(g_saved)) && g_saved.version == 1 &&
+                  g_saved.normal.right - g_saved.normal.left >= 200 && g_saved.normal.bottom - g_saved.normal.top >= 150 &&
+                  g_saved.dpi >= 48 && g_saved.dpi <= 960;
 }
 
-static void SaveSettings() {
-    if (BenchActive()) return;
-    RegSetDword(L"Theme", g.cfg.theme);
-    RegSetDword(L"ZoomPercent", (DWORD)std::lround(g.cfg.zoom * 100));
+static void SavePlacement() {
     WINDOWPLACEMENT wp{sizeof(wp)};
     if (!g.hwnd || !GetWindowPlacement(g.hwnd, &wp)) return;
     SavedWindow s{};
@@ -79,7 +56,15 @@ static void SaveSettings() {
         s.clientW = rc.right;
         s.clientH = rc.bottom;
     }
-    RegSetKeyValueW(HKEY_CURRENT_USER, kRegKey, L"Window", REG_BINARY, &s, sizeof(s));
+    RegWriteBinary(L"Window", &s, sizeof(s));
+}
+
+static void SaveAll() {  // window closes / session ends
+    if (BenchActive()) return;
+    g.cfg.tocOpen = g.tocOpen;
+    SaveConfig(g.cfg, g.findQuery);
+    SavePlacement();
+    SaveReadingPosition();
 }
 
 // Where to create the window: the saved normal rect (workspace → screen coordinates), shifted diagonally while another
@@ -110,7 +95,7 @@ static bool RestoredRect(RECT* out) {
     return true;
 }
 
-// ------------------------------------------------------------------------------------------------ theme
+// ------------------------------------------------------------------------------------------------ theme / settings
 static bool WantDark() { return g.cfg.theme == TM_DARK || (g.cfg.theme == TM_SYSTEM && SystemPrefersDark()); }
 
 static void ApplyWindowChrome(HWND h) {
@@ -129,17 +114,24 @@ void ApplyTheme() {
         SetClassLongPtrW(g.hwnd, GCLP_HBRBACKGROUND,
                          (LONG_PTR)CreateSolidBrush(RGB(g_pal[P_BG] >> 16, (g_pal[P_BG] >> 8) & 255, g_pal[P_BG] & 255)));
     }
+    FindRelayoutInput();
+    SettingsRefresh();
     Invalidate();
 }
 
-// ------------------------------------------------------------------------------------------------ scrolling / zoom
-void ScrollTo(float y, bool animate) {
-    g.targetY = std::clamp(y, 0.f, MaxScroll());
-    if (!animate) { g.scrollY = g.targetY; g.animating = false; Invalidate(); }
-    else g.animating = true;
+static UiLang ResolveLanguage() {
+    return g.cfg.language == LANG_RU ? UL_RU : g.cfg.language == LANG_EN ? UL_EN : SystemUiLanguage();
 }
 
-static void Relayout() {
+static void TypographyOptions(Typography& t) {
+    t.fontSet = g.cfg.font;
+    t.textScale = g.cfg.fontSize / 16.f;
+    t.wrapCode = g.cfg.wrapCode;
+}
+
+// Only measure jobs follow the layout generation; image decoding and a big file's full parse keep running (they use
+// the document generation). While the full parse is pending the prefix is not measured: OnFullDoc measures the whole.
+void Relayout() {
     ClearLayoutCache();
     WithAnchor([] {
         UpdateColumns();
@@ -148,7 +140,72 @@ static void Relayout() {
     });
     g.gen++;
     g.jobsPending = 0;
-    StartMeasure();
+    if (!g.fullPending) StartMeasure();
+    Invalidate();
+}
+
+static void RebuildTypography() {
+    g.typo.Release();
+    TypographyOptions(g.typo);
+    g.typo.Init(g.dwf);
+    for (auto& kv : g.numLayouts) SafeRelease(kv.second);
+    g.numLayouts.clear();
+    Relayout();
+}
+
+static void BroadcastSettings() {
+    if (!g_msgSettings) g_msgSettings = RegisterWindowMessageW(L"FastMD.SettingsChanged");
+    for (HWND h = FindWindowExW(nullptr, nullptr, kClass, nullptr); h; h = FindWindowExW(nullptr, h, kClass, nullptr))
+        if (h != g.hwnd) PostMessageW(h, g_msgSettings, 0, 0);
+}
+
+void ApplySettings(uint32_t changed, bool persist) {
+    if (changed & SC_LANGUAGE) SetUiLanguage(ResolveLanguage());
+    if (changed & SC_THEME) ApplyTheme();
+    if (g.ready) {
+        if (changed & SC_TYPE) RebuildTypography();
+        else if (changed & SC_COLUMN) Relayout();
+    }
+    if (persist && !BenchActive()) {
+        SaveConfig(g.cfg, g.findQuery);
+        BroadcastSettings();
+    }
+    FindRelayoutInput();
+    SettingsRefresh();
+    Invalidate();
+}
+
+static void OnSettingsBroadcast() {  // another window changed the settings: take the shared ones (not zoom / outline)
+    Config c = g.cfg;
+    LoadConfig(c, nullptr);
+    uint32_t changed = 0;  // redo only what changed: a theme click elsewhere must not re-lay out this document
+    if (c.theme != g.cfg.theme) changed |= SC_THEME;
+    if (c.font != g.cfg.font || c.fontSize != g.cfg.fontSize || c.wrapCode != g.cfg.wrapCode) changed |= SC_TYPE;
+    if (c.column != g.cfg.column) changed |= SC_COLUMN;
+    if (c.language != g.cfg.language) changed |= SC_LANGUAGE;
+    if (c.smoothScroll != g.cfg.smoothScroll || c.editor != g.cfg.editor) changed |= SC_OTHER;
+    g.cfg.theme = c.theme;
+    g.cfg.column = c.column;
+    g.cfg.wrapCode = c.wrapCode;
+    g.cfg.font = c.font;
+    g.cfg.fontSize = c.fontSize;
+    g.cfg.smoothScroll = c.smoothScroll;
+    g.cfg.language = c.language;
+    g.cfg.editor = c.editor;
+    if (changed) ApplySettings(changed, false);
+}
+
+// ------------------------------------------------------------------------------------------------ scrolling / zoom / column
+void ScrollTo(float y, bool animate) {
+    g.targetY = std::clamp(y, 0.f, MaxScroll());
+    if (!animate || !g.cfg.smoothScroll) { g.scrollY = g.targetY; g.animating = false; Invalidate(); }
+    else g.animating = true;
+}
+
+void UserScrollTo(float y, bool animate) {
+    g.userMoved = true;
+    g.restoreBlock = -1;
+    ScrollTo(y, animate);
 }
 
 static void SetZoom(float z) {
@@ -157,6 +214,7 @@ static void SetZoom(float z) {
     g.cfg.zoom = z;
     g.canvas->SetScale(Scale());
     Relayout();
+    FindRelayoutInput();
     ShowToast(std::to_wstring((int)std::lround(z * 100)) + L" %", 900);
 }
 
@@ -166,166 +224,13 @@ static void ZoomStep(int dir) {
     else { for (int i = (int)std::size(kZoomSteps) - 1; i >= 0; i--) if (kZoomSteps[i] < z - 0.001f) { SetZoom(kZoomSteps[i]); return; } }
 }
 
-// ------------------------------------------------------------------------------------------------ clipboard / shell
-void CopyToClipboard(const std::wstring& text) {
-    if (text.empty() || !OpenClipboard(g.hwnd)) return;
-    EmptyClipboard();
-    size_t bytes = (text.size() + 1) * sizeof(wchar_t);
-    if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
-        memcpy(GlobalLock(h), text.c_str(), bytes);
-        GlobalUnlock(h);
-        if (!SetClipboardData(CF_UNICODETEXT, h)) GlobalFree(h);
-    }
-    CloseClipboard();
-}
-
-static std::wstring UrlDecode(const std::wstring& s) {
-    std::string bytes;
-    std::wstring out;
-    auto flush = [&] {
-        if (bytes.empty()) return;
-        int n = MultiByteToWideChar(CP_UTF8, 0, bytes.data(), (int)bytes.size(), nullptr, 0);
-        std::wstring w(n, L'\0');
-        MultiByteToWideChar(CP_UTF8, 0, bytes.data(), (int)bytes.size(), w.data(), n);
-        out += w;
-        bytes.clear();
-    };
-    for (size_t i = 0; i < s.size(); i++) {
-        if (s[i] == L'%' && i + 2 < s.size() && iswxdigit(s[i + 1]) && iswxdigit(s[i + 2])) {
-            bytes.push_back((char)wcstol(s.substr(i + 1, 2).c_str(), nullptr, 16));
-            i += 2;
-        } else {
-            flush();
-            out.push_back(s[i]);
-        }
-    }
-    flush();
-    return out;
-}
-
-static bool Confirm(const std::wstring& what) {
-    std::wstring msg = L"Документ хочет открыть:\n\n" + what + L"\n\nОткрыть?";
-    return MessageBoxW(g.hwnd, msg.c_str(), L"FastMD", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES;
-}
-
-static bool IsMarkdownPath(const std::wstring& p) {
-    for (const wchar_t* e : {L".md", L".markdown", L".mdown", L".mkd", L".mdx", L".txt"})
-        if (EndsWithI(p, e)) return true;
-    return false;
-}
-
-void OpenLink(int li) {
-    if (li < 0 || (size_t)li >= g.doc.links.size()) return;
-    std::wstring href = g.doc.links[li];
-    while (!href.empty() && iswspace(href.back())) href.pop_back();
-    if (href.empty()) return;
-    if (href[0] == L'#') {  // in-document anchor
-        int b = HeadingBlockBySlug(UrlDecode(href.substr(1)));
-        if (b >= 0) ScrollToBlock((uint32_t)b, true);
-        else ShowToast(L"Заголовок не найден: " + href);
-        return;
-    }
-    // scheme?
-    size_t colon = href.find(L':');
-    size_t slash = href.find_first_of(L"/\\");
-    if (colon != std::wstring::npos && colon > 1 && (slash == std::wstring::npos || colon < slash)) {
-        std::wstring scheme = ToLower(href.substr(0, colon));
-        if (scheme == L"http" || scheme == L"https" || scheme == L"mailto") {
-            ShellExecuteW(g.hwnd, L"open", href.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        } else if (Confirm(href)) {  // file:, custom protocols: only with explicit consent
-            ShellExecuteW(g.hwnd, L"open", href.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        }
-        return;
-    }
-    if (href.rfind(L"\\\\", 0) == 0 || href.rfind(L"//", 0) == 0) {  // UNC / protocol-relative
-        if (Confirm(href)) ShellExecuteW(g.hwnd, L"open", href.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        return;
-    }
-    // relative / absolute local path, optional #fragment
-    std::wstring frag;
-    size_t hash = href.find(L'#');
-    if (hash != std::wstring::npos) { frag = href.substr(hash + 1); href.resize(hash); }
-    size_t q = href.find(L'?');
-    if (q != std::wstring::npos) href.resize(q);
-    std::wstring p = UrlDecode(href);
-    for (auto& c : p) if (c == L'/') c = L'\\';
-    std::wstring full = (p.size() > 1 && p[1] == L':') ? p : DirOf(g.path) + p;
-    DWORD attr = GetFileAttributesW(full.c_str());
-    if (attr == INVALID_FILE_ATTRIBUTES) { ShowToast(L"Файл не найден: " + p); return; }
-    if (!(attr & FILE_ATTRIBUTE_DIRECTORY) && IsMarkdownPath(full)) {
-        OpenDocument(full, true, 0);
-        if (!frag.empty()) {
-            int b = HeadingBlockBySlug(UrlDecode(frag));
-            if (b >= 0) ScrollToBlock((uint32_t)b, false);
-        }
-        return;
-    }
-    if ((attr & FILE_ATTRIBUTE_DIRECTORY) || Confirm(full))
-        ShellExecuteW(g.hwnd, L"open", full.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-}
-
-static void OpenInEditor() {
-    if (g.path.empty()) return;
-    if ((INT_PTR)ShellExecuteW(g.hwnd, L"edit", g.path.c_str(), nullptr, nullptr, SW_SHOWNORMAL) > 32) return;
-    std::wstring args = L"\"" + g.path + L"\"";
-    ShellExecuteW(g.hwnd, L"open", L"notepad.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
-}
-
-static void ShowInFolder() {
-    if (g.path.empty()) return;
-    std::wstring args = L"/select,\"" + g.path + L"\"";
-    ShellExecuteW(g.hwnd, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
-}
-
-static void OpenDialog() {
-    wchar_t file[MAX_PATH * 4] = L"";
-    std::wstring dir = DirOf(g.path);
-    OPENFILENAMEW of{sizeof(of)};
-    of.hwndOwner = g.hwnd;
-    of.lpstrFilter = L"Markdown (*.md; *.markdown; *.mdx; *.txt)\0*.md;*.markdown;*.mdown;*.mkd;*.mdx;*.txt\0Все файлы\0*.*\0";
-    of.lpstrFile = file;
-    of.nMaxFile = (DWORD)std::size(file);
-    of.lpstrInitialDir = dir.empty() ? nullptr : dir.c_str();
-    of.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
-    if (GetOpenFileNameW(&of)) OpenDocument(file, true, 0);
-}
-
-// .md association for the current user (no admin). Windows does not let apps set the default programmatically: we
-// register a ProgId + capabilities and open Settings → Default apps → FastMD, where the user confirms.
-static bool RegisterAssociation(bool openSettings) {
-    wchar_t exe[MAX_PATH * 2];
-    GetModuleFileNameW(nullptr, exe, (DWORD)std::size(exe));
-    std::wstring cmd = L"\"" + std::wstring(exe) + L"\" \"%1\"";
-    std::wstring icon = L"\"" + std::wstring(exe) + L"\",0";
-    auto setStr = [](const wchar_t* key, const wchar_t* name, const std::wstring& v) {
-        return RegSetKeyValueW(HKEY_CURRENT_USER, key, name, REG_SZ, v.c_str(), (DWORD)((v.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS;
-    };
-    bool ok = setStr(L"Software\\Classes\\FastMD.Markdown", nullptr, L"Markdown-документ");
-    ok &= setStr(L"Software\\Classes\\FastMD.Markdown\\DefaultIcon", nullptr, icon);
-    ok &= setStr(L"Software\\Classes\\FastMD.Markdown\\shell\\open\\command", nullptr, cmd);
-    ok &= setStr(L"Software\\Classes\\Applications\\FastMD.exe\\shell\\open\\command", nullptr, cmd);
-    ok &= setStr(L"Software\\FastMD\\Capabilities", L"ApplicationName", L"FastMD");
-    ok &= setStr(L"Software\\FastMD\\Capabilities", L"ApplicationDescription", L"Мгновенный просмотр Markdown");
-    for (const wchar_t* ext : {L".md", L".markdown", L".mdown", L".mkd", L".mdx"}) {
-        ok &= setStr((std::wstring(L"Software\\Classes\\") + ext + L"\\OpenWithProgids").c_str(), L"FastMD.Markdown", L"");
-        ok &= setStr(L"Software\\FastMD\\Capabilities\\FileAssociations", ext, L"FastMD.Markdown");
-        ok &= setStr(L"Software\\Classes\\Applications\\FastMD.exe\\SupportedTypes", ext, L"");
-    }
-    ok &= setStr(L"Software\\RegisteredApplications", L"FastMD", L"Software\\FastMD\\Capabilities");
-    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
-    if (openSettings)
-        ShellExecuteW(nullptr, L"open", L"ms-settings:defaultapps?registeredAppUser=FastMD", nullptr, nullptr, SW_SHOWNORMAL);
-    return ok;
-}
-
-static void UnregisterAssociation() {
-    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\FastMD.Markdown");
-    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\Applications\\FastMD.exe");
-    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\FastMD\\Capabilities");
-    RegDeleteKeyValueW(HKEY_CURRENT_USER, L"Software\\RegisteredApplications", L"FastMD");
-    for (const wchar_t* ext : {L".md", L".markdown", L".mdown", L".mkd", L".mdx"})
-        RegDeleteKeyValueW(HKEY_CURRENT_USER, (std::wstring(L"Software\\Classes\\") + ext + L"\\OpenWithProgids").c_str(), L"FastMD.Markdown");
-    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+static void SetColumn(int preset, bool toast) {
+    preset = std::clamp(preset, (int)COL_NARROW, (int)COL_FULL);
+    static const StrId names[] = {S_COL_NARROW, S_COL_NORMAL, S_COL_WIDE, S_COL_FULL};
+    if (toast) ShowToast(std::wstring(Tr(S_COLUMN_TOAST)) + Tr(names[preset]), 1000);
+    if (preset == g.cfg.column) return;
+    g.cfg.column = (uint8_t)preset;
+    ApplySettings(SC_COLUMN, true);
 }
 
 // ------------------------------------------------------------------------------------------------ commands
@@ -333,77 +238,131 @@ static void CopySelection() {
     std::wstring t = SelectionText();
     if (t.empty()) return;
     CopyToClipboard(t);
-    ShowToast(L"Скопировано", 900);
+    ShowToast(Tr(S_COPIED), 900);
 }
 
-static void OpenFind() {
-    g.findOpen = true;
-    if (HasSelection()) {  // seed with the selected text (single line)
-        std::wstring s = SelectionText();
-        if (!s.empty() && s.size() < 200 && s.find(L'\n') == std::wstring::npos) g.findQuery = s;
-    }
-    FindUpdate(false);
-    Invalidate();
+static int FirstVisibleImage() {  // automation: the image commands without a context menu target
+    size_t n = g.doc.blocks.size();
+    for (uint32_t i = FirstVisible(g.scrollY); i < n && g.Y[i] < g.scrollY + ViewH(); i++)
+        if (g.doc.blocks[i].kind == BK_IMAGE) return (int)i;
+    return -1;
 }
 
-static void CloseFind() {
-    g.findOpen = false;
-    Invalidate();
-}
-
-static void Command(UINT id) {
+void Command(UINT id) {
+    int li = g.ctxLink >= 0 ? g.ctxLink : g.focusLink;
     switch (id) {
     case CMD_COPY: CopySelection(); break;
     case CMD_SELECT_ALL: SelectAll(); Invalidate(); break;
     case CMD_OPEN: OpenDialog(); break;
-    case CMD_RELOAD: ReloadDocument(); ShowToast(L"Обновлено", 700); break;
+    case CMD_RELOAD: ReloadDocument(); ShowToast(Tr(S_RELOADED), 700); break;
     case CMD_EDIT: OpenInEditor(); break;
     case CMD_FOLDER: ShowInFolder(); break;
-    case CMD_FIND: OpenFind(); break;
-    case CMD_THEME_SYSTEM: g.cfg.theme = TM_SYSTEM; ApplyTheme(); break;
-    case CMD_THEME_LIGHT: g.cfg.theme = TM_LIGHT; ApplyTheme(); break;
-    case CMD_THEME_DARK: g.cfg.theme = TM_DARK; ApplyTheme(); break;
+    case CMD_FIND: FindOpen(); break;
+    case CMD_THEME_SYSTEM: case CMD_THEME_LIGHT: case CMD_THEME_DARK:
+        g.cfg.theme = (ThemeMode)(id - CMD_THEME_SYSTEM);
+        ApplySettings(SC_THEME, true);
+        break;
     case CMD_ZOOM_IN: ZoomStep(1); break;
     case CMD_ZOOM_OUT: ZoomStep(-1); break;
     case CMD_ZOOM_RESET: SetZoom(1.f); break;
     case CMD_BACK: NavigateBack(); break;
     case CMD_FORWARD: NavigateForward(); break;
-    case CMD_ASSOCIATE:
-        if (RegisterAssociation(true)) ShowToast(L"FastMD зарегистрирован. Выберите его для .md в «Приложения по умолчанию»", 5000);
-        else ShowToast(L"Не удалось записать ассоциацию в реестр", 3000);
+    case CMD_LINK_OPEN: OpenLink(li); break;
+    case CMD_LINK_COPY:
+        if (li >= 0 && (size_t)li < g.doc.links.size()) {
+            CopyToClipboard(g.doc.links[li]);
+            ShowToast(Tr(S_LINK_COPIED), 900);
+        }
         break;
+    case CMD_IMG_COPY: {
+        int bi = g.ctxImage >= 0 ? g.ctxImage : FirstVisibleImage();
+        if (bi >= 0 && CopyImageToClipboard((uint32_t)bi)) ShowToast(Tr(S_IMG_COPIED), 900);
+        break;
+    }
+    case CMD_IMG_OPEN: {
+        int bi = g.ctxImage >= 0 ? g.ctxImage : FirstVisibleImage();
+        if (bi >= 0) OpenImageFile((uint32_t)bi);
+        break;
+    }
+    case CMD_ASSOCIATE:
+        if (RegisterAssociation(true)) ShowToast(Tr(S_ASSOC_OK), 5000);
+        else ShowToast(Tr(S_ASSOC_FAIL), 3000);
+        break;
+    case CMD_TOC: if (TocAvailable()) TocSetOpen(!g.tocOpen); break;
+    case CMD_COL_NARROW: case CMD_COL_NORMAL: case CMD_COL_WIDE: case CMD_COL_FULL: SetColumn(id - CMD_COL_NARROW, false); break;
+    case CMD_COL_NARROWER: SetColumn(g.cfg.column - 1, true); break;
+    case CMD_COL_WIDER: SetColumn(g.cfg.column + 1, true); break;
+    case CMD_WRAP:
+        g.cfg.wrapCode = !g.cfg.wrapCode;
+        ApplySettings(SC_TYPE, true);
+        ShowToast(Tr(g.cfg.wrapCode ? S_WRAP_ON : S_WRAP_OFF), 1000);
+        break;
+    case CMD_SETTINGS: SettingsOpen(); break;
+    case CMD_FIND_CASE: if (!g.findOpen) FindOpen(); FindToggleCase(); break;
+    case CMD_FIND_WORD: if (!g.findOpen) FindOpen(); FindToggleWord(); break;
+    case CMD_FIND_NEXT: FindStep(1); break;
+    case CMD_FIND_PREV: FindStep(-1); break;
+    case CMD_FIND_CLOSE: FindClose(); break;
+    case CMD_LINK_NEXT: FocusLinkStep(1); break;
+    case CMD_LINK_PREV: FocusLinkStep(-1); break;
     }
 }
 
-static void ContextMenu(int sx, int sy) {
-    HMENU m = CreatePopupMenu(), theme = CreatePopupMenu(), zoom = CreatePopupMenu();
+static void ContextMenu(int sx, int sy, bool keyboard) {
+    POINT cp{sx, sy};
+    ScreenToClient(g.hwnd, &cp);
+    float x = cp.x / Scale(), y = cp.y / Scale();
+    g.ctxLink = keyboard ? g.focusLink : LinkAt(x, y);
+    g.ctxImage = keyboard ? -1 : ImageAt(x, y);
+    HMENU m = CreatePopupMenu(), theme = CreatePopupMenu(), zoom = CreatePopupMenu(), column = CreatePopupMenu();
     UINT hasDoc = g.path.empty() ? MF_GRAYED : 0;
-    AppendMenuW(m, MF_STRING | (HasSelection() ? 0 : MF_GRAYED), CMD_COPY, L"Копировать\tCtrl+C");
-    AppendMenuW(m, MF_STRING | hasDoc, CMD_SELECT_ALL, L"Выделить всё\tCtrl+A");
-    AppendMenuW(m, MF_STRING | hasDoc, CMD_FIND, L"Найти…\tCtrl+F");
+    if (g.ctxLink >= 0) {
+        AppendMenuW(m, MF_STRING, CMD_LINK_OPEN, Tr(S_LINK_OPEN));
+        AppendMenuW(m, MF_STRING, CMD_LINK_COPY, Tr(S_LINK_COPY));
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    }
+    if (g.ctxImage >= 0) {
+        const Image& im0 = g.doc.images[g.doc.blocks[g.ctxImage].aux];
+        const Image& im = im0.canon >= 0 ? g.doc.images[im0.canon] : im0;
+        AppendMenuW(m, MF_STRING | (im.state.load() == 2 ? 0 : MF_GRAYED), CMD_IMG_COPY, Tr(S_IMG_COPY));
+        AppendMenuW(m, MF_STRING | (im0.path.empty() ? MF_GRAYED : 0), CMD_IMG_OPEN, Tr(S_IMG_OPEN));
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    }
+    AppendMenuW(m, MF_STRING | (HasSelection() ? 0 : MF_GRAYED), CMD_COPY, Tr(S_MENU_COPY));
+    AppendMenuW(m, MF_STRING | hasDoc, CMD_SELECT_ALL, Tr(S_MENU_SELECT_ALL));
+    AppendMenuW(m, MF_STRING | hasDoc, CMD_FIND, Tr(S_MENU_FIND));
+    AppendMenuW(m, MF_STRING | (TocAvailable() ? 0 : MF_GRAYED) | (g.tocOpen ? MF_CHECKED : 0), CMD_TOC, Tr(S_MENU_TOC));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING | (g.back.empty() ? MF_GRAYED : 0), CMD_BACK, L"Назад\tAlt+←");
-    AppendMenuW(m, MF_STRING | (g.fwd.empty() ? MF_GRAYED : 0), CMD_FORWARD, L"Вперёд\tAlt+→");
+    AppendMenuW(m, MF_STRING | (g.back.empty() ? MF_GRAYED : 0), CMD_BACK, Tr(S_MENU_BACK));
+    AppendMenuW(m, MF_STRING | (g.fwd.empty() ? MF_GRAYED : 0), CMD_FORWARD, Tr(S_MENU_FORWARD));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, CMD_OPEN, L"Открыть файл…\tCtrl+O");
-    AppendMenuW(m, MF_STRING | hasDoc, CMD_RELOAD, L"Обновить\tF5");
-    AppendMenuW(m, MF_STRING | hasDoc, CMD_EDIT, L"Открыть в редакторе\tCtrl+E");
-    AppendMenuW(m, MF_STRING | hasDoc, CMD_FOLDER, L"Показать в папке");
+    AppendMenuW(m, MF_STRING, CMD_OPEN, Tr(S_MENU_OPEN));
+    AppendMenuW(m, MF_STRING | hasDoc, CMD_RELOAD, Tr(S_MENU_RELOAD));
+    AppendMenuW(m, MF_STRING | hasDoc, CMD_EDIT, Tr(S_MENU_EDIT));
+    AppendMenuW(m, MF_STRING | hasDoc, CMD_FOLDER, Tr(S_MENU_FOLDER));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(theme, MF_STRING | (g.cfg.theme == TM_SYSTEM ? MF_CHECKED : 0), CMD_THEME_SYSTEM, L"Как в системе");
-    AppendMenuW(theme, MF_STRING | (g.cfg.theme == TM_LIGHT ? MF_CHECKED : 0), CMD_THEME_LIGHT, L"Светлая");
-    AppendMenuW(theme, MF_STRING | (g.cfg.theme == TM_DARK ? MF_CHECKED : 0), CMD_THEME_DARK, L"Тёмная");
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)theme, L"Тема");
-    AppendMenuW(zoom, MF_STRING, CMD_ZOOM_IN, L"Увеличить\tCtrl++");
-    AppendMenuW(zoom, MF_STRING, CMD_ZOOM_OUT, L"Уменьшить\tCtrl+−");
-    AppendMenuW(zoom, MF_STRING, CMD_ZOOM_RESET, L"Сбросить (100 %)\tCtrl+0");
-    std::wstring zl = L"Масштаб: " + std::to_wstring((int)std::lround(g.cfg.zoom * 100)) + L" %";
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)zoom, zl.c_str());
+    AppendMenuW(theme, MF_STRING | (g.cfg.theme == TM_SYSTEM ? MF_CHECKED : 0), CMD_THEME_SYSTEM, Tr(S_THEME_SYSTEM));
+    AppendMenuW(theme, MF_STRING | (g.cfg.theme == TM_LIGHT ? MF_CHECKED : 0), CMD_THEME_LIGHT, Tr(S_THEME_LIGHT));
+    AppendMenuW(theme, MF_STRING | (g.cfg.theme == TM_DARK ? MF_CHECKED : 0), CMD_THEME_DARK, Tr(S_THEME_DARK));
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)theme, Tr(S_MENU_THEME));
+    AppendMenuW(zoom, MF_STRING, CMD_ZOOM_IN, Tr(S_ZOOM_IN));
+    AppendMenuW(zoom, MF_STRING, CMD_ZOOM_OUT, Tr(S_ZOOM_OUT));
+    AppendMenuW(zoom, MF_STRING, CMD_ZOOM_RESET, Tr(S_ZOOM_RESET));
+    wchar_t zl[64];
+    swprintf_s(zl, Tr(S_MENU_ZOOM_FMT), (int)std::lround(g.cfg.zoom * 100));
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)zoom, zl);
+    static const StrId cols[] = {S_COL_NARROW, S_COL_NORMAL, S_COL_WIDE, S_COL_FULL};
+    for (int k = 0; k < 4; k++)
+        AppendMenuW(column, MF_STRING | (g.cfg.column == k ? MF_CHECKED : 0), CMD_COL_NARROW + k, Tr(cols[k]));
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)column, Tr(S_MENU_COLUMN));
+    AppendMenuW(m, MF_STRING | (g.cfg.wrapCode ? MF_CHECKED : 0), CMD_WRAP, Tr(S_MENU_WRAP));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, CMD_ASSOCIATE, L"Открывать .md в FastMD…");
+    AppendMenuW(m, MF_STRING, CMD_SETTINGS, Tr(S_MENU_SETTINGS));
+    AppendMenuW(m, MF_STRING, CMD_ASSOCIATE, Tr(S_MENU_ASSOCIATE));
     UINT id = (UINT)TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, sx, sy, 0, g.hwnd, nullptr);
     DestroyMenu(m);  // destroys the submenus too
     if (id) Command(id);
+    g.ctxLink = g.ctxImage = -1;
 }
 
 // ------------------------------------------------------------------------------------------------ paint
@@ -472,9 +431,12 @@ static void ScrollTest() {  // steady-state cost of a scrolling frame, logged to
 
 static void AfterFirstFrame() {
     g.firstFrame = false;
+    if (TocAvailable()) Invalidate();  // the outline button / close icon were left out of the first frame
     StartBackgroundWork();
     DragAcceptFiles(g.hwnd, TRUE);
     if (!g.path.empty()) SHAddToRecentDocs(SHARD_PATHW, g.path.c_str());
+    if (!g_msgSettings) g_msgSettings = RegisterWindowMessageW(L"FastMD.SettingsChanged");
+    LoadPositionsAsync();  // reading position of this document; marks it as recently opened
     DebugFlush();
     if (g.cfg.scrollTest) ScrollTest();
 }
@@ -505,8 +467,8 @@ static void Frame() {  // animation frame outside WM_PAINT, paced by DWM
     DwmFlush();
 }
 
-// ------------------------------------------------------------------------------------------------ input
-static bool InScrollbar(float x) { return g.docH > ViewH() + 1 && x >= ViewW() - 14; }
+// ------------------------------------------------------------------------------------------------ mouse
+static bool InScrollbar(float x) { return !g.path.empty() && g.docH > ViewH() + 1 && x >= ViewW() - 14; }
 static float ThumbTop(float* th) {
     float trackH = ViewH() - 4;
     *th = std::max(32.f, trackH * ViewH() / g.docH);
@@ -521,38 +483,81 @@ static void UpdateSelectionTo(float x, float y) {
     }
 }
 
-static void OnMouseMove(int mx, int my, WPARAM keys) {
+static const wchar_t* FindTip(int part) {
+    switch (part) {
+    case FP_CASE: return Tr(S_FIND_CASE_TIP);
+    case FP_WORD: return Tr(S_FIND_WORD_TIP);
+    case FP_PREV: return Tr(S_FIND_PREV_TIP);
+    case FP_NEXT: return Tr(S_FIND_NEXT_TIP);
+    case FP_CLOSE: return Tr(S_FIND_CLOSE_TIP);
+    default: return L"";
+    }
+}
+
+static void OnMouseMove(int mx, int my) {
     float x = mx / Scale(), y = my / Scale();
     if (g.draggingThumb) {
         float th;
         ThumbTop(&th);
         float trackH = ViewH() - 4 - th;
-        ScrollTo(trackH > 0 ? (y - g.dragGrab - 2) / trackH * MaxScroll() : 0, false);
+        UserScrollTo(trackH > 0 ? (y - g.dragGrab - 2) / trackH * MaxScroll() : 0, false);
+        return;
+    }
+    if (g.dragHBlock >= 0) {
+        float l, t, r, b, tl, tr, vx, vw, cw;
+        if (HScrollBarRect(g.dragHBlock, &l, &t, &r, &b, &tl, &tr) && HScrollInfo(g.dragHBlock, &vx, &vw, &cw)) {
+            float track = (r - l) - (tr - tl);
+            HScrollSet(g.dragHBlock, track > 0 ? (x - g.dragHGrab - l) / track * (cw - vw) : 0.f);
+        }
         return;
     }
     if (g.selecting) {
-        if (y < 0 || y > ViewH()) SetTimer(g.hwnd, TIMER_AUTOSCROLL, 16, nullptr);
+        bool outside = y < 0 || y > ViewH();
+        float vx, vw, cw;
+        int hb = (int)BlockOfPos(g.selFocus);
+        if (!outside && HScrollInfo(hb, &vx, &vw, &cw)) outside = x < vx || x > vx + vw;
+        if (outside) SetTimer(g.hwnd, TIMER_AUTOSCROLL, 16, nullptr);
         else KillTimer(g.hwnd, TIMER_AUTOSCROLL);
         UpdateSelectionTo(x, std::clamp(y, 0.f, ViewH()));
         return;
     }
-    (void)keys;
-    bool hot = InScrollbar(x);
-    if (hot != g.hotScroll) { g.hotScroll = hot; Invalidate(); }
     TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, g.hwnd, 0};
     TrackMouseEvent(&tme);
-    int link = hot ? -1 : LinkAt(x, y);
-    bool onBtn = false;
-    int code = hot ? -1 : CodeBlockAt(x, y, &onBtn);
-    if (link != g.hoverLink || code != g.hoverCode || onBtn != g.hoverCopyBtn) {
+    // overlays first: find bar, outline panel, outline button
+    int fpart = FindPartAt(x, y);
+    int tocItem = -1;
+    bool inToc = fpart == FP_NONE && TocHit(x, y, &tocItem);
+    bool tocBtn = fpart == FP_NONE && !inToc && TocButtonHit(x, y);
+    bool overlay = fpart != FP_NONE || inToc || tocBtn;
+    int home = g.path.empty() ? HomeItemAt(x, y) : -1;
+    bool hot = !overlay && InScrollbar(x);
+    bool onHBar = false, onBtn = false;
+    int hblock = (overlay || hot) ? -1 : HScrollBlockAt(x, y, &onHBar);
+    int link = (overlay || hot) ? -1 : LinkAt(x, y);
+    int code = (overlay || hot) ? -1 : CodeBlockAt(x, y, &onBtn);
+    std::wstring tip = tocBtn ? std::wstring(Tr(S_TOC_BUTTON_TIP)) : std::wstring(FindTip(fpart));
+    if (fpart != g.findHot || tocItem != g.tocHover || tocBtn != g.tocBtnHot || hot != g.hotScroll || link != g.hoverLink ||
+        code != g.hoverCode || onBtn != g.hoverCopyBtn || hblock != g.hoverHBlock || onHBar != g.hotHBar ||
+        home != g.recentHover || tip != g.tip) {
+        g.findHot = fpart;
+        g.tocHover = tocItem;
+        g.tocBtnHot = tocBtn;
+        g.hotScroll = hot;
         g.hoverLink = link;
         g.hoverCode = code;
         g.hoverCopyBtn = onBtn;
+        g.hoverHBlock = hblock;
+        g.hotHBar = onHBar;
+        g.recentHover = home;
+        g.tip = tip;
         Invalidate();
     }
     LPCWSTR cur = IDC_ARROW;
-    if (link >= 0 || onBtn) cur = IDC_HAND;
-    else if (!hot && !g.path.empty()) {
+    if (link >= 0 || onBtn || tocBtn || tocItem >= 0 || tocItem == -2 || home >= 0 ||
+        (fpart != FP_NONE && fpart != FP_BAR && fpart != FP_FIELD && fpart != FP_COUNT))
+        cur = IDC_HAND;
+    else if (fpart == FP_FIELD) cur = IDC_IBEAM;
+    else if (!overlay && !hot && !onHBar && !g.path.empty()) {
         uint32_t pos;
         bool inside = false;
         if (HitTestDoc(x, y, &pos, &inside) && inside) cur = IDC_IBEAM;
@@ -562,14 +567,38 @@ static void OnMouseMove(int mx, int my, WPARAM keys) {
 
 static void OnLButtonDown(int mx, int my, WPARAM keys) {
     float x = mx / Scale(), y = my / Scale();
-    SetCapture(g.hwnd);
     g.downX = mx;
     g.downY = my;
-    if (g.path.empty()) return;
+    int fpart = FindPartAt(x, y);
+    if (fpart != FP_NONE) { FindClick(fpart); return; }
+    int item;
+    if (TocHit(x, y, &item)) { TocClick(item); return; }
+    if (TocButtonHit(x, y)) { TocSetOpen(true); return; }
+    if (TocOverlayOpen()) { TocSetOpen(false); return; }  // a click beside the drawer closes it
+    if (g.path.empty()) {
+        int k = HomeItemAt(x, y);
+        if (k >= 0) HomeOpen(k);
+        return;
+    }
+    SetCapture(g.hwnd);
+    if (FindInputFocused()) SetFocus(g.hwnd);  // the document takes the keyboard back (Ctrl+C copies its selection)
+    if (g.focusLink >= 0) { g.focusLink = -1; Invalidate(); }
     if (InScrollbar(x)) {
         float th, tt = ThumbTop(&th);
         if (y >= tt && y < tt + th) { g.draggingThumb = true; g.dragGrab = y - tt; }
-        else ScrollTo(g.targetY + (y < tt ? -1 : 1) * (ViewH() - 48), true);
+        else UserScrollTo(g.targetY + (y < tt ? -1 : 1) * (ViewH() - 48), true);
+        g.userMoved = true;
+        Invalidate();
+        return;
+    }
+    bool onHBar = false;
+    int hb = HScrollBlockAt(x, y, &onHBar);
+    if (hb >= 0 && onHBar) {
+        float l, t, r, b, tl, tr, vx, vw, cw;
+        if (HScrollBarRect(hb, &l, &t, &r, &b, &tl, &tr) && HScrollInfo(hb, &vx, &vw, &cw)) {
+            if (x >= tl && x <= tr) { g.dragHBlock = hb; g.dragHGrab = x - tl; }
+            else HScrollSet(hb, HScrollOf(hb) + (x < tl ? -1.f : 1.f) * vw * 0.8f);
+        }
         Invalidate();
         return;
     }
@@ -577,13 +606,13 @@ static void OnLButtonDown(int mx, int my, WPARAM keys) {
     int code = CodeBlockAt(x, y, &onBtn);
     if (onBtn && code >= 0) {
         CopyToClipboard(BlockPlainText((uint32_t)code));
-        ShowToast(L"Код скопирован", 900);
+        ShowToast(Tr(S_CODE_COPIED), 900);
         return;
     }
     g.downOnLink = LinkAt(x, y) >= 0;
     DWORD now = GetMessageTime();
     bool isNear = std::abs(mx - g.lastClickPt.x) <= GetSystemMetrics(SM_CXDOUBLECLK) &&
-                std::abs(my - g.lastClickPt.y) <= GetSystemMetrics(SM_CYDOUBLECLK);
+                  std::abs(my - g.lastClickPt.y) <= GetSystemMetrics(SM_CYDOUBLECLK);
     g.clickCount = (isNear && now - g.lastClickTime <= GetDoubleClickTime()) ? g.clickCount % 3 + 1 : 1;
     g.lastClickTime = now;
     g.lastClickPt = POINT{mx, my};
@@ -604,6 +633,7 @@ static void OnLButtonUp(int mx, int my) {
     ReleaseCapture();
     KillTimer(g.hwnd, TIMER_AUTOSCROLL);
     if (g.draggingThumb) { g.draggingThumb = false; Invalidate(); return; }
+    if (g.dragHBlock >= 0) { g.dragHBlock = -1; Invalidate(); return; }
     g.selecting = false;
     int dx = mx - g.downX, dy = my - g.downY;
     if (g.downOnLink && dx * dx + dy * dy < 16 && g.clickCount == 1) {
@@ -618,82 +648,164 @@ static void OnLButtonUp(int mx, int my) {
     Invalidate();
 }
 
-static bool OnFindKey(WPARAM vk, bool ctrl, bool shift) {
-    switch (vk) {
-    case VK_ESCAPE: CloseFind(); return true;
-    case VK_RETURN: case VK_F3: FindStep(shift ? -1 : 1); return true;
-    case VK_BACK:
-        if (!g.findQuery.empty()) {
-            if (ctrl) {
-                size_t k = g.findQuery.size();
-                while (k > 0 && iswspace(g.findQuery[k - 1])) k--;
-                while (k > 0 && !iswspace(g.findQuery[k - 1])) k--;
-                g.findQuery.resize(k);
-            } else g.findQuery.pop_back();
-            FindUpdate(false);
-        }
-        return true;
-    case 'V':
-        if (ctrl && OpenClipboard(g.hwnd)) {
-            if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
-                if (auto* s = (const wchar_t*)GlobalLock(h)) {
-                    std::wstring t = s;
-                    GlobalUnlock(h);
-                    for (auto& c : t) if (c == L'\r' || c == L'\n' || c == L'\t') c = L' ';
-                    g.findQuery += t.substr(0, 256);
-                }
-            }
-            CloseClipboard();
-            FindUpdate(false);
-            return true;
-        }
-        return false;
-    }
-    return false;
+static float WheelStep() {
+    UINT lines = 3;
+    SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+    return lines == WHEEL_PAGESCROLL ? ViewH() - 56 : 38.f * std::max(1u, lines);
 }
 
-static bool OnKeyDown(WPARAM vk) {
-    bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0;
-    if (g.findOpen && OnFindKey(vk, ctrl, shift)) return true;
-    if (g.findOpen && vk == VK_SPACE) return true;  // typed into the find box (WM_CHAR), must not page down
+static void OnWheel(int delta, WORD keys, int sx, int sy, bool horizontal) {
+    POINT p{sx, sy};
+    ScreenToClient(g.hwnd, &p);
+    float x = p.x / Scale(), y = p.y / Scale(), notches = (float)delta / WHEEL_DELTA;
+    if (!horizontal && (keys & MK_CONTROL)) { ZoomStep(delta > 0 ? 1 : -1); return; }
+    int item;
+    if (!horizontal && TocHit(x, y, &item)) { TocWheel(-notches * 84.f); return; }
+    if (horizontal || (keys & MK_SHIFT)) {
+        bool bar;
+        int hb = HScrollBlockAt(x, y, &bar);
+        if (hb >= 0) {
+            HScrollSet((uint32_t)hb, HScrollOf((uint32_t)hb) + (horizontal ? notches : -notches) * WheelStep());
+            return;
+        }
+        if (horizontal) return;
+    }
+    if (g.path.empty()) return;
+    UserScrollTo(g.targetY - notches * WheelStep(), true);
+}
+
+// ------------------------------------------------------------------------------------------------ keyboard
+bool KeyCommand(WPARAM vk, bool ctrl, bool shift, bool alt) {
     float vh = ViewH();
+    if (ctrl && alt) {
+        if (vk == VK_LEFT) { Command(CMD_COL_NARROWER); return true; }
+        if (vk == VK_RIGHT) { Command(CMD_COL_WIDER); return true; }
+        return false;
+    }
+    if (alt) {
+        if (vk == VK_LEFT) { NavigateBack(); return true; }
+        if (vk == VK_RIGHT) { NavigateForward(); return true; }
+        return false;
+    }
     if (ctrl) {
         switch (vk) {
         case 'C': case VK_INSERT: CopySelection(); return true;
         case 'A': if (!g.findOpen) { SelectAll(); Invalidate(); } return true;
-        case 'F': OpenFind(); return true;
-        case 'O': OpenDialog(); return true;
+        case 'F': FindOpen(); return true;
+        case 'O': Command(shift ? CMD_TOC : CMD_OPEN); return true;
         case 'E': OpenInEditor(); return true;
         case 'R': Command(CMD_RELOAD); return true;
         case 'W': PostMessageW(g.hwnd, WM_CLOSE, 0, 0); return true;
         case VK_OEM_PLUS: case VK_ADD: ZoomStep(1); return true;
         case VK_OEM_MINUS: case VK_SUBTRACT: ZoomStep(-1); return true;
         case '0': case VK_NUMPAD0: SetZoom(1.f); return true;
-        case VK_HOME: ScrollTo(0, true); return true;
-        case VK_END: ScrollTo(MaxScroll(), true); return true;
+        case VK_OEM_COMMA: SettingsOpen(); return true;
+        case VK_HOME: UserScrollTo(0, true); return true;
+        case VK_END: UserScrollTo(MaxScroll(), true); return true;
         }
         return false;
     }
+    if (g.path.empty()) return vk == VK_F5;
     switch (vk) {
-    case VK_DOWN: ScrollTo(g.targetY + 56, true); return true;
-    case VK_UP: ScrollTo(g.targetY - 56, true); return true;
-    case VK_NEXT: ScrollTo(g.targetY + vh - 56, true); return true;
-    case VK_SPACE: ScrollTo(g.targetY + (shift ? -1 : 1) * (vh - 56), true); return true;
-    case VK_PRIOR: ScrollTo(g.targetY - vh + 56, true); return true;
-    case VK_HOME: ScrollTo(0, true); return true;
-    case VK_END: ScrollTo(MaxScroll(), true); return true;
-    case VK_F3: if (!g.findQuery.empty()) { g.findOpen = true; FindStep(shift ? -1 : 1); } else OpenFind(); return true;
-    case VK_F5: Command(CMD_RELOAD); return true;
-    case VK_BACK: NavigateBack(); return true;
-    case VK_ESCAPE:
-        if (HasSelection()) { g.selAnchor = g.selFocus; Invalidate(); }
-        else PostMessageW(g.hwnd, WM_CLOSE, 0, 0);
+    case VK_DOWN: UserScrollTo(g.targetY + 56, true); return true;
+    case VK_UP: UserScrollTo(g.targetY - 56, true); return true;
+    case VK_NEXT: UserScrollTo(g.targetY + vh - 56, true); return true;
+    case VK_PRIOR: UserScrollTo(g.targetY - vh + 56, true); return true;
+    case VK_SPACE: UserScrollTo(g.targetY + (shift ? -1 : 1) * (vh - 56), true); return true;
+    case VK_HOME: UserScrollTo(0, true); return true;
+    case VK_END: UserScrollTo(MaxScroll(), true); return true;
+    case VK_F3:
+        if (!g.findOpen) FindOpen();
+        else FindStep(shift ? -1 : 1);
         return true;
+    case VK_F5: Command(CMD_RELOAD); return true;
     }
     return false;
 }
 
+static bool OnKeyDown(WPARAM vk) {
+    bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0, alt = GetKeyState(VK_MENU) < 0;
+    if (g.path.empty() && !ctrl && !alt && HomeKey(vk)) return true;
+    if (!ctrl && !alt) {
+        switch (vk) {
+        case VK_ESCAPE:
+            if (g.findOpen) FindClose();
+            else if (TocOverlayOpen()) TocSetOpen(false);
+            else if (g.focusLink >= 0) { g.focusLink = -1; Invalidate(); }
+            else if (HasSelection()) { g.selAnchor = g.selFocus; Invalidate(); }
+            else PostMessageW(g.hwnd, WM_CLOSE, 0, 0);
+            return true;
+        case VK_TAB:
+            if (!g.path.empty()) FocusLinkStep(shift ? -1 : 1);
+            return true;
+        case VK_RETURN:
+            if (g.focusLink >= 0) { OpenLink(g.focusLink); return true; }
+            if (g.findOpen) { FindStep(shift ? -1 : 1); return true; }
+            return false;
+        case VK_BACK:
+            if (!g.findOpen) NavigateBack();  // with the find bar open, Backspace edits the query (WM_CHAR)
+            return true;
+        case VK_SPACE:
+            if (g.findOpen) return true;  // typed into the find box (WM_CHAR), must not page down
+            break;
+        }
+    }
+    return KeyCommand(vk, ctrl, shift, alt);
+}
+
+// ------------------------------------------------------------------------------------------------ automation queries
+static LRESULT Query(WPARAM q, LPARAM lp) {
+    float s = Scale();
+    size_t n = g.doc.blocks.size();
+    switch (q) {
+    case Q_SCROLLY: return std::lround(g.scrollY);
+    case Q_TARGETY: return std::lround(g.targetY);
+    case Q_DOCH: return std::lround(g.docH);
+    case Q_TOC_OPEN: return g.tocOpen;
+    case Q_TOC_DOCKED: return TocDocked();
+    case Q_TOC_COUNT: TocSync(); return (LRESULT)g.toc.size();
+    case Q_TOC_CURRENT: return TocCurrent();
+    case Q_TOC_ITEM_Y: return std::lround(TocItemY((int)lp) * s);
+    case Q_HSCROLL_BLOCK:
+        for (uint32_t i = 0; i < n; i++) {
+            float vx, vw, cw;
+            if (HScrollInfo(i, &vx, &vw, &cw)) return i;
+        }
+        return -1;
+    case Q_HSCROLL_X: return (lp >= 0 && (size_t)lp < n) ? std::lround(HScrollOf((uint32_t)lp)) : -1;
+    case Q_FOCUS_LINK: return g.focusLink;
+    case Q_MATCHES: return (LRESULT)g.matches.size();
+    case Q_CUR_MATCH: return g.curMatch;
+    case Q_TEXT_LEFT: return std::lround(TextLeft() * s);
+    case Q_TEXT_W: return std::lround(g.textW * s);
+    case Q_RECENT_COUNT: return (LRESULT)g.recentShown.size();
+    case Q_FIND_EDIT: return (LRESULT)FindEditHwnd();
+    case Q_SETTINGS_HWND: return (LRESULT)SettingsHwnd();
+    case Q_FIND_OPEN: return g.findOpen;
+    case Q_COLUMN: return g.cfg.column;
+    case Q_FONT_SIZE: return g.cfg.fontSize;
+    case Q_WRAP: return g.cfg.wrapCode;
+    case Q_LANG: return UiLanguage();
+    case Q_FIND_PART_X: {
+        float l, t, r, b;
+        FindPartRect((int)lp, &l, &t, &r, &b);
+        return MAKELONG(std::lround((l + r) * 0.5f * s), std::lround((t + b) * 0.5f * s));
+    }
+    case Q_BLOCK_Y: return (lp >= 0 && (size_t)lp < n) ? std::lround((g.Y[lp] - g.scrollY) * s) : INT_MIN;
+    case Q_RESTORED: return g.restored;
+    case Q_THEME_DARK: return PaletteIsDark();
+    case Q_SETTINGS_HIT: return SettingsHitCenter((int)lp);
+    case Q_FONT_FAMILY_SITKA: return wcsncmp(g.typo.family[R_BODY], L"Sitka", 5) == 0;
+    }
+    return 0;
+}
+
+// ------------------------------------------------------------------------------------------------ window procedure
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (g_msgSettings && msg == g_msgSettings) {
+        if (g.ready && !g.firstFrame) OnSettingsBroadcast();
+        return 0;
+    }
     switch (msg) {
     case WM_ERASEBKGND:
         if (!g.ready) { BenchWindowShown(); return DefWindowProcW(hwnd, msg, wp, lp); }  // theme-coloured class brush
@@ -711,6 +823,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (std::fabs(tw - g.textW) > 0.1f || std::fabs(ww - g.wideW) > 0.1f) Relayout();
         g.scrollY = std::clamp(g.scrollY, 0.f, MaxScroll());
         g.targetY = std::clamp(g.targetY, 0.f, MaxScroll());
+        FindRelayoutInput();
         Invalidate();
         return 0;
     }
@@ -723,44 +836,50 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_GETMINMAXINFO: ((MINMAXINFO*)lp)->ptMinTrackSize = POINT{360, 240}; return 0;
-    case WM_MOUSEWHEEL: {
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL:
         if (!g.ready || g.firstFrame) return 0;
-        int delta = GET_WHEEL_DELTA_WPARAM(wp);
-        if (GET_KEYSTATE_WPARAM(wp) & MK_CONTROL) { ZoomStep(delta > 0 ? 1 : -1); return 0; }
-        UINT lines = 3;
-        SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
-        float step = lines == WHEEL_PAGESCROLL ? ViewH() - 56 : 38.f * std::max(1u, lines);
-        ScrollTo(g.targetY - (float)delta / WHEEL_DELTA * step, true);
-        return 0;
-    }
+        OnWheel(GET_WHEEL_DELTA_WPARAM(wp), GET_KEYSTATE_WPARAM(wp), GET_X(lp), GET_Y(lp), msg == WM_MOUSEHWHEEL);
+        return msg == WM_MOUSEHWHEEL ? TRUE : 0;
     case WM_KEYDOWN:
         if (!g.ready || g.firstFrame) return 0;
         if (OnKeyDown(wp)) return 0;
         break;
-    case WM_SYSKEYDOWN:
-        if (wp == VK_LEFT) { NavigateBack(); return 0; }
-        if (wp == VK_RIGHT) { NavigateForward(); return 0; }
+    case WM_SYSKEYDOWN: {
+        if (!g.ready || g.firstFrame) break;
+        bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0;
+        if (g.findOpen && !ctrl && wp == 'C') { FindToggleCase(); return 0; }
+        if (g.findOpen && !ctrl && wp == 'W') { FindToggleWord(); return 0; }
+        if (KeyCommand(wp, ctrl, shift, true)) return 0;
+        break;
+    }
+    case WM_SYSCHAR:
+        if (g.findOpen && (towlower((wint_t)wp) == L'c' || towlower((wint_t)wp) == L'w')) return 0;  // no menu beep
         break;
     case WM_CHAR:
-        if (g.findOpen && wp >= 32 && wp != 127) {
-            g.findQuery.push_back((wchar_t)wp);
-            FindUpdate(false);
-            return 0;
-        }
+        if (g.path.empty()) HomeChar((wchar_t)wp);
+        else if (g.findOpen) FindTypeChar((wchar_t)wp);
         return 0;
+    case WM_ACTIVATE:
+        if (LOWORD(wp) == WA_INACTIVE) g_findHadFocus = FindInputFocused();
+        else if (g.findOpen && g_findHadFocus) { FindFocusInput(); return 0; }
+        break;
     case WM_LBUTTONDOWN:
         if (!g.ready || g.firstFrame) return 0;
         OnLButtonDown(GET_X(lp), GET_Y(lp), wp);
         return 0;
     case WM_MOUSEMOVE:
         if (!g.ready || g.firstFrame) return 0;
-        OnMouseMove(GET_X(lp), GET_Y(lp), wp);
+        OnMouseMove(GET_X(lp), GET_Y(lp));
         return 0;
     case WM_MOUSELEAVE:
-        if (g.hotScroll || g.hoverLink >= 0 || g.hoverCode >= 0) {
-            g.hotScroll = false;
-            g.hoverLink = g.hoverCode = -1;
+        if (g.hotScroll || g.hoverLink >= 0 || g.hoverCode >= 0 || g.hoverHBlock >= 0 || g.findHot != -1 ||
+            g.tocHover != -1 || g.tocBtnHot || g.recentHover >= 0 || !g.tip.empty()) {
+            g.hotScroll = g.tocBtnHot = g.hotHBar = false;
+            g.hoverLink = g.hoverCode = g.hoverHBlock = g.recentHover = -1;
+            g.findHot = g.tocHover = -1;
             g.hoverCopyBtn = false;
+            g.tip.clear();
             Invalidate();
         }
         return 0;
@@ -773,34 +892,41 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else NavigateForward();
         return TRUE;
     case WM_CONTEXTMENU: {
+        if (!g.ready || g.firstFrame) return 0;
         int sx = GET_X(lp), sy = GET_Y(lp);
-        if (sx == -1 && sy == -1) { POINT p{20, 20}; ClientToScreen(hwnd, &p); sx = p.x; sy = p.y; }
-        ContextMenu(sx, sy);
+        bool keyboard = sx == -1 && sy == -1;
+        if (keyboard) { POINT p{20, 20}; ClientToScreen(hwnd, &p); sx = p.x; sy = p.y; }
+        ContextMenu(sx, sy, keyboard);
         return 0;
     }
     case WM_SETCURSOR:
-        if (LOWORD(lp) == HTCLIENT) return TRUE;  // set in WM_MOUSEMOVE
+        if (LOWORD(lp) == HTCLIENT && (HWND)wp == hwnd) return TRUE;  // set in WM_MOUSEMOVE (children: their own)
         break;
     case WM_DROPFILES: {
         wchar_t file[MAX_PATH * 4];
-        if (DragQueryFileW((HDROP)wp, 0, file, (UINT)std::size(file))) OpenDocument(file, true, 0);
+        if (DragQueryFileW((HDROP)wp, 0, file, (UINT)std::size(file))) OpenDocument(file, true, 0, true);
         DragFinish((HDROP)wp);
         SetForegroundWindow(hwnd);
         return 0;
     }
     case WM_TIMER:
         if (wp == TIMER_TOAST) { KillTimer(hwnd, TIMER_TOAST); Invalidate(); }
+        else if (wp == TIMER_HBAR) { KillTimer(hwnd, TIMER_HBAR); Invalidate(); }
         else if (wp == TIMER_RELOAD) { KillTimer(hwnd, TIMER_RELOAD); ReloadDocument(); }
         else if (wp == TIMER_AUTOSCROLL && g.selecting) {
             POINT p;
             GetCursorPos(&p);
             ScreenToClient(hwnd, &p);
-            float y = p.y / Scale();
+            float x = p.x / Scale(), y = p.y / Scale();
             float d = y < 0 ? y : y > ViewH() ? y - ViewH() : 0;
-            if (d != 0) {
-                ScrollTo(g.scrollY + std::clamp(d * 0.5f, -60.f, 60.f), false);
-                UpdateSelectionTo(p.x / Scale(), std::clamp(y, 0.f, ViewH()));
+            if (d != 0) ScrollTo(g.scrollY + std::clamp(d * 0.5f, -60.f, 60.f), false);
+            uint32_t hb = BlockOfPos(g.selFocus);  // selecting inside a wide block: scroll it sideways
+            float vx, vw, cw;
+            if (HScrollInfo(hb, &vx, &vw, &cw)) {
+                float dx = x < vx ? x - vx : x > vx + vw ? x - (vx + vw) : 0;
+                if (dx != 0) HScrollSet(hb, HScrollOf(hb) + std::clamp(dx * 0.5f, -40.f, 40.f));
             }
+            UpdateSelectionTo(x, std::clamp(y, 0.f, ViewH()));
         }
         return 0;
     case WM_SETTINGCHANGE:
@@ -809,17 +935,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND:  // menu ids; also lets tests and automation drive the viewer (tests/ui_smoke.py)
         if (g.ready && !g.firstFrame) Command(LOWORD(wp));
         return 0;
+    case WM_APP_QUERY: return (g.ready && !g.firstFrame) ? Query(wp, lp) : 0;
     case WM_APP_MEASURED: OnMeasured((MeasureJob*)lp); return 0;
     case WM_APP_FULLDOC: if (!g.firstFrame) OnFullDoc(); return 0;
     case WM_APP_IMAGES: OnImagesLoaded(); return 0;
     case WM_APP_FILECHANGED: SetTimer(hwnd, TIMER_RELOAD, 120, nullptr); return 0;  // debounce editor save bursts
+    case WM_APP_POSITIONS: OnPositionsLoaded((std::vector<PosEntry>*)lp); return 0;
+    case WM_APP_FINDINPUT: if (g.ready) FindOnInput(wp, lp); return 0;
     case WM_CLOSE:
         g.closing = true;
-        SaveSettings();
+        if (HWND s = SettingsHwnd()) DestroyWindow(s);
+        SaveAll();
         DestroyWindow(hwnd);
         return 0;
     case WM_ENDSESSION:  // logoff / shutdown / restart: no WM_CLOSE is sent
-        if (wp) SaveSettings();
+        if (wp) SaveAll();
         return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
     }
@@ -886,7 +1016,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     std::wstring path;
     auto args = SplitArgs(GetCommandLineW());
     bool bench = BenchActive();
-    if (!bench) LoadSettings();
+    if (!bench) {
+        LoadConfig(g.cfg, &g.findQuery);
+        LoadPlacement();
+    }
+    SetUiLanguage(ResolveLanguage());
     for (size_t i = 1; i < args.size(); i++) {
         const std::wstring& a = args[i];
         if (a == L"--register") return RegisterAssociation(true) ? 0 : 1;
@@ -906,6 +1040,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     }
     if (bench) { g.cfg.sizeW = 1000; g.cfg.sizeH = 800; }  // PROTOCOL.md §5: 1000×800 DIP
     SetDarkPalette(WantDark());
+    TypographyOptions(g.typo);
 
     // geometry guess (the doc thread lays out for it before the window exists): the last closed window's client size
     bool restore = g_haveSaved && !g_sizeFromArgs && !bench;
@@ -918,13 +1053,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         g.pxW = MulDiv(g.cfg.sizeW, (int)g.dpi, 96);
         g.pxH = MulDiv(g.cfg.sizeH, (int)g.dpi, 96);
     }
+    g.tocOpen = g.cfg.tocOpen && TocWideEnough();  // the outline re-opens docked only (never as a drawer over the text)
     if (!path.empty()) {
         wchar_t full[MAX_PATH * 4];
         g.path = GetFullPathNameW(path.c_str(), MAX_PATH * 4, full, nullptr) ? full : path;
     }
     g.docThread = CreateThread(nullptr, 0, StartupDocThread, nullptr, 0, nullptr);
 
-    if (g.cfg.noIme) ImmDisableIME(0);  // UI thread only; the find box takes WM_CHAR (layouts work, IME composition not)
+    if (g.cfg.noIme) ImmDisableIME(0);  // UI thread only: the find box runs on its own thread with IME
     WNDCLASSEXW wc{sizeof(wc)};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = inst;
@@ -955,7 +1091,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         h = r.bottom - r.top;
     }
     std::wstring title = WindowTitle();
-    g.hwnd = CreateWindowExW(0, kClass, title.c_str(), WS_OVERLAPPEDWINDOW, x, y, w, h, nullptr, nullptr, inst, nullptr);
+    g.hwnd = CreateWindowExW(0, kClass, title.c_str(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y, w, h, nullptr, nullptr,
+                             inst, nullptr);
     Mark("window_created");
     if (g.cfg.noAnim) {
         BOOL on = TRUE;  // content appears at full opacity immediately instead of the ~200 ms open animation

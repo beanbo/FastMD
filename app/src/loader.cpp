@@ -21,7 +21,8 @@ HANDLE Spawn(LPTHREAD_START_ROUTINE fn, void* arg, int prio, SIZE_T stack) {
 }
 
 void JoinWorkers() {
-    g.gen++;  // measure / image / parse threads check the generation and stop early
+    g.gen++;     // measure threads check the layout generation and stop early
+    g.docGen++;  // image / full-parse threads check the document generation (a re-layout must not stop them)
     AcquireSRWLockExclusive(&g.workersLock);
     std::vector<HANDLE> ws;
     ws.swap(g.workers);
@@ -45,7 +46,7 @@ static DWORD WINAPI FullParseThread(void* p) {
     Doc* d = new Doc();
     d->baseDir = g.doc.baseDir;
     ParseMarkdown(*d, g.src.data(), g.src.size());
-    if (g.gen != myGen) { delete d; return 0; }
+    if (g.docGen != myGen) { delete d; return 0; }
     DebugLog("parsed_full");
     delete g.fullDoc.exchange(d);
     if (g.hwnd) PostMessageW(g.hwnd, WM_APP_FULLDOC, 0, 0);
@@ -59,7 +60,7 @@ static void LoadSource(bool startup) {
     g.loadFailed = false;
     if (!ReadFileUtf16(g.path.c_str(), g.src, &tRead, &g.fileTime)) {
         g.loadFailed = true;
-        g.src = L"# Не удалось открыть файл\n\n`" + g.path + L"`\n";
+        g.src = std::wstring(L"# ") + Tr(S_LOAD_FAILED) + L"\n\n`" + g.path + L"`\n";
         tRead = NowTicks();
     }
     GetFileStamp(g.path.c_str(), nullptr, &g.fileSize);
@@ -71,7 +72,7 @@ static void LoadSource(bool startup) {
         // big file: the first screen comes from a prefix that ends at a top-level heading (identical blocks); the
         // full model replaces it right after the first frame
         g.fullPending = true;
-        Spawn(FullParseThread, (void*)(uintptr_t)(uint32_t)g.gen);
+        Spawn(FullParseThread, (void*)(uintptr_t)(uint32_t)g.docGen);
         ParseMarkdown(g.doc, g.src.data(), cut);
         if (startup) Mark("parsed_prefix");
     } else {
@@ -82,6 +83,13 @@ static void LoadSource(bool startup) {
 
 DWORD WINAPI StartupDocThread(void*) {
     if (!g.path.empty()) LoadSource(true);
+    else if (!BenchActive()) {  // start screen: the recent documents are its content, read before the first frame
+        PositionsLoad(g.recentAll);
+        g.positions = g.recentAll;
+        g.positionsLoaded = true;
+        HomeRebuild();
+    }
+    g.docSerial++;
     DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory3), (IUnknown**)&g.dwf);
     g.typo.Init(g.dwf);
     Mark("dwrite_ready");
@@ -96,7 +104,10 @@ DWORD WINAPI StartupDocThread(void*) {
 }
 
 // ------------------------------------------------------------------------------------------------ runtime open
+static void CancelPendingRestore();
+
 static void ResetViewState() {
+    CancelPendingRestore();  // a restore waiting for a big document's full parse belongs to that document only
     ClearLayoutCache();
     g.cache.clear();
     g.H.clear();
@@ -107,14 +118,36 @@ static void ResetViewState() {
     g.matches.clear();
     g.curMatch = -1;
     g.lowerText.clear();
-    g.hoverLink = g.hoverCode = -1;
+    g.hoverLink = g.hoverCode = g.hoverHBlock = g.dragHBlock = g.hbarFlash = -1;
+    g.hotHBar = false;
+    g.hx.clear();
+    g.focusLink = g.ctxLink = g.ctxImage = -1;
+    g.tocHover = -1;
+    g.restoreBlock = -1;
+    g.restored = false;
     g.imagesStarted = false;
     g.docH = 0;
 }
 
-void OpenDocument(const std::wstring& path, bool pushHistory, float scrollY) {
+static bool SamePath(const std::wstring& a, const std::wstring& b) {
+    return CompareStringOrdinal(a.c_str(), (int)a.size(), b.c_str(), (int)b.size(), TRUE) == CSTR_EQUAL;
+}
+static PosEntry CapturePosition();
+static void RememberPosition(const PosEntry& e);
+static void SaveAsync(const PosEntry& e, bool keepPosition);
+static void RestorePositionFor(const std::wstring& path);
+static void OnFullDocRestore();
+
+void OpenDocument(const std::wstring& path, bool pushHistory, float scrollY, bool restorePosition) {
     wchar_t full[MAX_PATH * 4];
     std::wstring p = GetFullPathNameW(path.c_str(), MAX_PATH * 4, full, nullptr) ? std::wstring(full) : path;
+    bool other = g.path.empty() || !SamePath(g.path, p);
+    bool track = !BenchActive();
+    if (other && track && !g.path.empty() && !g.loadFailed) {  // leaving a document: remember where the reader was
+        PosEntry e = CapturePosition();
+        RememberPosition(e);
+        SaveAsync(e, false);
+    }
     if (pushHistory && !g.path.empty()) {
         g.back.push_back(HistoryEntry{g.path, g.scrollY});
         g.fwd.clear();
@@ -124,8 +157,11 @@ void OpenDocument(const std::wstring& path, bool pushHistory, float scrollY) {
     ResetViewState();
     g.path = p;
     LoadSource(false);
+    g.docSerial++;
     g.scrollY = g.targetY = scrollY;
     g.animating = false;
+    g.userMoved = false;
+    UpdateColumns();  // the docked outline depends on the document having headings
     InitialLayout();
     g.offscreenValid = false;
     SetWindowTextW(g.hwnd, WindowTitle().c_str());
@@ -133,16 +169,25 @@ void OpenDocument(const std::wstring& path, bool pushHistory, float scrollY) {
     Invalidate();
     StartBackgroundWork();
     SHAddToRecentDocs(SHARD_PATHW, g.path.c_str());
+    if (other && track && !g.loadFailed) {
+        PosEntry touch;
+        touch.path = g.path;
+        touch.opened = NowTicks();
+        SaveAsync(touch, true);  // recently opened (start screen, positions of other windows stay intact)
+        if (restorePosition && g.positionsLoaded) RestorePositionFor(g.path);
+    }
 }
 
 void ReloadDocument() {
     if (g.path.empty()) return;
     float y = g.scrollY;
     uint32_t selA = g.selAnchor, selF = g.selFocus;
+    std::vector<float> hx = g.hx;  // live reload keeps the horizontal scroll of wide blocks
     OpenDocument(g.path, false, y);
     uint32_t n = (uint32_t)g.doc.text.size();
     g.selAnchor = std::min(selA, n);
     g.selFocus = std::min(selF, n);
+    for (size_t i = 0; i < hx.size() && i < g.hx.size(); i++) g.hx[i] = hx[i];
 }
 
 void NavigateBack() {
@@ -171,7 +216,7 @@ static DWORD WINAPI MeasureThread(void* p) {
         const Block& b = g.doc.blocks[i];
         float w = LayoutWidthFor(b, job->textW, job->wideW);
         bool exact = false;
-        float h = BlockHeightEstimate(g.doc, b, w, &exact);
+        float h = BlockHeightEstimate(g.doc, t, b, w, &exact);
         if (!exact || b.kind == BK_IMAGE) {
             BlockLayout* L = LayoutBlock(g.doc, t, i, w);
             h = L->height;
@@ -214,6 +259,7 @@ void OnMeasured(MeasureJob* job) {
             }
             RecomputeY();
         });
+        ResolveRestore();
         if (g.jobsPending == 0) {
             Mark("measured_all");
             DebugFlush();
@@ -230,7 +276,7 @@ static DWORD WINAPI ImageThread(void* p) {
     IWICImagingFactory* wic = nullptr;
     CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
     auto& imgs = g.doc.images;
-    for (size_t i = 0; i < imgs.size() && !g.closing && g.gen == myGen; i++) {
+    for (size_t i = 0; i < imgs.size() && !g.closing && g.docGen == myGen; i++) {
         Image& im = imgs[i];
         if (im.path.empty()) { im.state = 3; continue; }
         size_t c = i;
@@ -249,6 +295,8 @@ static DWORD WINAPI ImageThread(void* p) {
             std::vector<uint32_t> px((size_t)w * h);
             if (SUCCEEDED(conv->CopyPixels(nullptr, w * 4, (UINT)(px.size() * 4), (BYTE*)px.data()))) {
                 im.px.swap(px);
+                im.pxW = (int)w;  // the decoded size (a GIF frame may be smaller than its header's screen size)
+                im.pxH = (int)h;
                 if (im.w <= 0) { im.w = (int)w; im.h = (int)h; }
                 ok = true;
             }
@@ -260,14 +308,14 @@ static DWORD WINAPI ImageThread(void* p) {
     }
     SafeRelease(wic);
     if (SUCCEEDED(hrCo)) CoUninitialize();
-    if (!g.closing && g.gen == myGen) PostMessageW(g.hwnd, WM_APP_IMAGES, 0, 0);
+    if (!g.closing && g.docGen == myGen) PostMessageW(g.hwnd, WM_APP_IMAGES, 0, 0);
     return 0;
 }
 
 static void StartImages() {
     if (g.imagesStarted || g.doc.images.empty()) return;
     g.imagesStarted = true;
-    Spawn(ImageThread, (void*)(uintptr_t)(uint32_t)g.gen, THREAD_PRIORITY_BELOW_NORMAL);
+    Spawn(ImageThread, (void*)(uintptr_t)(uint32_t)g.docGen, THREAD_PRIORITY_BELOW_NORMAL);
 }
 
 void OnImagesLoaded() {
@@ -280,6 +328,7 @@ void OnImagesLoaded() {
         }
         RecomputeY();
     });
+    ResolveRestore();
     Invalidate();
 }
 
@@ -292,13 +341,16 @@ void OnFullDoc() {
     WithAnchor([] {
         ClearLayoutCache();
         g.doc = std::move(*nd);
+        UpdateColumns();  // headings may appear only now (outline docking)
         InitGeometry();
         RecomputeY();
     });
     delete d;
+    g.docSerial++;
     g.fullPending = false;
     g.lowerText.clear();
     if (g.findOpen && !g.findQuery.empty()) FindUpdate(true);
+    OnFullDocRestore();
     Mark("full_doc_swapped");
     StartMeasure();
     StartImages();
@@ -356,4 +408,138 @@ void StopWatcher() {
     WaitForSingleObject(g.watchThread, 2000);
     CloseHandle(g.watchThread);
     g.watchThread = nullptr;
+}
+
+// ------------------------------------------------------------------------------------------------ reading positions
+// positions.bin keeps, per file, the block at the top of the viewport (exact when the file is unchanged) and the nearest
+// heading above it (when the file changed). It is read after the first frame; the document then glides to the place.
+static PosEntry CapturePosition() {
+    PosEntry e;
+    e.path = g.path;
+    e.size = g.fileSize;
+    e.mtime = FileTimeU64(g.fileTime);
+    e.opened = NowTicks();
+    size_t n = g.doc.blocks.size();
+    if (!n || g.Y.size() != n || g.scrollY < 1.f) return e;
+    uint32_t a = std::min<uint32_t>(FirstVisible(g.scrollY), (uint32_t)n - 1);
+    e.block = a;
+    e.blockOff = g.scrollY - g.Y[a];
+    for (const Heading& h : g.doc.headings) {
+        if (h.block > a) break;
+        e.slug = h.slug;
+        e.slugOff = g.scrollY - g.Y[h.block];
+    }
+    return e;
+}
+
+static void RememberPosition(const PosEntry& e) {  // this window's copy (reopening a document in the same window)
+    auto it = std::find_if(g.positions.begin(), g.positions.end(), [&](const PosEntry& o) { return SamePath(o.path, e.path); });
+    if (it != g.positions.end()) *it = e;
+    else g.positions.insert(g.positions.begin(), e);
+}
+
+struct SaveJob { PosEntry e; bool keep; };
+static DWORD WINAPI SaveThread(void* p) {
+    auto* j = (SaveJob*)p;
+    PositionsSave(j->e, j->keep);
+    delete j;
+    return 0;
+}
+static void SaveAsync(const PosEntry& e, bool keepPosition) {
+    auto* j = new SaveJob{e, keepPosition};
+    if (HANDLE th = CreateThread(nullptr, 64 * 1024, SaveThread, j, 0, nullptr)) CloseHandle(th);
+    else { PositionsSave(j->e, j->keep); delete j; }
+}
+
+void SaveReadingPosition() {  // window closing: synchronous, the process ends right after
+    if (g.path.empty() || g.loadFailed || BenchActive()) return;
+    PosEntry e = CapturePosition();
+    RememberPosition(e);
+    PositionsSave(e, false);
+}
+
+static DWORD WINAPI PositionsThread(void* p) {
+    auto* path = (std::wstring*)p;
+    auto* list = new std::vector<PosEntry>();
+    PositionsLoad(*list);
+    if (!PostMessageW(g.hwnd, WM_APP_POSITIONS, 0, (LPARAM)list)) delete list;
+    if (!path->empty()) {  // recently opened (the position itself is saved when the window closes)
+        PosEntry e;
+        e.path = *path;
+        e.opened = NowTicks();
+        PositionsSave(e, true);
+    }
+    delete path;
+    return 0;
+}
+
+void LoadPositionsAsync() {
+    if (BenchActive() || g.positionsLoaded) return;
+    if (HANDLE th = CreateThread(nullptr, 128 * 1024, PositionsThread, new std::wstring(g.loadFailed ? L"" : g.path), 0, nullptr))
+        CloseHandle(th);
+}
+
+static bool g_restorePending = false;  // a big document's first screen came from a prefix that ends before the place
+static PosEntry g_pendingEntry;
+
+static void CancelPendingRestore() {
+    g_restorePending = false;
+    g_pendingEntry = PosEntry();
+}
+
+// false = the place is not in the document yet (prefix parse): retry after the full parse
+static bool TryRestore(const PosEntry& e) {
+    if (g.userMoved || g.doc.blocks.empty()) return true;
+    int block = -1;
+    float off = 0;
+    bool same = e.size && e.size == g.fileSize && e.mtime == FileTimeU64(g.fileTime);
+    if (same && e.block < g.doc.blocks.size()) { block = (int)e.block; off = e.blockOff; }
+    else if (!e.slug.empty()) {
+        int b = HeadingBlockBySlug(e.slug);
+        if (b >= 0) { block = b; off = e.slugOff; }
+    }
+    if (block < 0) return !g.fullPending;
+    if (block == 0 && off < 1.f) return true;
+    EnsureLayout((uint32_t)block);
+    RecomputeY();
+    g.restoreBlock = block;
+    g.restoreOff = off;
+    g.restored = true;
+    ScrollTo(g.Y[block] + off, true);
+    return true;
+}
+
+static void RestorePositionFor(const std::wstring& path) {
+    g_restorePending = false;
+    for (const PosEntry& e : g.positions) {
+        if (!SamePath(e.path, path)) continue;
+        PosEntry copy = e;
+        if (!TryRestore(copy)) { g_restorePending = true; g_pendingEntry = copy; }
+        return;
+    }
+}
+
+void OnPositionsLoaded(std::vector<PosEntry>* list) {
+    g.positions = std::move(*list);
+    delete list;
+    g.positionsLoaded = true;
+    if (!g.path.empty() && !g.loadFailed) RestorePositionFor(g.path);
+}
+
+static void OnFullDocRestore() {
+    if (g_restorePending) {
+        g_restorePending = false;
+        PosEntry e = g_pendingEntry;
+        TryRestore(e);
+    } else {
+        ResolveRestore();
+    }
+}
+
+// heights changed (measured / images / full parse): keep aiming at the saved place until the glide ends
+void ResolveRestore() {
+    if (g.restoreBlock < 0) return;
+    if (g.userMoved || g.restoreBlock >= (int)g.doc.blocks.size()) { g.restoreBlock = -1; return; }
+    if (g.animating) g.targetY = std::clamp(g.Y[g.restoreBlock] + g.restoreOff, 0.f, MaxScroll());
+    else g.restoreBlock = -1;  // arrived: the scroll anchor keeps it in place from here on
 }

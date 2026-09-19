@@ -1,4 +1,5 @@
-// Document view: column geometry, virtualised layout, drawing, hit-testing, selection, find, overlays.
+// Document view: column geometry, virtualised layout, drawing, hit-testing, selection, horizontal scrolling of wide
+// blocks, keyboard link focus, overlays.
 // Units: DIP (layout space). Pixels = DIP × Scale(), Scale() = DPI/96 × zoom.
 #include "app.h"
 
@@ -8,15 +9,27 @@ float Scale() { return g.dpi / 96.f * g.cfg.zoom; }
 float ViewW() { return g.pxW / Scale(); }
 float ViewH() { return g.pxH / Scale(); }
 float MaxScroll() { return std::max(0.f, g.docH - ViewH()); }
+float DocLeft() { return TocDocked() ? TocPanelW() : 0.f; }
+float DocW() { return std::max(1.f, ViewW() - DocLeft()); }
 
 // ------------------------------------------------------------------------------------------------ columns
-void UpdateColumns() {
-    float avail = std::max(160.f, ViewW() - 2 * Metrics::kPadX);
-    g.textW = std::min(avail, Metrics::kTextMax);
-    g.wideW = std::min(avail, Metrics::kWideMax);
+static float TextMaxFor(uint8_t preset) {
+    switch (preset) {
+    case COL_NARROW: return 560.f;
+    case COL_WIDE: return 900.f;
+    case COL_FULL: return 1e9f;
+    default: return Metrics::kTextMax;
+    }
 }
-static float TextLeft() { return std::floor((ViewW() - g.textW) * 0.5f); }
-static float WideLeft() { return std::floor((ViewW() - g.wideW) * 0.5f); }
+
+void UpdateColumns() {
+    float avail = std::max(160.f, DocW() - 2 * Metrics::kPadX);
+    float tmax = TextMaxFor(g.cfg.column);
+    g.textW = std::min(avail, tmax);
+    g.wideW = g.cfg.column == COL_FULL ? avail : std::min(avail, tmax + Metrics::kBreakout);
+}
+float TextLeft() { return DocLeft() + std::floor((DocW() - g.textW) * 0.5f); }
+float WideLeft() { return DocLeft() + std::floor((DocW() - g.wideW) * 0.5f); }
 static bool IsWide(const Block& b) {
     return b.indent == 0 && (b.kind == BK_CODE || b.kind == BK_TABLE || b.kind == BK_IMAGE);
 }
@@ -72,10 +85,11 @@ void InitGeometry() {
     g.H.resize(n);
     g.Y.resize(n);
     g.known.assign(n, 0);
+    if (g.hx.size() != n) g.hx.resize(n, 0.f);  // horizontal offsets survive re-layouts (zoom, resize)
     for (size_t i = 0; i < n; i++) {
         bool exact = false;
         const Block& b = g.doc.blocks[i];
-        g.H[i] = BlockHeightEstimate(g.doc, b, LayoutWidthFor(b, g.textW, g.wideW), &exact);
+        g.H[i] = BlockHeightEstimate(g.doc, g.typo, b, LayoutWidthFor(b, g.textW, g.wideW), &exact);
         g.known[i] = exact;
     }
 }
@@ -143,25 +157,142 @@ void WithAnchor(void (*fn)()) {
     g.targetY = std::clamp(g.scrollY + toff, 0.f, MaxScroll());
 }
 
+uint32_t BlockOfPos(uint32_t pos) {
+    auto& bl = g.doc.blocks;
+    size_t lo = 0, hi = bl.size();
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (bl[mid].textOff <= pos) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo ? (uint32_t)lo - 1 : 0;
+}
+
+// ------------------------------------------------------------------------------------------------ horizontal scrolling
+static float TableMaxW(float x) { return g.wideW - (x - WideLeft()); }
+
+bool HScrollInfo(uint32_t i, float* visX, float* visW, float* contentW) {
+    if (i >= g.doc.blocks.size() || i >= g.cache.size()) return false;
+    const Block& b = g.doc.blocks[i];
+    BlockLayout* L = g.cache[i];
+    if (!L || (b.kind != BK_CODE && b.kind != BK_TABLE)) return false;
+    float x, w;
+    BlockBox(i, &x, &w);
+    float content, vis;
+    if (b.kind == BK_CODE) {
+        content = L->natural;
+        vis = w;
+    } else {
+        if (!L->table) return false;
+        content = L->table->width;
+        vis = std::min(content, TableMaxW(x));
+    }
+    if (content <= vis + 0.5f) return false;
+    *visX = x;
+    *visW = vis;
+    *contentW = content;
+    return true;
+}
+
+float HScrollOf(uint32_t i) {
+    if (i >= g.hx.size() || g.hx[i] == 0) return 0;
+    float vx, vw, cw;
+    if (!HScrollInfo(i, &vx, &vw, &cw)) return 0;
+    return std::clamp(g.hx[i], 0.f, cw - vw);
+}
+
+void HScrollSet(uint32_t i, float x) {
+    float vx, vw, cw;
+    if (!HScrollInfo(i, &vx, &vw, &cw)) return;
+    if (g.hx.size() <= i) g.hx.resize(g.doc.blocks.size(), 0.f);
+    x = std::round(std::clamp(x, 0.f, cw - vw));
+    if (x == g.hx[i]) return;
+    g.hx[i] = x;
+    g.hbarFlash = (int)i;  // the scrollbar shows for a moment: position feedback for wheel / touchpad / find
+    g.hbarFlashUntil = GetTickCount() + 900;
+    if (g.hwnd) SetTimer(g.hwnd, TIMER_HBAR, 950, nullptr);
+    Invalidate();
+}
+
+bool HScrollBarRect(uint32_t i, float* l, float* t, float* r, float* b, float* thumbL, float* thumbR) {
+    float vx, vw, cw;
+    if (!HScrollInfo(i, &vx, &vw, &cw)) return false;
+    float y = g.Y[i] - g.scrollY, h = g.H[i];
+    float top = g.doc.blocks[i].kind == BK_CODE ? y + h - 10.f : y + h + 4.f;  // tables: in the margin below
+    *l = vx + 8.f;
+    *r = vx + vw - 8.f;
+    *t = top;
+    *b = top + 6.f;
+    float trackW = *r - *l, thumbW = std::max(28.f, trackW * vw / cw), maxOff = cw - vw;
+    *thumbL = *l + (trackW - thumbW) * (maxOff > 0 ? HScrollOf(i) / maxOff : 0.f);
+    *thumbR = *thumbL + thumbW;
+    return true;
+}
+
+int HScrollBlockAt(float px, float py, bool* onBar) {
+    *onBar = false;
+    size_t n = g.doc.blocks.size();
+    if (g.path.empty() || !n) return -1;
+    float docY = py + g.scrollY;
+    uint32_t first = FirstVisible(docY);
+    for (uint32_t k : {first, first ? first - 1 : UINT32_MAX}) {  // a table's bar sits in the gap below it
+        if (k >= n) continue;
+        float vx, vw, cw;
+        if (!HScrollInfo(k, &vx, &vw, &cw)) continue;
+        float bottom = g.Y[k] + g.H[k] + (g.doc.blocks[k].kind == BK_TABLE ? 12.f : 0.f);
+        if (docY < g.Y[k] || docY >= bottom || px < vx || px > vx + vw) continue;
+        float l, t, r, b, tl, tr;
+        if (HScrollBarRect(k, &l, &t, &r, &b, &tl, &tr)) *onBar = py >= t - 5.f && py <= b + 5.f;
+        return (int)k;
+    }
+    return -1;
+}
+
+static void DrawHScrollBar(uint32_t i) {
+    bool flash = (int)i == g.hbarFlash && GetTickCount() < g.hbarFlashUntil;
+    if ((int)i != g.hoverHBlock && (int)i != g.dragHBlock && !flash) return;
+    float l, t, r, b, tl, tr;
+    if (!HScrollBarRect(i, &l, &t, &r, &b, &tl, &tr)) return;
+    bool hot = g.dragHBlock == (int)i || g.hotHBar;
+    g.canvas->FillRoundRect(tl, t, tr, b, 3.f, hot ? P_SCROLL_HOT : P_SCROLL);
+}
+
 // ------------------------------------------------------------------------------------------------ highlight ranges
 static uint32_t SelMin() { return std::min(g.selAnchor, g.selFocus); }
 static uint32_t SelMax() { return std::max(g.selAnchor, g.selFocus); }
 bool HasSelection() { return g.selAnchor != g.selFocus; }
 
-static void FillTextRange(IDWriteTextLayout* tl, uint32_t textOff, uint32_t s, uint32_t e, float x, float y, uint8_t pal) {
+// hit-test rectangles of [s, e) inside a layout that starts at text offset textOff
+static void RangeRects(IDWriteTextLayout* tl, uint32_t textOff, uint32_t s, uint32_t e, std::vector<DWRITE_HIT_TEST_METRICS>& out) {
+    out.clear();
     if (e <= s) return;
-    DWRITE_HIT_TEST_METRICS hm[32];
     UINT32 cnt = 0;
-    HRESULT hr = tl->HitTestTextRange(s - textOff, e - s, 0, 0, hm, 32, &cnt);
-    std::vector<DWRITE_HIT_TEST_METRICS> big;
-    DWRITE_HIT_TEST_METRICS* m = hm;
+    out.resize(16);
+    HRESULT hr = tl->HitTestTextRange(s - textOff, e - s, 0, 0, out.data(), (UINT32)out.size(), &cnt);
     if (hr == E_NOT_SUFFICIENT_BUFFER) {
-        big.resize(cnt);
-        if (FAILED(tl->HitTestTextRange(s - textOff, e - s, 0, 0, big.data(), cnt, &cnt))) return;
-        m = big.data();
-    } else if (FAILED(hr)) return;
-    for (UINT32 k = 0; k < cnt; k++)
-        g.canvas->FillRect(x + m[k].left, y + m[k].top, x + m[k].left + std::max(m[k].width, 4.f), y + m[k].top + m[k].height, pal);
+        out.resize(cnt);
+        hr = tl->HitTestTextRange(s - textOff, e - s, 0, 0, out.data(), cnt, &cnt);
+    }
+    out.resize(SUCCEEDED(hr) ? cnt : 0);
+}
+
+static void FillTextRange(IDWriteTextLayout* tl, uint32_t textOff, uint32_t s, uint32_t e, float x, float y, uint8_t pal) {
+    static std::vector<DWRITE_HIT_TEST_METRICS> m;
+    RangeRects(tl, textOff, s, e, m);
+    for (auto& r : m) g.canvas->FillRect(x + r.left, y + r.top, x + r.left + std::max(r.width, 4.f), y + r.top + r.height, pal);
+}
+
+// keyboard focus ring around the focused link (Tab)
+static uint32_t g_focusS = 0, g_focusE = 0;
+static void DrawLinkFocus(IDWriteTextLayout* tl, uint32_t textOff, uint32_t textLen, float x, float y) {
+    if (g.focusLink < 0 || g_focusE <= g_focusS) return;
+    uint32_t s = std::max(g_focusS, textOff), e = std::min(g_focusE, textOff + textLen);
+    if (s >= e) return;
+    static std::vector<DWRITE_HIT_TEST_METRICS> m;
+    RangeRects(tl, textOff, s, e, m);
+    for (auto& r : m)
+        g.canvas->StrokeRoundRect(x + r.left - 3.f, y + r.top - 1.f, x + r.left + r.width + 3.f, y + r.top + r.height + 1.f,
+                                  4.f, 2.f, P_ACCENT);
 }
 
 // selection + find matches behind the text of one layout covering [textOff, textOff+textLen)
@@ -233,12 +364,13 @@ static IDWriteTextLayout* NumberLayout(uint32_t n) {
 
 static void DrawMarker(const Block& b, float x, float baseline) {
     uint8_t col = b.muted ? P_MUTED : P_TEXT;
+    float s = g.typo.textScale;
     switch (b.marker) {
     case MK_BULLET: {
-        float cy = baseline - 5.f, cx = x - 14.f;
-        if (b.listLevel <= 1) g.canvas->FillCircle(cx, cy, 2.75f, col);
-        else if (b.listLevel == 2) g.canvas->StrokeCircle(cx, cy, 3.f, 1.1f, col);
-        else g.canvas->FillRect(cx - 2.5f, cy - 2.5f, cx + 2.5f, cy + 2.5f, col);
+        float cy = baseline - 5.f * s, cx = x - 14.f * s;
+        if (b.listLevel <= 1) g.canvas->FillCircle(cx, cy, 2.75f * s, col);
+        else if (b.listLevel == 2) g.canvas->StrokeCircle(cx, cy, 3.f * s, 1.1f, col);
+        else g.canvas->FillRect(cx - 2.5f * s, cy - 2.5f * s, cx + 2.5f * s, cy + 2.5f * s, col);
         break;
     }
     case MK_NUMBER: {
@@ -251,13 +383,13 @@ static void DrawMarker(const Block& b, float x, float baseline) {
     }
     case MK_TASK_OPEN:
     case MK_TASK_DONE: {
-        float sz = 15.f, l = x - 24.f, t = baseline - 12.5f;
+        float sz = 15.f * s, l = x - 24.f * s, t = baseline - 12.5f * s;
         if (b.marker == MK_TASK_DONE) {
-            g.canvas->FillRoundRect(l, t, l + sz, t + sz, 3.5f, P_ACCENT);
-            g.canvas->Line(l + 3.8f, t + 7.8f, l + 6.4f, t + 10.4f, 1.8f, P_ONACCENT);
-            g.canvas->Line(l + 6.4f, t + 10.4f, l + 11.2f, t + 4.8f, 1.8f, P_ONACCENT);
+            g.canvas->FillRoundRect(l, t, l + sz, t + sz, 3.5f * s, P_ACCENT);
+            g.canvas->Line(l + 3.8f * s, t + 7.8f * s, l + 6.4f * s, t + 10.4f * s, 1.8f * s, P_ONACCENT);
+            g.canvas->Line(l + 6.4f * s, t + 10.4f * s, l + 11.2f * s, t + 4.8f * s, 1.8f * s, P_ONACCENT);
         } else {
-            g.canvas->StrokeRoundRect(l, t, l + sz, t + sz, 3.5f, 1.1f, P_MUTED);
+            g.canvas->StrokeRoundRect(l, t, l + sz, t + sz, 3.5f * s, 1.1f, P_MUTED);
         }
         break;
     }
@@ -268,19 +400,21 @@ static void DrawMarker(const Block& b, float x, float baseline) {
 static void DrawTable(uint32_t i, const Block& b, BlockLayout* L, float x, float y) {
     const Table& t = g.doc.tables[b.aux];
     TableLayout* tl = L->table;
-    float right = x + tl->width, maxW = g.wideW - (x - WideLeft());
+    float maxW = TableMaxW(x);
     bool clip = tl->width > maxW + 0.5f;
+    float x0 = x - HScrollOf(i);  // content origin (scrolled)
+    float right = x0 + tl->width;
     if (clip) g.canvas->PushClip(x, y, x + maxW, y + tl->height);
     float yy = y;
     for (uint32_t r = 0; r < t.rows; r++) {
         float rh = tl->rowH[r];
         if (yy > ViewH() + 1 || yy + rh < -1) { yy += rh; continue; }
-        if (r >= 2 && (r % 2) == 0) g.canvas->FillRect(x, yy, right, yy + rh, P_ZEBRA);
-        g.canvas->FillRect(x, yy, right, yy + 1, P_BORDER);
-        float xx = x;
+        if (r >= 2 && (r % 2) == 0) g.canvas->FillRect(x0, yy, right, yy + rh, P_ZEBRA);
+        g.canvas->FillRect(x0, yy, right, yy + 1, P_BORDER);
+        float xx = x0;
         for (uint32_t c = 0; c < t.cols; c++) {
             IDWriteTextLayout* cl = tl->cells[r * t.cols + c];
-            if (cl) {
+            if (cl && xx < x + maxW && xx + tl->colW[c] > x) {
                 const Cell& cell = g.doc.cells[t.cellOff + r * t.cols + c];
                 float tx = xx + 1 + Metrics::kCellPadX, ty = yy + 1 + Metrics::kCellPadY;
                 bool hasCode = false;
@@ -292,19 +426,19 @@ static void DrawTable(uint32_t i, const Block& b, BlockLayout* L, float x, float
                 }
                 DrawHighlights(cl, cell.textOff, cell.textLen, tx, ty);
                 g.canvas->Text(cl, tx, ty, b.muted ? P_MUTED : P_TEXT);
+                DrawLinkFocus(cl, cell.textOff, cell.textLen, tx, ty);
             }
             xx += tl->colW[c];
         }
         yy += rh;
     }
-    g.canvas->FillRect(x, yy, right, yy + 1, P_BORDER);
-    float xx = x;
+    g.canvas->FillRect(x0, yy, right, yy + 1, P_BORDER);
+    float xx = x0;
     for (uint32_t c = 0; c <= t.cols; c++) {
         g.canvas->FillRect(xx, y, xx + 1, y + tl->height, P_BORDER);
         if (c < t.cols) xx += tl->colW[c];
     }
     if (clip) g.canvas->PopClip();
-    (void)i;
 }
 
 static void DrawBlock(uint32_t i, float y) {
@@ -328,6 +462,7 @@ static void DrawBlock(uint32_t i, float y) {
             for (auto& r : L->codeBg) g.canvas->FillRoundRect(x + r.left, y + r.top, x + r.right, y + r.bottom, 4.f, P_INLINEBG);
             DrawHighlights(L->text, b.textOff, b.textLen, x, y);
             g.canvas->Text(L->text, x, y, col);
+            DrawLinkFocus(L->text, b.textOff, b.textLen, x, y);
         }
         if (b.heading == 1 || b.heading == 2) g.canvas->FillRect(x, y + L->height - 1, right, y + L->height, P_BORDER);
         markerBase = y + g.typo.baseline[role];
@@ -335,8 +470,8 @@ static void DrawBlock(uint32_t i, float y) {
     case BK_CODE: {
         g.canvas->FillRoundRect(x, y, right, y + L->height, 6.f, P_CODEBG);
         if (L->text) {
-            float tx = x + Metrics::kCodePad, ty = y + Metrics::kCodePad;
-            g.canvas->PushClip(x, y, right - 8.f, y + L->height);
+            float tx = x + Metrics::kCodePad - HScrollOf(i), ty = y + Metrics::kCodePad;
+            g.canvas->PushClip(x, y, right, y + L->height);
             DrawHighlights(L->text, b.textOff, b.textLen, tx, ty);
             g.canvas->Text(L->text, tx, ty, P_TEXT);
             g.canvas->PopClip();
@@ -356,10 +491,14 @@ static void DrawBlock(uint32_t i, float y) {
                 il->Release();
             }
         }
+        DrawHScrollBar(i);
         break;
     }
     case BK_HR: g.canvas->FillRect(x, y, right, y + 4, P_BORDER); break;
-    case BK_TABLE: DrawTable(i, b, L, x, y); break;
+    case BK_TABLE:
+        DrawTable(i, b, L, x, y);
+        DrawHScrollBar(i);
+        break;
     case BK_IMAGE: {
         Image& im0 = g.doc.images[b.aux];
         Image& im = im0.canon >= 0 ? g.doc.images[im0.canon] : im0;
@@ -375,13 +514,13 @@ static void DrawBlock(uint32_t i, float y) {
     if (b.marker) DrawMarker(b, x, markerBase);
 }
 
-static IDWriteTextLayout* UiLayout(const std::wstring& s, float maxW) {
+IDWriteTextLayout* UiLayout(const std::wstring& s, float maxW, IDWriteTextFormat* fmt) {
     IDWriteTextLayout* L = nullptr;
-    g.dwf->CreateTextLayout(s.data(), (UINT32)s.size(), g.typo.ui, maxW, 100.f, &L);
+    g.dwf->CreateTextLayout(s.data(), (UINT32)s.size(), fmt ? fmt : g.typo.ui, maxW, 100.f, &L);
     return L;
 }
 
-static void DrawPill(const std::wstring& s, float cx, float y, bool centered) {
+void DrawPill(const std::wstring& s, float cx, float y, bool centered) {
     IDWriteTextLayout* L = UiLayout(s, std::max(100.f, ViewW() - 48.f));
     if (!L) return;
     DWRITE_TEXT_METRICS m{};
@@ -394,71 +533,16 @@ static void DrawPill(const std::wstring& s, float cx, float y, bool centered) {
     L->Release();
 }
 
-static void DrawFindBar() {
-    float w = std::min(380.f, ViewW() - 24.f), h = 38.f, x = ViewW() - w - 20.f, y = 12.f;
-    g.canvas->FillRoundRect(x, y, x + w, y + h, 8.f, P_OVERLAY_BG);
-    g.canvas->StrokeRoundRect(x, y, x + w, y + h, 8.f, 1.f, P_OVERLAY_BORDER);
-    std::wstring count;
-    if (!g.findQuery.empty())
-        count = g.matches.empty() ? L"нет совпадений"
-                                  : std::to_wstring(g.curMatch + 1) + L" / " + std::to_wstring(g.matches.size());
-    float countW = 0;
-    if (!count.empty()) {
-        if (IDWriteTextLayout* cl = UiLayout(count, 200.f)) {
-            DWRITE_TEXT_METRICS m{};
-            cl->GetMetrics(&m);
-            countW = std::ceil(m.width);
-            g.canvas->Text(cl, x + w - 12.f - countW, y + (h - m.height) * 0.5f, P_MUTED);
-            cl->Release();
-        }
-    }
-    std::wstring q = g.findQuery.empty() ? std::wstring(L"Найти в документе") : g.findQuery;
-    float qMax = w - 36.f - countW - 12.f;
-    if (IDWriteTextLayout* ql = UiLayout(q, 10000.f)) {
-        DWRITE_TEXT_METRICS m{};
-        ql->GetMetrics(&m);
-        float qx = x + 12.f, ty = y + (h - m.height) * 0.5f;
-        float shift = std::max(0.f, m.width - qMax);  // keep the caret end visible
-        g.canvas->PushClip(qx, y, qx + qMax, y + h);
-        g.canvas->Text(ql, qx - shift, ty, g.findQuery.empty() ? P_MUTED : P_OVERLAY_TEXT);
-        g.canvas->PopClip();
-        if (!g.findQuery.empty() || true) {
-            float cx = g.findQuery.empty() ? qx : qx - shift + m.widthIncludingTrailingWhitespace + 1.f;
-            g.canvas->FillRect(cx, ty + 1.f, cx + 1.2f, ty + m.height - 1.f, P_OVERLAY_TEXT);
-        }
-        ql->Release();
-    }
-}
-
 static void DrawScrollbar() {
     float vh = ViewH(), vw = ViewW();
     if (g.docH <= vh + 1) return;
     float trackT = 2, trackB = vh - 2, trackH = trackB - trackT;
     float th = std::max(32.f, trackH * vh / g.docH);
     float ty = trackT + (trackH - th) * (g.scrollY / MaxScroll());
+    if (g.findOpen && !g.matches.empty()) DrawFindMarks(vw - 12.f, vw - 2.f);
     bool hot = g.draggingThumb || g.hotScroll;
     float w = hot ? 8.f : 5.f;
     g.canvas->FillRoundRect(vw - w - 3, ty, vw - 3, ty + th, w * 0.5f, hot ? P_SCROLL_HOT : P_SCROLL);
-}
-
-static void DrawEmptyState() {
-    std::wstring t1 = L"Откройте Markdown-файл";
-    std::wstring t2 = L"Перетащите .md сюда или нажмите Ctrl+O";
-    IDWriteTextLayout* a = nullptr;
-    g.dwf->CreateTextLayout(t1.data(), (UINT32)t1.size(), g.typo.fmt[R_H2], ViewW(), 100.f, &a);
-    IDWriteTextLayout* b = UiLayout(t2, ViewW());
-    float cy = ViewH() * 0.42f;
-    if (a) {
-        a->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-        g.canvas->Text(a, 0, cy - 40.f, P_TEXT);
-        a->Release();
-    }
-    if (b) {
-        b->SetMaxWidth(ViewW());
-        b->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-        g.canvas->Text(b, 0, cy + 4.f, P_MUTED);
-        b->Release();
-    }
 }
 
 void Render() {
@@ -467,7 +551,7 @@ void Render() {
     g.canvas->Begin();
     g.canvas->Clear(P_BG);
     if (g.path.empty()) {
-        DrawEmptyState();
+        DrawHome();
     } else {
         float vh = ViewH();
         size_t n = g.doc.blocks.size();
@@ -481,11 +565,16 @@ void Render() {
             g.canvas->FillRect(tl + q.x, top, tl + q.x + Metrics::kQuoteBar, bottom, pal);
         }
         DrawScrollbar();
-        if (g.hoverLink >= 0 && (size_t)g.hoverLink < g.doc.links.size() && !g.selecting)
-            DrawPill(g.doc.links[g.hoverLink], 10.f, ViewH() - 40.f, false);
     }
+    DrawToc();
     if (g.findOpen) DrawFindBar();
-    if (!g.toast.empty() && GetTickCount() < g.toastUntil) DrawPill(g.toast, ViewW() * 0.5f, ViewH() - 64.f, true);
+    const std::wstring* pill = nullptr;
+    if (!g.tip.empty()) pill = &g.tip;
+    else if (g.hoverLink >= 0 && (size_t)g.hoverLink < g.doc.links.size() && !g.selecting) pill = &g.doc.links[g.hoverLink];
+    else if (g.focusLink >= 0 && (size_t)g.focusLink < g.doc.links.size()) pill = &g.doc.links[g.focusLink];
+    if (pill && !g.path.empty()) DrawPill(*pill, DocLeft() + 10.f, ViewH() - 40.f, false);
+    else if (pill) DrawPill(*pill, 10.f, ViewH() - 40.f, false);
+    if (!g.toast.empty() && GetTickCount() < g.toastUntil) DrawPill(g.toast, DocLeft() + DocW() * 0.5f, ViewH() - 64.f, true);
     g.canvas->End();
 }
 
@@ -525,7 +614,8 @@ bool HitTestDoc(float px, float py, uint32_t* pos, bool* inside) {
         *pos = L->text ? HitLayout(L->text, b.textOff, px - bx, ly, inside) : b.textOff;
         return true;
     case BK_CODE:
-        *pos = L->text ? HitLayout(L->text, b.textOff, px - bx - Metrics::kCodePad, ly - Metrics::kCodePad, inside) : b.textOff;
+        *pos = L->text ? HitLayout(L->text, b.textOff, px - bx - Metrics::kCodePad + HScrollOf(i), ly - Metrics::kCodePad, inside)
+                       : b.textOff;
         return true;
     case BK_TABLE: {
         const Table& t = g.doc.tables[b.aux];
@@ -533,7 +623,7 @@ bool HitTestDoc(float px, float py, uint32_t* pos, bool* inside) {
         for (uint32_t r = 0; r < t.rows; r++) {
             float rh = L->table->rowH[r];
             if (ly < yy + rh || r + 1 == t.rows) {
-                float xx = bx;
+                float xx = bx - HScrollOf(i);
                 for (uint32_t c = 0; c < t.cols; c++) {
                     float cw = L->table->colW[c];
                     if (px < xx + cw || c + 1 == t.cols) {
@@ -558,15 +648,12 @@ bool HitTestDoc(float px, float py, uint32_t* pos, bool* inside) {
     }
 }
 
-static uint32_t BlockOfPos(uint32_t pos) {  // last block whose textOff <= pos
-    auto& bl = g.doc.blocks;
-    size_t lo = 0, hi = bl.size();
-    while (lo < hi) {
-        size_t mid = (lo + hi) / 2;
-        if (bl[mid].textOff <= pos) lo = mid + 1;
-        else hi = mid;
+static int LinkOfRuns(uint32_t p, uint32_t runOff, uint32_t runCount) {
+    for (uint32_t k = 0; k < runCount; k++) {
+        const Run& r = g.doc.runs[runOff + k];
+        if ((r.flags & F_LINK) && p >= r.start && p < r.start + r.len) return (int)r.link;
     }
-    return lo ? (uint32_t)lo - 1 : 0;
+    return -1;
 }
 
 int LinkAt(float px, float py) {
@@ -577,25 +664,29 @@ int LinkAt(float px, float py) {
     for (uint32_t p : {pos, pos ? pos - 1 : 0}) {
         uint32_t bi = BlockOfPos(p);
         const Block& b = g.doc.blocks[bi];
-        auto check = [&](uint32_t runOff, uint32_t runCount) -> int {
-            for (uint32_t k = 0; k < runCount; k++) {
-                const Run& r = g.doc.runs[runOff + k];
-                if ((r.flags & F_LINK) && p >= r.start && p < r.start + r.len) return (int)r.link;
-            }
-            return -1;
-        };
         int li = -1;
-        if (b.kind == BK_TEXT) li = check(b.runOff, b.runCount);
+        if (b.kind == BK_TEXT) li = LinkOfRuns(p, b.runOff, b.runCount);
         else if (b.kind == BK_TABLE) {
             const Table& t = g.doc.tables[b.aux];
             for (uint32_t c = 0; c < t.rows * t.cols && li < 0; c++) {
                 const Cell& cell = g.doc.cells[t.cellOff + c];
-                if (p >= cell.textOff && p < cell.textOff + cell.textLen) li = check(cell.runOff, cell.runCount);
+                if (p >= cell.textOff && p < cell.textOff + cell.textLen) li = LinkOfRuns(p, cell.runOff, cell.runCount);
             }
         }
         if (li >= 0) return li;
     }
     return -1;
+}
+
+int ImageAt(float px, float py) {
+    size_t n = g.doc.blocks.size();
+    if (g.path.empty() || !n) return -1;
+    float docY = py + g.scrollY;
+    uint32_t i = FirstVisible(docY);
+    if (i >= n || g.Y[i] > docY || g.doc.blocks[i].kind != BK_IMAGE || !g.cache[i]) return -1;
+    float x, w;
+    BlockBox(i, &x, &w);
+    return (px >= x && px <= x + g.cache[i]->natural) ? (int)i : -1;
 }
 
 int CodeBlockAt(float px, float py, bool* onCopyButton) {
@@ -727,51 +818,102 @@ void ScrollToBlock(uint32_t i, bool animate) {
     ScrollTo(g.Y[i] - 16.f, animate);
 }
 
-// ------------------------------------------------------------------------------------------------ find
-void FindUpdate(bool keepCurrent) {
-    uint32_t prev = (g.curMatch >= 0 && (size_t)g.curMatch < g.matches.size()) ? g.matches[g.curMatch] : UINT32_MAX;
-    g.matches.clear();
-    g.curMatch = -1;
-    if (g.findQuery.empty() || g.doc.text.empty()) { Invalidate(); return; }
-    if (g.lowerText.size() != g.doc.text.size()) {
-        g.lowerText = ToLower(g.doc.text);
-        if (g.lowerText.size() != g.doc.text.size()) g.lowerText = g.doc.text;  // mapping changed length: exact match
-    }
-    std::wstring q = ToLower(g.findQuery);
-    size_t pos = 0;
-    while ((pos = g.lowerText.find(q, pos)) != std::wstring::npos) {
-        g.matches.push_back((uint32_t)pos);
-        pos += q.size();
-        if (g.matches.size() >= 100000) break;
-    }
-    if (g.matches.empty()) { Invalidate(); return; }
-    if (keepCurrent && prev != UINT32_MAX) {
-        auto it = std::lower_bound(g.matches.begin(), g.matches.end(), prev);
-        g.curMatch = it == g.matches.end() ? 0 : (int)(it - g.matches.begin());
-    } else {  // first match at or below the top of the viewport
-        uint32_t top = g.doc.blocks.empty() ? 0 : g.doc.blocks[std::min<size_t>(FirstVisible(g.scrollY), g.doc.blocks.size() - 1)].textOff;
-        auto it = std::lower_bound(g.matches.begin(), g.matches.end(), top);
-        g.curMatch = it == g.matches.end() ? 0 : (int)(it - g.matches.begin());
-    }
-    FindStep(0);
-}
-
-void FindStep(int dir) {
-    if (g.matches.empty()) { Invalidate(); return; }
-    int n = (int)g.matches.size();
-    g.curMatch = ((g.curMatch < 0 ? 0 : g.curMatch) + dir + n) % n;
-    uint32_t pos = g.matches[g.curMatch];
+// make a text position visible: vertically (keeps a margin, or centres it) and inside a horizontally scrolled block
+void RevealTextPos(uint32_t pos, bool center) {
+    if (g.doc.blocks.empty()) return;
     uint32_t bi = BlockOfPos(pos);
     BlockLayout* L = EnsureLayout(bi);
     RecomputeY();
-    float y = g.Y[bi];
     const Block& b = g.doc.blocks[bi];
-    if (L->text && (b.kind == BK_TEXT || b.kind == BK_CODE)) {
+    IDWriteTextLayout* tl = nullptr;
+    uint32_t off = b.textOff;
+    float lx = 0, ly = 0;
+    if ((b.kind == BK_TEXT || b.kind == BK_CODE) && L->text) {
+        tl = L->text;
+        if (b.kind == BK_CODE) lx = ly = Metrics::kCodePad;
+    } else if (b.kind == BK_TABLE && L->table) {
+        const Table& t = g.doc.tables[b.aux];
+        float yy = 0;
+        for (uint32_t r = 0; r < t.rows && !tl; r++) {
+            float xx = 0;
+            for (uint32_t c = 0; c < t.cols; c++) {
+                const Cell& cell = g.doc.cells[t.cellOff + r * t.cols + c];
+                if (pos >= cell.textOff && pos <= cell.textOff + cell.textLen && L->table->cells[r * t.cols + c]) {
+                    tl = L->table->cells[r * t.cols + c];
+                    off = cell.textOff;
+                    lx = xx + 1 + Metrics::kCellPadX;
+                    ly = yy + 1 + Metrics::kCellPadY;
+                    break;
+                }
+                xx += L->table->colW[c];
+            }
+            yy += L->table->rowH[r];
+        }
+    }
+    float y = g.Y[bi], x = 0;
+    bool haveX = false;
+    if (tl) {
         FLOAT px = 0, py = 0;
         DWRITE_HIT_TEST_METRICS m{};
-        if (SUCCEEDED(L->text->HitTestTextPosition(pos - b.textOff, FALSE, &px, &py, &m)))
-            y += py + (b.kind == BK_CODE ? Metrics::kCodePad : 0.f);
+        if (SUCCEEDED(tl->HitTestTextPosition(pos - off, FALSE, &px, &py, &m))) {
+            y += ly + py;
+            x = lx + px;
+            haveX = true;
+        }
     }
-    if (y < g.scrollY + 56.f || y > g.scrollY + ViewH() - 48.f) ScrollTo(y - ViewH() * 0.35f, false);
+    if (center || y < g.scrollY + 56.f || y > g.scrollY + ViewH() - 48.f) ScrollTo(y - ViewH() * 0.35f, false);
+    float vx, vw, cw;
+    if (haveX && HScrollInfo(bi, &vx, &vw, &cw)) {
+        float cur = HScrollOf(bi);
+        if (x < cur + 24.f || x > cur + vw - 64.f) HScrollSet(bi, x - vw * 0.35f);
+    }
+}
+
+// ------------------------------------------------------------------------------------------------ keyboard link focus
+bool LinkRange(int li, uint32_t* start, uint32_t* end) {
+    if (li < 0 || (size_t)li >= g.doc.links.size()) return false;
+    bool found = false;
+    for (const Run& r : g.doc.runs) {
+        if ((r.flags & F_LINK) && r.link == (uint32_t)li) {
+            if (!found) *start = r.start;
+            *end = r.start + r.len;
+            found = true;
+        } else if (found && r.start >= *end) {
+            break;  // a link's runs are contiguous
+        }
+    }
+    return found;
+}
+
+void FocusLinkStep(int dir) {
+    int n = (int)g.doc.links.size();
+    if (!n || g.doc.blocks.empty()) return;
+    uint32_t s = 0, e = 0;
+    int li = g.focusLink;
+    if (li < 0 || li >= n) {  // start from the viewport
+        uint32_t first = std::min<uint32_t>(FirstVisible(g.scrollY), (uint32_t)g.doc.blocks.size() - 1);
+        uint32_t last = std::min<uint32_t>(FirstVisible(g.scrollY + ViewH()), (uint32_t)g.doc.blocks.size() - 1);
+        uint32_t top = g.doc.blocks[first].textOff, bottom = g.doc.blocks[last].textOff + g.doc.blocks[last].textLen;
+        li = -1;
+        if (dir > 0) {
+            for (int k = 0; k < n && li < 0; k++)
+                if (LinkRange(k, &s, &e) && s >= top) li = k;
+        } else {
+            for (int k = n - 1; k >= 0 && li < 0; k--)
+                if (LinkRange(k, &s, &e) && s < bottom) li = k;
+        }
+        if (li < 0) li = dir > 0 ? 0 : n - 1;
+    } else {
+        li += dir;
+    }
+    for (int tries = 0; tries < n; tries++, li += dir) {  // skip links without text (image links), wrap around
+        li = (li % n + n) % n;
+        if (LinkRange(li, &s, &e)) break;
+    }
+    if (!LinkRange(li, &s, &e)) return;
+    g.focusLink = li;
+    g_focusS = s;
+    g_focusE = e;
+    RevealTextPos(s, false);
     Invalidate();
 }

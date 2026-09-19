@@ -3,8 +3,9 @@
 
 namespace {
 struct RoleSpec { float size, lineH; DWRITE_FONT_WEIGHT weight; bool display; };
-// Product type ramp (research/06 §8.2): body 16/26, h1 32/40, h2 24/32, h3 20/28, h4 17/24, h5 16/24, h6 14/20,
-// code 14/21. h1–h3 use the Display optical size of Segoe UI Variable.
+// Product type ramp at text size 16 (research/06 §8.2): body 16/26, h1 32/40, h2 24/32, h3 20/28, h4 17/24,
+// h5 16/24, h6 14/20, code 14/21. h1–h3 use the Display optical size of Segoe UI Variable. The text-size setting
+// scales the whole ramp (Typography::textScale).
 const RoleSpec kRoles[R_COUNT] = {
     {16.f, 26.f, DWRITE_FONT_WEIGHT_NORMAL, false},
     {32.f, 40.f, DWRITE_FONT_WEIGHT_SEMI_BOLD, true},
@@ -35,62 +36,90 @@ bool FontMetricsFor(IDWriteFontCollection* coll, const wchar_t* family, float* a
     SafeRelease(fam);
     return ok;
 }
+
+// Optical-size family for a text role. Segoe UI Variable: Display for h1–h3, Small below 12 px, Text otherwise.
+// Sitka (the "book" option): Small ≤ 10 pt, Text ≤ 14 pt, Subheading ≤ 18 pt, Heading ≤ 23.5 pt, Display ≤ 27.5 pt,
+// Banner above (1 DIP = 0.75 pt).
+const wchar_t* FamilyFor(uint8_t set, int role, float px) {
+    if (set == FONT_SITKA) {
+        float pt = px * 0.75f;
+        return pt <= 10.f ? L"Sitka Small" : pt <= 14.f ? L"Sitka Text" : pt <= 18.f ? L"Sitka Subheading"
+             : pt <= 23.5f ? L"Sitka Heading" : pt <= 27.5f ? L"Sitka Display" : L"Sitka Banner";
+    }
+    return kRoles[role].display ? L"Segoe UI Variable Display" : px < 12.f ? L"Segoe UI Variable Small" : L"Segoe UI Variable Text";
+}
 }  // namespace
 
-float HeadingRuleExtra(int heading) {
-    return (heading == 1 || heading == 2) ? std::round(kRoles[heading].size * 0.3f) + 1.f : 0.f;
+float HeadingRuleExtra(const Typography& t, int heading) {
+    return (heading == 1 || heading == 2) ? std::round(t.size[heading] * 0.3f) + 1.f : 0.f;
 }
 
 bool Typography::Init(IDWriteFactory3* f, const Typography* from) {
     factory = f;
-    float bodyAsc = 0.93f, bodyDesc = 0.23f, dispAsc = 0.93f, dispDesc = 0.23f;
     if (from) {
-        wcscpy_s(bodyFamily, from->bodyFamily);
-        wcscpy_s(displayFamily, from->displayFamily);
+        fontSet = from->fontSet;
+        textScale = from->textScale;
+        wrapCode = from->wrapCode;
+        memcpy(family, from->family, sizeof(family));
+        wcscpy_s(uiFamily, from->uiFamily);
         wcscpy_s(monoFamily, from->monoFamily);
         wcscpy_s(iconFamily, from->iconFamily);
         monoAscent = from->monoAscent;
         monoDescent = from->monoDescent;
         for (int r = 0; r < R_COUNT; r++) baseline[r] = from->baseline[r];
-    } else {
+    }
+    for (int r = 0; r < R_COUNT; r++) {
+        size[r] = std::round(kRoles[r].size * textScale * 2.f) / 2.f;
+        lineH[r] = std::round(kRoles[r].lineH * textScale);
+    }
+    if (!from) {
+        float asc[R_COUNT], desc[R_COUNT];
         IDWriteFontCollection* coll = nullptr;
         if (SUCCEEDED(f->GetSystemFontCollection(&coll, FALSE))) {
-            if (!FontMetricsFor(coll, bodyFamily, &bodyAsc, &bodyDesc)) {
-                wcscpy_s(bodyFamily, L"Segoe UI");
-                FontMetricsFor(coll, bodyFamily, &bodyAsc, &bodyDesc);
+            struct Known { const wchar_t* name; float a, d; bool ok; } known[8];
+            int nk = 0;
+            auto metrics = [&](const wchar_t* name, float* a, float* d) {  // one font lookup per distinct family
+                for (int k = 0; k < nk; k++)
+                    if (!wcscmp(known[k].name, name)) { *a = known[k].a; *d = known[k].d; return known[k].ok; }
+                *a = 0.93f;
+                *d = 0.23f;
+                bool ok = FontMetricsFor(coll, name, a, d);
+                if (nk < 8) known[nk++] = Known{name, *a, *d, ok};
+                return ok;
+            };
+            for (int r = 0; r < R_CODE; r++) {
+                const wchar_t* want = FamilyFor(fontSet, r, size[r]);
+                if (!metrics(want, &asc[r], &desc[r])) {
+                    want = FamilyFor(FONT_SEGOE, r, size[r]);
+                    if (!metrics(want, &asc[r], &desc[r])) { want = L"Segoe UI"; metrics(want, &asc[r], &desc[r]); }
+                }
+                wcscpy_s(family[r], want);
             }
-            if (!FontMetricsFor(coll, displayFamily, &dispAsc, &dispDesc)) {
-                wcscpy_s(displayFamily, bodyFamily);
-                dispAsc = bodyAsc;
-                dispDesc = bodyDesc;
-            }
+            if (!FontMetricsFor(coll, uiFamily, nullptr, nullptr)) wcscpy_s(uiFamily, L"Segoe UI");
             if (!FontMetricsFor(coll, monoFamily, &monoAscent, &monoDescent)) {
                 wcscpy_s(monoFamily, L"Consolas");
                 FontMetricsFor(coll, monoFamily, &monoAscent, &monoDescent);
             }
             if (!FontMetricsFor(coll, iconFamily, nullptr, nullptr)) wcscpy_s(iconFamily, L"Segoe MDL2 Assets");
             coll->Release();
+        } else {
+            for (int r = 0; r < R_CODE; r++) { wcscpy_s(family[r], L"Segoe UI"); asc[r] = 0.93f; desc[r] = 0.23f; }
         }
+        wcscpy_s(family[R_CODE], monoFamily);
+        asc[R_CODE] = monoAscent;
+        desc[R_CODE] = monoDescent;
+        // CSS half-leading: the line box is lineH tall, content area (ascent+descent) centred in it
+        for (int r = 0; r < R_COUNT; r++)
+            baseline[r] = std::round(((lineH[r] - (asc[r] + desc[r]) * size[r]) * 0.5f + asc[r] * size[r]) * 4.f) / 4.f;
     }
     for (int r = 0; r < R_COUNT; r++) {
-        const RoleSpec& s = kRoles[r];
-        size[r] = s.size;
-        lineH[r] = s.lineH;
-        bool mono = r == R_CODE;
-        const wchar_t* fam = mono ? monoFamily : s.display ? displayFamily : bodyFamily;
-        if (!from) {
-            float a = mono ? monoAscent : s.display ? dispAsc : bodyAsc;
-            float d = mono ? monoDescent : s.display ? dispDesc : bodyDesc;
-            // CSS half-leading: the line box is lineH tall, content area (ascent+descent) centred in it
-            baseline[r] = std::round(((s.lineH - (a + d) * s.size) * 0.5f + a * s.size) * 4.f) / 4.f;
-        }
-        if (FAILED(f->CreateTextFormat(fam, nullptr, s.weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                       s.size, L"en-us", &fmt[r])))
+        if (FAILED(f->CreateTextFormat(family[r], nullptr, kRoles[r].weight, DWRITE_FONT_STYLE_NORMAL,
+                                       DWRITE_FONT_STRETCH_NORMAL, size[r], L"en-us", &fmt[r])))
             return false;
-        fmt[r]->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, s.lineH, baseline[r]);
-        fmt[r]->SetWordWrapping(mono ? DWRITE_WORD_WRAPPING_NO_WRAP : DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
+        fmt[r]->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, lineH[r], baseline[r]);
+        fmt[r]->SetWordWrapping(r == R_CODE ? DWRITE_WORD_WRAPPING_NO_WRAP : DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
     }
-    f->CreateTextFormat(bodyFamily, nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+    f->CreateTextFormat(uiFamily, nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
                         DWRITE_FONT_STRETCH_NORMAL, 13.f, L"en-us", &ui);
     if (ui) ui->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     f->CreateTextFormat(iconFamily, nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -174,7 +203,7 @@ float ImageDisplayHeight(const Image& im, float width) {
 }
 
 // ------------------------------------------------------------------------------------------------ blocks
-float BlockHeightEstimate(const Doc& d, const Block& b, float width, bool* exact) {
+float BlockHeightEstimate(const Doc& d, const Typography& t, const Block& b, float width, bool* exact) {
     *exact = false;
     float w = width - b.indent;
     switch (b.kind) {
@@ -183,12 +212,12 @@ float BlockHeightEstimate(const Doc& d, const Block& b, float width, bool* exact
         uint32_t lines = 1;
         const wchar_t* s = d.text.data() + b.textOff;
         for (uint32_t i = 0; i < b.textLen; i++) lines += s[i] == L'\n';
-        *exact = true;
-        return lines * kRoles[R_CODE].lineH + 2 * Metrics::kCodePad;
+        *exact = !t.wrapCode;  // wrapped code: at least this tall, measured later
+        return lines * t.lineH[R_CODE] + 2 * Metrics::kCodePad;
     }
     case BK_TABLE: {
-        const Table& t = d.tables[b.aux];
-        return t.rows * (kRoles[R_BODY].lineH + 2 * Metrics::kCellPadY + 1) + 1;
+        const Table& tb = d.tables[b.aux];
+        return tb.rows * (t.lineH[R_BODY] + 2 * Metrics::kCellPadY + 1) + 1;
     }
     case BK_IMAGE: {
         const Image& im = d.images[b.aux];
@@ -197,9 +226,9 @@ float BlockHeightEstimate(const Doc& d, const Block& b, float width, bool* exact
     }
     default: {
         int role = b.heading ? b.heading : R_BODY;
-        float charW = kRoles[role].size * 0.5f;
+        float charW = t.size[role] * 0.5f;
         float lines = std::ceil((b.textLen * charW + 1) / std::max(50.f, w));
-        return std::max(1.f, lines) * kRoles[role].lineH + HeadingRuleExtra(b.heading);
+        return std::max(1.f, lines) * t.lineH[role] + HeadingRuleExtra(t, b.heading);
     }
     }
 }
@@ -306,13 +335,14 @@ BlockLayout* LayoutBlock(const Doc& d, const Typography& t, uint32_t index, floa
             ApplyRuns(d, t, bl->text, b.textOff, b.runOff, b.runCount, role, b.heading != 0);
             DWRITE_TEXT_METRICS m{};
             bl->text->GetMetrics(&m);
-            bl->height = m.height + HeadingRuleExtra(b.heading);
+            bl->height = m.height + HeadingRuleExtra(t, b.heading);
         }
         break;
     }
     case BK_CODE: {
         float inner = std::max(10.f, w - 2 * Metrics::kCodePad);
         if (SUCCEEDED(t.factory->CreateTextLayout(d.text.data() + b.textOff, b.textLen, t.fmt[R_CODE], inner, 1e7f, &bl->text))) {
+            if (t.wrapCode) bl->text->SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
             DWRITE_TEXT_METRICS m{};
             bl->text->GetMetrics(&m);
             bl->height = m.height + 2 * Metrics::kCodePad;

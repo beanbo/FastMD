@@ -1,0 +1,108 @@
+#include "common.h"
+#include "strings.h"
+
+namespace {
+struct Pair { const wchar_t* ru; const wchar_t* en; };
+const Pair kStr[] = {
+    // context menu
+    {L"Копировать\tCtrl+C", L"Copy\tCtrl+C"},
+    {L"Выделить всё\tCtrl+A", L"Select all\tCtrl+A"},
+    {L"Найти…\tCtrl+F", L"Find…\tCtrl+F"},
+    {L"Оглавление\tCtrl+Shift+O", L"Outline\tCtrl+Shift+O"},
+    {L"Назад\tAlt+←", L"Back\tAlt+←"},
+    {L"Вперёд\tAlt+→", L"Forward\tAlt+→"},
+    {L"Открыть файл…\tCtrl+O", L"Open file…\tCtrl+O"},
+    {L"Обновить\tF5", L"Reload\tF5"},
+    {L"Открыть в редакторе\tCtrl+E", L"Open in editor\tCtrl+E"},
+    {L"Показать в папке", L"Show in folder"},
+    {L"Тема", L"Theme"},
+    {L"Как в системе", L"System"},
+    {L"Светлая", L"Light"},
+    {L"Тёмная", L"Dark"},
+    {L"Масштаб: %d %%", L"Zoom: %d%%"},
+    {L"Увеличить\tCtrl++", L"Zoom in\tCtrl++"},
+    {L"Уменьшить\tCtrl+−", L"Zoom out\tCtrl+−"},
+    {L"Сбросить (100 %)\tCtrl+0", L"Reset (100%)\tCtrl+0"},
+    {L"Ширина колонки", L"Column width"},
+    {L"Узкая", L"Narrow"},
+    {L"Обычная", L"Normal"},
+    {L"Широкая", L"Wide"},
+    {L"Во всю ширину", L"Full width"},
+    {L"Переносить строки в коде", L"Wrap lines in code"},
+    {L"Настройки…\tCtrl+,", L"Settings…\tCtrl+,"},
+    {L"Открывать .md в FastMD…", L"Open .md files with FastMD…"},
+    {L"Открыть ссылку", L"Open link"},
+    {L"Копировать адрес ссылки", L"Copy link address"},
+    {L"Копировать картинку", L"Copy image"},
+    {L"Открыть файл картинки", L"Open image file"},
+    // toasts / messages
+    {L"Скопировано", L"Copied"},
+    {L"Код скопирован", L"Code copied"},
+    {L"Адрес ссылки скопирован", L"Link address copied"},
+    {L"Картинка скопирована", L"Image copied"},
+    {L"Обновлено", L"Reloaded"},
+    {L"Заголовок не найден: ", L"Heading not found: "},
+    {L"Файл не найден: ", L"File not found: "},
+    {L"FastMD зарегистрирован. Выберите его для .md в «Приложения по умолчанию»",
+     L"FastMD is registered. Choose it for .md in Settings → Default apps"},
+    {L"Не удалось записать ассоциацию в реестр", L"Could not write the association to the registry"},
+    {L"Ширина колонки: ", L"Column width: "},
+    {L"Не удалось запустить редактор", L"Could not start the editor"},
+    {L"Документ хочет открыть:\n\n%s\n\nОткрыть?", L"The document wants to open:\n\n%s\n\nOpen it?"},
+    {L"Не удалось открыть файл", L"Could not open the file"},
+    {L"Строки в коде переносятся", L"Code lines wrap"},
+    {L"Строки в коде не переносятся", L"Code lines scroll"},
+    // find bar
+    {L"Найти в документе", L"Find in document"},
+    {L"нет совпадений", L"no results"},
+    {L"Учитывать регистр (Alt+C)", L"Match case (Alt+C)"},
+    {L"Слово целиком (Alt+W)", L"Whole word (Alt+W)"},
+    {L"Предыдущее (Shift+Enter)", L"Previous (Shift+Enter)"},
+    {L"Следующее (Enter)", L"Next (Enter)"},
+    {L"Закрыть (Esc)", L"Close (Esc)"},
+    // start screen
+    {L"Откройте Markdown-файл", L"Open a Markdown file"},
+    {L"Перетащите .md сюда или нажмите Ctrl+O", L"Drop a .md file here or press Ctrl+O"},
+    {L"Недавние документы", L"Recent documents"},
+    {L"Поиск по названию", L"Search by name"},
+    {L"Ничего не найдено", L"Nothing found"},
+    // outline
+    {L"Оглавление", L"Outline"},
+    {L"В документе нет заголовков", L"This document has no headings"},
+    {L"Оглавление (Ctrl+Shift+O)", L"Outline (Ctrl+Shift+O)"},
+    // settings window
+    {L"Настройки FastMD", L"FastMD Settings"},
+    {L"Тема", L"Theme"},
+    {L"Шрифт текста", L"Text font"},
+    {L"Segoe UI", L"Segoe UI"},
+    {L"Sitka (книжный)", L"Sitka (book)"},
+    {L"Размер текста", L"Text size"},
+    {L"Ширина колонки", L"Column width"},
+    {L"Переносить строки в коде", L"Wrap lines in code"},
+    {L"Выкл", L"Off"},
+    {L"Вкл", L"On"},
+    {L"Плавная прокрутка", L"Smooth scrolling"},
+    {L"Редактор для Ctrl+E", L"Editor for Ctrl+E"},
+    {L"Как в системе", L"System default"},
+    {L"Блокнот", L"Notepad"},
+    {L"Другой…", L"Other…"},
+    {L"Язык интерфейса", L"Language"},
+    {L"Как в системе", L"System"},
+    {L"Файлы .md", L".md files"},
+    {L"Открывать .md в FastMD…", L"Open .md files with FastMD…"},
+    {L"FastMD %s · лицензия GPL-3.0", L"FastMD %s · GPL-3.0 license"},
+    // shell
+    {L"Markdown (*.md; *.markdown; *.mdx; *.txt)", L"Markdown (*.md; *.markdown; *.mdx; *.txt)"},
+    {L"Все файлы", L"All files"},
+    {L"Программы (*.exe)", L"Programs (*.exe)"},
+    {L"Markdown-документ", L"Markdown document"},
+    {L"Мгновенный просмотр Markdown", L"Instant Markdown reader"},
+};
+static_assert(std::size(kStr) == S_COUNT, "one entry per StrId");
+UiLang g_lang = UL_RU;
+}  // namespace
+
+void SetUiLanguage(UiLang l) { g_lang = l; }
+UiLang UiLanguage() { return g_lang; }
+UiLang SystemUiLanguage() { return PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_RUSSIAN ? UL_RU : UL_EN; }
+const wchar_t* Tr(StrId id) { return id < S_COUNT ? (g_lang == UL_RU ? kStr[id].ru : kStr[id].en) : L""; }

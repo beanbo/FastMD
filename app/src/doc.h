@@ -44,13 +44,14 @@ struct Table {
 };
 struct Image {
     std::wstring path;          // absolute local path ("" = remote / unsupported)
-    int w = -1, h = -1;         // pixel size (-1 = unknown yet, 0 = failed)
+    int w = -1, h = -1;         // pixel size from the file header (-1 = unknown yet, 0 = failed) — layout
     int canon = -1;             // index of the first image with the same path (holds the pixels)
     std::vector<uint32_t> px;   // decoded premultiplied BGRA (canonical entry only), filled by the image thread
+    int pxW = 0, pxH = 0;       // size of px as decoded (a GIF frame can be smaller than its header's screen)
     std::atomic<int> state{0};  // 0 = not requested, 1 = loading, 2 = ready, 3 = failed
     Image() = default;
     Image(const Image& o) : path(o.path), w(o.w), h(o.h) {}
-    Image& operator=(const Image& o) { path = o.path; w = o.w; h = o.h; canon = -1; px.clear(); state = 0; return *this; }
+    Image& operator=(const Image& o) { path = o.path; w = o.w; h = o.h; canon = -1; px.clear(); pxW = pxH = 0; state = 0; return *this; }
 };
 struct QuoteSpan { float x; uint32_t first, last; uint8_t alert; };
 struct Heading { uint32_t block; uint8_t level; std::wstring slug; };

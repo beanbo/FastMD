@@ -13,6 +13,7 @@
 #include <dwrite_3.h>
 #include <algorithm>
 #include <atomic>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <string>

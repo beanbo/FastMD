@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
-project(FastMD LANGUAGES C CXX RC)
+# the one place the version lives: src/version.h (generated) feeds the exe resource and the settings window
+project(FastMD VERSION 0.2.0 LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,12 +24,16 @@ else()
     set(FASTMD_SEC_L "")
 endif()
 
+configure_file(src/version.h.in ${CMAKE_BINARY_DIR}/generated/version.h @ONLY)
+
 add_executable(FastMD WIN32
     src/view.cpp src/window.cpp src/loader.cpp src/parse.cpp src/layout.cpp src/canvas_gdi.cpp
     src/highlight.cpp src/theme.cpp src/util.cpp
+    src/find.cpp src/toc.cpp src/home.cpp src/store.cpp src/shell.cpp src/settings_ui.cpp src/strings.cpp
     third_party/md4c/md4c.c
     res/fastmd.rc)
 
+target_include_directories(FastMD PRIVATE ${CMAKE_BINARY_DIR}/generated)
 target_compile_definitions(FastMD PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS
     MD4C_USE_UTF16)
 target_compile_options(FastMD PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus /EHsc
@@ -41,6 +46,8 @@ target_link_options(FastMD PRIVATE
     /MANIFEST:EMBED /MANIFESTINPUT:${FASTMD_MANIFEST}
     /DELAYLOAD:dwrite.dll /DELAYLOAD:ole32.dll /DELAYLOAD:shell32.dll /DELAYLOAD:imm32.dll
     /DELAYLOAD:windowscodecs.dll /DELAYLOAD:comdlg32.dll
-    $<$<CONFIG:Release>:/LTCG /OPT:REF /OPT:ICF /INCREMENTAL:NO> ${FASTMD_SEC_L})
+    # /MANIFEST:EMBED with our own manifest: incremental linking would expect a separate .manifest file (Debug)
+    /INCREMENTAL:NO
+    $<$<CONFIG:Release>:/LTCG /OPT:REF /OPT:ICF> ${FASTMD_SEC_L})
 target_link_libraries(FastMD PRIVATE user32 gdi32 dwmapi dwrite ole32 shell32 imm32 windowscodecs comdlg32 advapi32
     delayimp)
