@@ -11,7 +11,7 @@
 
 ## Сборка
 
-Нужна Visual Studio 2022 с workload «Desktop development with C++»: MSVC, Windows SDK, CMake и Ninja входят в неё.
+Нужна Visual Studio 2022 или новее (любая редакция или Build Tools) с workload «Desktop development with C++»: MSVC, Windows SDK, CMake и Ninja входят в неё. `tools/msvc.cmd` находит установку через vswhere.
 
 ```
 pwsh -File app/build.ps1            # dev-сборка → app/build/Release/FastMD.exe (тесты, замеры)

@@ -5,6 +5,8 @@ app/tests/out/
 *.pdb
 *.ilk
 *.obj
+__pycache__/
+*.pyc
 
 # research / benchmark tooling and artefacts (tens of GB: toolchains, prototype builds, downloads)
 bench/.tools/

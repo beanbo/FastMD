@@ -1,2 +1,6 @@
 # benchmark corpus: byte-exact (line endings are part of what the parser measures)
 bench/corpus/** -text
+
+# cmd.exe misparses LF-only batch files in some cases: always check them out with CRLF
+*.cmd text eol=crlf
+*.bat text eol=crlf
