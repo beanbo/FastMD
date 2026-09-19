@@ -520,6 +520,16 @@ IDWriteTextLayout* UiLayout(const std::wstring& s, float maxW, IDWriteTextFormat
     return L;
 }
 
+void DrawIcon(wchar_t icon, float l, float t, float box, float size, uint8_t pal) {
+    IDWriteTextLayout* L = nullptr;
+    if (FAILED(g.dwf->CreateTextLayout(&icon, 1, g.typo.uiIcon, box, box, &L))) return;
+    L->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    L->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    L->SetFontSize(size, DWRITE_TEXT_RANGE{0, 1});
+    g.canvas->Text(L, l, t, pal);
+    L->Release();
+}
+
 void DrawPill(const std::wstring& s, float cx, float y, bool centered) {
     IDWriteTextLayout* L = UiLayout(s, std::max(100.f, ViewW() - 48.f));
     if (!L) return;
@@ -566,6 +576,7 @@ void Render() {
         }
         DrawScrollbar();
     }
+    DrawSettingsButton();  // under the outline drawer: in a narrow window the drawer may cover it (and takes the click)
     DrawToc();
     if (g.findOpen) DrawFindBar();
     const std::wstring* pill = nullptr;

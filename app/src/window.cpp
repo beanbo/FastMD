@@ -431,7 +431,7 @@ static void ScrollTest() {  // steady-state cost of a scrolling frame, logged to
 
 static void AfterFirstFrame() {
     g.firstFrame = false;
-    if (TocAvailable()) Invalidate();  // the outline button / close icon were left out of the first frame
+    Invalidate();  // the icon buttons (settings, outline, its close icon) were left out of the first frame
     StartBackgroundWork();
     DragAcceptFiles(g.hwnd, TRUE);
     if (!g.path.empty()) SHAddToRecentDocs(SHARD_PATHW, g.path.c_str());
@@ -523,25 +523,29 @@ static void OnMouseMove(int mx, int my) {
     }
     TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, g.hwnd, 0};
     TrackMouseEvent(&tme);
-    // overlays first: find bar, outline panel, outline button
+    // overlays first: find bar, outline panel, outline button, settings button
     int fpart = FindPartAt(x, y);
     int tocItem = -1;
     bool inToc = fpart == FP_NONE && TocHit(x, y, &tocItem);
     bool tocBtn = fpart == FP_NONE && !inToc && TocButtonHit(x, y);
-    bool overlay = fpart != FP_NONE || inToc || tocBtn;
+    bool gear = fpart == FP_NONE && !inToc && !tocBtn && SettingsButtonHit(x, y);
+    bool overlay = fpart != FP_NONE || inToc || tocBtn || gear;
     int home = g.path.empty() ? HomeItemAt(x, y) : -1;
     bool hot = !overlay && InScrollbar(x);
     bool onHBar = false, onBtn = false;
     int hblock = (overlay || hot) ? -1 : HScrollBlockAt(x, y, &onHBar);
     int link = (overlay || hot) ? -1 : LinkAt(x, y);
     int code = (overlay || hot) ? -1 : CodeBlockAt(x, y, &onBtn);
-    std::wstring tip = tocBtn ? std::wstring(Tr(S_TOC_BUTTON_TIP)) : std::wstring(FindTip(fpart));
-    if (fpart != g.findHot || tocItem != g.tocHover || tocBtn != g.tocBtnHot || hot != g.hotScroll || link != g.hoverLink ||
-        code != g.hoverCode || onBtn != g.hoverCopyBtn || hblock != g.hoverHBlock || onHBar != g.hotHBar ||
-        home != g.recentHover || tip != g.tip) {
+    std::wstring tip = tocBtn ? std::wstring(Tr(S_TOC_BUTTON_TIP))
+                     : gear   ? std::wstring(Tr(S_SETTINGS_BUTTON_TIP))
+                              : std::wstring(FindTip(fpart));
+    if (fpart != g.findHot || tocItem != g.tocHover || tocBtn != g.tocBtnHot || gear != g.settingsBtnHot ||
+        hot != g.hotScroll || link != g.hoverLink || code != g.hoverCode || onBtn != g.hoverCopyBtn ||
+        hblock != g.hoverHBlock || onHBar != g.hotHBar || home != g.recentHover || tip != g.tip) {
         g.findHot = fpart;
         g.tocHover = tocItem;
         g.tocBtnHot = tocBtn;
+        g.settingsBtnHot = gear;
         g.hotScroll = hot;
         g.hoverLink = link;
         g.hoverCode = code;
@@ -553,7 +557,7 @@ static void OnMouseMove(int mx, int my) {
         Invalidate();
     }
     LPCWSTR cur = IDC_ARROW;
-    if (link >= 0 || onBtn || tocBtn || tocItem >= 0 || tocItem == -2 || home >= 0 ||
+    if (link >= 0 || onBtn || tocBtn || gear || tocItem >= 0 || tocItem == -2 || home >= 0 ||
         (fpart != FP_NONE && fpart != FP_BAR && fpart != FP_FIELD && fpart != FP_COUNT))
         cur = IDC_HAND;
     else if (fpart == FP_FIELD) cur = IDC_IBEAM;
@@ -574,6 +578,7 @@ static void OnLButtonDown(int mx, int my, WPARAM keys) {
     int item;
     if (TocHit(x, y, &item)) { TocClick(item); return; }
     if (TocButtonHit(x, y)) { TocSetOpen(true); return; }
+    if (SettingsButtonHit(x, y)) { SettingsOpen(); return; }
     if (TocOverlayOpen()) { TocSetOpen(false); return; }  // a click beside the drawer closes it
     if (g.path.empty()) {
         int k = HomeItemAt(x, y);
@@ -796,6 +801,11 @@ static LRESULT Query(WPARAM q, LPARAM lp) {
     case Q_THEME_DARK: return PaletteIsDark();
     case Q_SETTINGS_HIT: return SettingsHitCenter((int)lp);
     case Q_FONT_FAMILY_SITKA: return wcsncmp(g.typo.family[R_BODY], L"Sitka", 5) == 0;
+    case Q_SETTINGS_BTN: {
+        float l, t, r, b;
+        if (!SettingsButtonRect(&l, &t, &r, &b)) return -1;
+        return MAKELONG(std::lround((l + r) * 0.5f * s), std::lround((t + b) * 0.5f * s));
+    }
     }
     return 0;
 }
@@ -874,8 +884,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_MOUSELEAVE:
         if (g.hotScroll || g.hoverLink >= 0 || g.hoverCode >= 0 || g.hoverHBlock >= 0 || g.findHot != -1 ||
-            g.tocHover != -1 || g.tocBtnHot || g.recentHover >= 0 || !g.tip.empty()) {
-            g.hotScroll = g.tocBtnHot = g.hotHBar = false;
+            g.tocHover != -1 || g.tocBtnHot || g.settingsBtnHot || g.recentHover >= 0 || !g.tip.empty()) {
+            g.hotScroll = g.tocBtnHot = g.settingsBtnHot = g.hotHBar = false;
             g.hoverLink = g.hoverCode = g.hoverHBlock = g.recentHover = -1;
             g.findHot = g.tocHover = -1;
             g.hoverCopyBtn = false;

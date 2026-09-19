@@ -7,7 +7,7 @@
 //                     file watch, reading positions
 //   store.cpp       — settings (registry), reading positions + recent documents (positions.bin), editor detection
 //   shell.cpp       — links, clipboard, editor / Explorer / dialogs, .md association
-//   settings_ui.cpp — settings window
+//   settings_ui.cpp — settings window and the gear button that opens it
 //   strings.cpp     — UI strings (ru / en)
 //   window.cpp      — Win32 window, input, commands, menus, wWinMain
 #pragma once
@@ -44,6 +44,7 @@ enum Query : UINT {
     Q_CUR_MATCH, Q_TEXT_LEFT, Q_TEXT_W, Q_RECENT_COUNT, Q_FIND_EDIT, Q_SETTINGS_HWND, Q_FIND_OPEN, Q_COLUMN,
     Q_FONT_SIZE, Q_WRAP, Q_LANG, Q_FIND_PART_X /* lp = part → x | y << 16 */, Q_BLOCK_Y /* lp = block */,
     Q_RESTORED, Q_THEME_DARK, Q_TARGETY, Q_SETTINGS_HIT /* lp = row * 100 + option */, Q_FONT_FAMILY_SITKA,
+    Q_SETTINGS_BTN /* centre of the gear button x | y << 16, -1 = not shown */,
 };
 
 enum ColumnPreset : uint8_t { COL_NARROW = 0, COL_NORMAL, COL_WIDE, COL_FULL };
@@ -190,6 +191,7 @@ struct App {
     float dragHGrab = 0;
     int hbarFlash = -1;             // block whose horizontal scrollbar shows briefly after it scrolled
     DWORD hbarFlashUntil = 0;
+    bool settingsBtnHot = false;    // the gear button (top-right corner) under the mouse
     std::wstring tip;               // tooltip pill (buttons)
     std::wstring toast;
     DWORD toastUntil = 0;
@@ -221,6 +223,8 @@ void Render();                       // draw the full frame into the canvas
 void WithAnchor(void (*fn)());       // keep the top visible block in place while heights change
 void DrawPill(const std::wstring& s, float x, float y, bool centered);
 IDWriteTextLayout* UiLayout(const std::wstring& s, float maxW, IDWriteTextFormat* fmt = nullptr);
+// one icon-font glyph centred in a box × box square; the font loads on first use, so never in the first frame
+void DrawIcon(wchar_t icon, float l, float t, float box, float size, uint8_t pal);
 
 // horizontal scrolling of code blocks / tables wider than their box
 bool HScrollInfo(uint32_t i, float* visX, float* visW, float* contentW);
@@ -347,6 +351,10 @@ void SettingsOpen();
 void SettingsRefresh();              // settings changed elsewhere (menu, shortcut, other window)
 HWND SettingsHwnd();
 LRESULT SettingsHitCenter(int id);   // tests: control centre (client px), -1 if absent
+// the gear button in the document window's top-right corner (not shown in the first frame or under the find bar)
+bool SettingsButtonRect(float* l, float* t, float* r, float* b);  // client DIP; false = not shown
+bool SettingsButtonHit(float x, float y);
+void DrawSettingsButton();
 
 // ------------------------------------------------------------------------------------------------ window.cpp
 enum SettingsChange : uint32_t {

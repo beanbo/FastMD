@@ -72,6 +72,7 @@ const Pair kStr[] = {
     {L"Оглавление (Ctrl+Shift+O)", L"Outline (Ctrl+Shift+O)"},
     // settings window
     {L"Настройки FastMD", L"FastMD Settings"},
+    {L"Настройки (Ctrl+,)", L"Settings (Ctrl+,)"},
     {L"Тема", L"Theme"},
     {L"Шрифт текста", L"Text font"},
     {L"Segoe UI", L"Segoe UI"},
