@@ -126,6 +126,7 @@ static void ResetViewState() {
     g.restoreBlock = -1;
     g.restored = false;
     g.imagesStarted = false;
+    g.scalingImages = false;  // JoinWorkers has already waited for the scaler; a late result is dropped by its gen
     g.docH = 0;
 }
 
@@ -316,6 +317,104 @@ static void StartImages() {
     if (g.imagesStarted || g.doc.images.empty()) return;
     g.imagesStarted = true;
     Spawn(ImageThread, (void*)(uintptr_t)(uint32_t)g.docGen, THREAD_PRIORITY_BELOW_NORMAL);
+}
+
+// --------------------------------------------------------------------------------------- display-size copies (WIC)
+// Drawing a picture straight from its decoded pixels means scaling every pixel of every frame by the nearest
+// neighbour: slow while scrolling and visibly jagged when the picture is bigger than its column. So the canvas
+// records the size it drew at, and this thread makes a copy at exactly that size with a real filter; after that a
+// frame only copies rows. A copy is remade when the size changes (zoom, column width, window resize).
+static const size_t kScaledBudget = 48u << 20;  // bytes of display-size copies kept outside the viewport
+
+static DWORD WINAPI ScaleThread(void* p) {
+    uint32_t myGen = (uint32_t)(uintptr_t)p;
+    HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    IWICImagingFactory* wic = nullptr;
+    CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
+    auto* out = new std::vector<ScaledImage>();
+    auto& imgs = g.doc.images;
+    for (size_t i = 0; wic && i < imgs.size() && !g.closing && g.docGen == myGen; i++) {
+        Image& im = imgs[i];
+        if (im.canon >= 0 && im.canon != (int)i) continue;  // only the entry that holds the pixels
+        if (im.state.load() != 2 || im.pxW <= 0 || im.pxH <= 0) continue;
+        int w = im.wantW.load(), h = im.wantH.load();
+        if (w <= 0 || h <= 0 || (w == im.scW.load() && h == im.scH.load())) continue;
+        if (w == im.pxW && h == im.pxH) continue;  // drawn 1:1: the decoded pixels are already the right size
+        IWICBitmap* src = nullptr;
+        IWICBitmapScaler* scaler = nullptr;
+        std::vector<uint32_t> px((size_t)w * h);
+        bool ok = SUCCEEDED(wic->CreateBitmapFromMemory((UINT)im.pxW, (UINT)im.pxH, GUID_WICPixelFormat32bppPBGRA,
+                                                        (UINT)im.pxW * 4, (UINT)(im.px.size() * 4), (BYTE*)im.px.data(), &src)) &&
+                  SUCCEEDED(wic->CreateBitmapScaler(&scaler)) &&
+                  SUCCEEDED(scaler->Initialize(src, (UINT)w, (UINT)h, WICBitmapInterpolationModeFant)) &&
+                  SUCCEEDED(scaler->CopyPixels(nullptr, (UINT)w * 4, (UINT)(px.size() * 4), (BYTE*)px.data()));
+        SafeRelease(scaler);
+        SafeRelease(src);
+        // a failure is reported too (empty pixels): the size is then known to be unusable and is not retried
+        out->push_back(ScaledImage{(uint32_t)i, w, h, ok ? std::move(px) : std::vector<uint32_t>()});
+    }
+    SafeRelease(wic);
+    if (SUCCEEDED(hrCo) ) CoUninitialize();
+    if (g.closing || g.docGen != myGen || !g.hwnd || !PostMessageW(g.hwnd, WM_APP_SCALED, myGen, (LPARAM)out)) delete out;
+    return 0;
+}
+
+void ScheduleImageScaling() {
+    if (g.scalingImages || g.firstFrame || !g.hwnd || g.closing) return;
+    for (size_t i = 0; i < g.doc.images.size(); i++) {
+        Image& im = g.doc.images[i];
+        if (im.canon >= 0 && im.canon != (int)i) continue;
+        int w = im.wantW.load(), h = im.wantH.load();
+        if (w <= 0 || h <= 0 || (w == im.scW.load() && h == im.scH.load()) || (w == im.pxW && h == im.pxH)) continue;
+        if (im.state.load() != 2) continue;
+        g.scalingImages = true;
+        Spawn(ScaleThread, (void*)(uintptr_t)(uint32_t)g.docGen, THREAD_PRIORITY_BELOW_NORMAL);
+        return;
+    }
+}
+
+// keep the display-size copies of the pictures around the viewport; drop the rest once they add up (a long gallery)
+static void TrimScaledImages() {
+    size_t total = 0;
+    for (const Image& im : g.doc.images) total += im.sc.size() * 4;
+    if (total <= kScaledBudget) return;
+    std::vector<uint8_t> keep(g.doc.images.size(), 0);
+    float top = g.scrollY - ViewH(), bottom = g.scrollY + 2 * ViewH();
+    for (size_t i = 0; i < g.doc.blocks.size() && i < g.Y.size(); i++) {
+        const Block& b = g.doc.blocks[i];
+        if (b.kind != BK_IMAGE || b.aux >= keep.size() || g.Y[i] + g.H[i] < top || g.Y[i] > bottom) continue;
+        keep[b.aux] = 1;
+        int c = g.doc.images[b.aux].canon;
+        if (c >= 0 && (size_t)c < keep.size()) keep[c] = 1;
+    }
+    for (size_t i = 0; i < g.doc.images.size(); i++) {
+        Image& im = g.doc.images[i];
+        if (keep[i] || im.sc.empty()) continue;
+        im.scW = 0;  // the canvas checks the size before it reads the pixels
+        im.scH = 0;
+        im.wantW = 0;
+        im.wantH = 0;
+        std::vector<uint32_t>().swap(im.sc);
+    }
+}
+
+void OnScaledImages(std::vector<ScaledImage>* list, uint32_t gen) {
+    g.scalingImages = false;
+    if (gen == g.docGen && !g.closing) {
+        for (ScaledImage& s : *list) {
+            if (s.index >= g.doc.images.size()) continue;
+            Image& im = g.doc.images[s.index];
+            im.sc.swap(s.px);
+            im.scW = s.w;
+            im.scH = s.h;
+        }
+        if (!list->empty()) {
+            TrimScaledImages();
+            Invalidate();
+        }
+        ScheduleImageScaling();  // the size may have changed again while this batch was being made
+    }
+    delete list;
 }
 
 void OnImagesLoaded() {

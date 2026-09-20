@@ -397,6 +397,7 @@ static void WaitReady() {
 
 static void Present(HDC hdc) {
     if (!g.offscreenValid) Render();
+    ScheduleImageScaling();  // a picture was drawn at a size we have no display-size copy of
     g.offscreenValid = false;
     HDC dst = hdc ? hdc : GetDC(g.hwnd);
     BitBlt(dst, 0, 0, g.pxW, g.pxH, g.canvas->DC(), 0, 0, SRCCOPY);
@@ -404,6 +405,11 @@ static void Present(HDC hdc) {
 }
 
 static void ScrollTest() {  // steady-state cost of a scrolling frame, logged to %TEMP%\fastmd-scroll.txt
+    for (DWORD start = GetTickCount(); GetTickCount() - start < 1200;) {  // let the background work settle first:
+        MSG msg;                                                          // heights measured, images decoded and scaled
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+        Sleep(1);
+    }
     LARGE_INTEGER f, t0, t1;
     QueryPerformanceFrequency(&f);
     std::vector<double> ms;
@@ -806,6 +812,10 @@ static LRESULT Query(WPARAM q, LPARAM lp) {
         if (!SettingsButtonRect(&l, &t, &r, &b)) return -1;
         return MAKELONG(std::lround((l + r) * 0.5f * s), std::lround((t + b) * 0.5f * s));
     }
+    case Q_IMG_SCALED:
+        for (const Image& im : g.doc.images)
+            if (!im.sc.empty()) return im.scW.load();
+        return 0;
     }
     return 0;
 }
@@ -949,6 +959,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP_MEASURED: OnMeasured((MeasureJob*)lp); return 0;
     case WM_APP_FULLDOC: if (!g.firstFrame) OnFullDoc(); return 0;
     case WM_APP_IMAGES: OnImagesLoaded(); return 0;
+    case WM_APP_SCALED: OnScaledImages((std::vector<ScaledImage>*)lp, (uint32_t)wp); return 0;
     case WM_APP_FILECHANGED: SetTimer(hwnd, TIMER_RELOAD, 120, nullptr); return 0;  // debounce editor save bursts
     case WM_APP_POSITIONS: OnPositionsLoaded((std::vector<PosEntry>*)lp); return 0;
     case WM_APP_FINDINPUT: if (g.ready) FindOnInput(wp, lp); return 0;

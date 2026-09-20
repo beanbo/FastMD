@@ -43,7 +43,7 @@ Q = {"SCROLLY": 1, "DOCH": 2, "TOC_OPEN": 3, "TOC_DOCKED": 4, "TOC_COUNT": 5, "T
      "HSCROLL_BLOCK": 8, "HSCROLL_X": 9, "FOCUS_LINK": 10, "MATCHES": 11, "CUR_MATCH": 12, "TEXT_LEFT": 13,
      "TEXT_W": 14, "RECENT_COUNT": 15, "FIND_EDIT": 16, "SETTINGS_HWND": 17, "FIND_OPEN": 18, "COLUMN": 19,
      "FONT_SIZE": 20, "WRAP": 21, "LANG": 22, "FIND_PART_X": 23, "BLOCK_Y": 24, "RESTORED": 25, "THEME_DARK": 26,
-     "TARGETY": 27, "SETTINGS_HIT": 28, "SITKA": 29, "SETTINGS_BTN": 30}
+     "TARGETY": 27, "SETTINGS_HIT": 28, "SITKA": 29, "SETTINGS_BTN": 30, "IMG_SCALED": 31}
 FP_NEXT, FP_CASE = 7, 3  # FindPart
 
 u32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
@@ -589,6 +589,29 @@ def test_links(doc):
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ images at display size
+def test_image_scaling(doc):
+    """a picture wider than its column is drawn from a copy made in the background at exactly that size"""
+    ok = True
+    proc, hwnd = launch(doc, size="--size=520x700")
+    try:
+        post(hwnd, WM_KEYDOWN, 0x23, 0, 1.0)  # End: the picture is at the bottom
+        time.sleep(1.5)
+        w, col = q(hwnd, "IMG_SCALED"), q(hwnd, "TEXT_W")
+        ok &= check("a picture wider than the column gets a copy at the drawn size", w > 0 and abs(w - col) <= 1,
+                    f"{w} vs column {col}")
+        shot(hwnd, "23-image-scaled")
+        cmd(hwnd, "ZOOM_IN", 0.5)
+        time.sleep(1.5)
+        w2, col2 = q(hwnd, "IMG_SCALED"), q(hwnd, "TEXT_W")
+        ok &= check("zooming remakes the copy at the new size", w2 > 0 and abs(w2 - col2) <= 1 and w2 != w,
+                    f"{w} → {w2}, column {col2}")
+        cmd(hwnd, "ZOOM_RESET", 0.4)
+    finally:
+        close_and_wait(proc, hwnd)
+    return ok
+
+
 # ------------------------------------------------------------------------------------------------ 1.8 column width
 def test_columns(doc):
     ok = True
@@ -728,7 +751,8 @@ def main():
     shutil.copy(REPO / "bench" / "corpus" / "img" / "diagram0.png", OUT / "img" / "diagram0.png")
     ok = True
     for t in (lambda: test_basics(doc), lambda: test_hscroll(doc), test_outline, lambda: test_positions(doc), test_find,
-              test_start_screen, lambda: test_links(doc), lambda: test_columns(doc), lambda: test_settings(doc),
+              test_start_screen, lambda: test_links(doc), lambda: test_image_scaling(doc), lambda: test_columns(doc),
+              lambda: test_settings(doc),
               lambda: test_placement(doc)):
         ok &= t()
     reset_profile()

@@ -23,6 +23,7 @@ enum : UINT {
     WM_APP_FILECHANGED,            // watcher: the open file changed on disk
     WM_APP_POSITIONS,              // positions.bin read after the first frame (lParam = std::vector<PosEntry>*)
     WM_APP_FINDINPUT,              // find input box → UI thread: wParam = FI_*, lParam = event data
+    WM_APP_SCALED,                 // images re-scaled to display size (wParam = docGen, lParam = std::vector<ScaledImage>*)
     WM_APP_QUERY = WM_APP + 64,    // automation / UI tests: wParam = Query → LRESULT (read-only state)
 };
 enum : UINT_PTR { TIMER_TOAST = 1, TIMER_RELOAD = 2, TIMER_AUTOSCROLL = 3, TIMER_HBAR = 4 };
@@ -45,6 +46,7 @@ enum Query : UINT {
     Q_FONT_SIZE, Q_WRAP, Q_LANG, Q_FIND_PART_X /* lp = part → x | y << 16 */, Q_BLOCK_Y /* lp = block */,
     Q_RESTORED, Q_THEME_DARK, Q_TARGETY, Q_SETTINGS_HIT /* lp = row * 100 + option */, Q_FONT_FAMILY_SITKA,
     Q_SETTINGS_BTN /* centre of the gear button x | y << 16, -1 = not shown */,
+    Q_IMG_SCALED /* width of the first display-size image copy, 0 = none */,
 };
 
 enum ColumnPreset : uint8_t { COL_NARROW = 0, COL_NORMAL, COL_WIDE, COL_FULL };
@@ -90,6 +92,9 @@ struct PosEntry {
 
 struct TocItem { uint32_t block; uint8_t level; std::wstring text; IDWriteTextLayout* layout = nullptr; };
 
+// one image scaled to its display size on a worker thread, handed to the UI thread (WM_APP_SCALED)
+struct ScaledImage { uint32_t index; int w, h; std::vector<uint32_t> px; };
+
 struct App {
     Config cfg;
     HINSTANCE inst = nullptr;
@@ -103,6 +108,7 @@ struct App {
     Doc doc;
     std::atomic<Doc*> fullDoc{nullptr};
     bool fullPending = false, imagesStarted = false, loadFailed = false;
+    bool scalingImages = false;    // a scaler thread is making display-size copies right now
     FILETIME fileTime{};
     uint64_t fileSize = 0;
     std::vector<HistoryEntry> back, fwd;
@@ -308,6 +314,8 @@ void StartBackgroundWork();          // after the first frame: measure, images, 
 void OnMeasured(MeasureJob* job);
 void OnFullDoc();
 void OnImagesLoaded();
+void ScheduleImageScaling();         // after a frame: start the scaler if an image was drawn at a size we have no copy of
+void OnScaledImages(std::vector<ScaledImage>* list, uint32_t gen);
 void StartMeasure();
 void JoinWorkers();
 void StartWatcher();

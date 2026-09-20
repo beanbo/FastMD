@@ -208,9 +208,33 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
         int cx0 = x0, cy0 = y0, cx1 = x1, cy1 = y1;
         ClipPx(cx0, cy0, cx1, cy1);
         if (cx0 >= cx1) return;
+        const int n = cx1 - cx0;
+        auto put = [](uint32_t* p, uint32_t sp) {
+            uint32_t a = sp >> 24;
+            if (a == 255) *p = sp & 0xffffff;
+            else if (a) {  // premultiplied over opaque
+                uint32_t d = *p, ia = 255 - a;
+                uint32_t rb = (sp & 0xff00ff) + ((((d & 0xff00ff) * ia) >> 8) & 0xff00ff);
+                uint32_t g = (sp & 0x00ff00) + ((((d & 0x00ff00) * ia) >> 8) & 0x00ff00);
+                *p = (rb & 0xff00ff) | (g & 0x00ff00);
+            }
+        };
+        // a copy at exactly this size (loader.cpp makes it in the background): one row at a time, no scaling here
+        if (im.scW.load(std::memory_order_acquire) == dw && im.scH.load() == dh && im.sc.size() >= (size_t)dw * dh) {
+            const uint32_t* src = im.sc.data() + (size_t)(cy0 - y0) * dw + (cx0 - x0);
+            for (int y = cy0; y < cy1; y++, src += dw) {
+                uint32_t* p = Row(y) + cx0;
+                for (int i = 0; i < n; i++) put(p + i, src[i]);
+            }
+            return;
+        }
+        if (dw != im.pxW || dh != im.pxH) {  // ask for that copy; until it is ready, scale by the nearest neighbour
+            im.wantW.store(dw, std::memory_order_relaxed);
+            im.wantH.store(dh, std::memory_order_relaxed);
+        }
         // the nearest source column of every visible column, once per call: a 64-bit division per pixel cost ≈0.5 ms
         // per frame with large images in a full-screen window
-        const int sw = im.pxW, sh = im.pxH, n = cx1 - cx0;
+        const int sw = im.pxW, sh = im.pxH;
         xmap.resize(n);
         for (int i = 0; i < n; i++) xmap[i] = (int)((int64_t)(cx0 + i - x0) * sw / dw);
         const int* xm = xmap.data();
@@ -218,17 +242,7 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
         for (int y = cy0; y < cy1; y++) {
             uint32_t* p = Row(y) + cx0;
             const uint32_t* srow = src + (size_t)((int64_t)(y - y0) * sh / dh) * sw;
-            for (int i = 0; i < n; i++) {
-                uint32_t sp = srow[xm[i]];  // nearest (1:1 at 100 %)
-                uint32_t a = sp >> 24;
-                if (a == 255) p[i] = sp & 0xffffff;
-                else if (a) {  // premultiplied over opaque
-                    uint32_t d = p[i], ia = 255 - a;
-                    uint32_t rb = (sp & 0xff00ff) + ((((d & 0xff00ff) * ia) >> 8) & 0xff00ff);
-                    uint32_t g = (sp & 0x00ff00) + ((((d & 0x00ff00) * ia) >> 8) & 0x00ff00);
-                    p[i] = (rb & 0xff00ff) | (g & 0x00ff00);
-                }
-            }
+            for (int i = 0; i < n; i++) put(p + i, srow[xm[i]]);  // nearest (1:1 at 100 %)
         }
     }
     void PushClip(float l, float t, float r, float b) override {
