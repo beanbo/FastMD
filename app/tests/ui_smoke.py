@@ -13,7 +13,7 @@ import sys
 import time
 import winreg
 
-from PIL import Image
+from PIL import Image, ImageChops
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -43,7 +43,7 @@ Q = {"SCROLLY": 1, "DOCH": 2, "TOC_OPEN": 3, "TOC_DOCKED": 4, "TOC_COUNT": 5, "T
      "HSCROLL_BLOCK": 8, "HSCROLL_X": 9, "FOCUS_LINK": 10, "MATCHES": 11, "CUR_MATCH": 12, "TEXT_LEFT": 13,
      "TEXT_W": 14, "RECENT_COUNT": 15, "FIND_EDIT": 16, "SETTINGS_HWND": 17, "FIND_OPEN": 18, "COLUMN": 19,
      "FONT_SIZE": 20, "WRAP": 21, "LANG": 22, "FIND_PART_X": 23, "BLOCK_Y": 24, "RESTORED": 25, "THEME_DARK": 26,
-     "TARGETY": 27, "SETTINGS_HIT": 28, "SITKA": 29, "SETTINGS_BTN": 30, "IMG_SCALED": 31}
+     "TARGETY": 27, "SETTINGS_HIT": 28, "SITKA": 29, "SETTINGS_BTN": 30, "IMG_SCALED": 31, "FULL_REDRAW": 32}
 FP_NEXT, FP_CASE = 7, 3  # FindPart
 
 u32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
@@ -589,6 +589,37 @@ def test_links(doc):
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ partial frames
+def same_pixels(a, b):
+    return ImageChops.difference(a.convert("RGB"), b.convert("RGB")).getbbox() is None
+
+
+def test_scroll_frames():
+    """a scrolled frame redraws only the strip that came into view: it must match a full redraw pixel for pixel"""
+    ok = True
+    proc, hwnd = launch(MEDIUM, size="--size=1100x800")
+    try:
+        for name, notches in (("down", -5), ("up", 2), ("far", -40)):
+            wheel(hwnd, 500, 400, notches, wait=1.2)
+            y = q(hwnd, "SCROLLY")
+            partial = shot(hwnd, f"24-scroll-{name}")
+            q(hwnd, "FULL_REDRAW")
+            time.sleep(0.5)
+            full = shot(hwnd, f"24-scroll-{name}-full")
+            ok &= check(f"scrolling {name}: the partial frame matches a full redraw",
+                        q(hwnd, "SCROLLY") == y and same_pixels(partial, full), f"scrollY={y}")
+        cmd(hwnd, "TOC", 0.6)
+        wheel(hwnd, 700, 400, -4, wait=1.2)
+        partial = shot(hwnd, "25-scroll-outline")
+        q(hwnd, "FULL_REDRAW")
+        time.sleep(0.5)
+        ok &= check("the same with the outline open", same_pixels(partial, shot(hwnd, "25-scroll-outline-full")))
+        cmd(hwnd, "TOC", 0.4)
+    finally:
+        close_and_wait(proc, hwnd)
+    return ok
+
+
 # ------------------------------------------------------------------------------------------------ images at display size
 def test_image_scaling(doc):
     """a picture wider than its column is drawn from a copy made in the background at exactly that size"""
@@ -751,7 +782,8 @@ def main():
     shutil.copy(REPO / "bench" / "corpus" / "img" / "diagram0.png", OUT / "img" / "diagram0.png")
     ok = True
     for t in (lambda: test_basics(doc), lambda: test_hscroll(doc), test_outline, lambda: test_positions(doc), test_find,
-              test_start_screen, lambda: test_links(doc), lambda: test_image_scaling(doc), lambda: test_columns(doc),
+              test_start_screen, lambda: test_links(doc), test_scroll_frames, lambda: test_image_scaling(doc),
+              lambda: test_columns(doc),
               lambda: test_settings(doc),
               lambda: test_placement(doc)):
         ok &= t()

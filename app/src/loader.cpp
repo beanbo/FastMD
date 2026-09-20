@@ -409,6 +409,7 @@ void OnScaledImages(std::vector<ScaledImage>* list, uint32_t gen) {
             im.scH = s.h;
         }
         if (!list->empty()) {
+            g.pixelSerial++;
             TrimScaledImages();
             Invalidate();
         }
@@ -418,6 +419,7 @@ void OnScaledImages(std::vector<ScaledImage>* list, uint32_t gen) {
 }
 
 void OnImagesLoaded() {
+    g.pixelSerial++;  // the same layout now draws differently: a scrolled frame must not reuse the old pixels
     WithAnchor([] {
         for (size_t i = 0; i < g.doc.blocks.size(); i++) {
             const Block& b = g.doc.blocks[i];

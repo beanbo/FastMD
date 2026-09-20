@@ -47,6 +47,7 @@ enum Query : UINT {
     Q_RESTORED, Q_THEME_DARK, Q_TARGETY, Q_SETTINGS_HIT /* lp = row * 100 + option */, Q_FONT_FAMILY_SITKA,
     Q_SETTINGS_BTN /* centre of the gear button x | y << 16, -1 = not shown */,
     Q_IMG_SCALED /* width of the first display-size image copy, 0 = none */,
+    Q_FULL_REDRAW /* forget the last frame and repaint everything (tests compare it with a scrolled frame) */,
 };
 
 enum ColumnPreset : uint8_t { COL_NARROW = 0, COL_NORMAL, COL_WIDE, COL_FULL };
@@ -113,6 +114,8 @@ struct App {
     uint64_t fileSize = 0;
     std::vector<HistoryEntry> back, fwd;
     uint32_t docSerial = 0;        // bumped whenever g.doc is replaced (outline / link caches key on it)
+    uint32_t pixelSerial = 0;      // bumped when content draws differently without any other change (images arrived)
+    uint32_t hxSerial = 0;         // bumped by every horizontal scroll of a wide block
 
     // ---- text & layout
     IDWriteFactory3* dwf = nullptr;
@@ -225,7 +228,8 @@ void InitialLayout();
 BlockLayout* EnsureLayout(uint32_t i);
 void ClearLayoutCache();
 void TrimCache();
-void Render();                       // draw the full frame into the canvas
+void Render();                       // draw the frame into the canvas (a pure scroll only redraws what changed)
+void ForceFullRedraw();              // the canvas content is no longer trusted: the next frame is drawn in full
 void WithAnchor(void (*fn)());       // keep the top visible block in place while heights change
 void DrawPill(const std::wstring& s, float x, float y, bool centered);
 IDWriteTextLayout* UiLayout(const std::wstring& s, float maxW, IDWriteTextFormat* fmt = nullptr);
@@ -292,6 +296,7 @@ int TocCurrent();
 void DrawToc();
 bool TocHit(float x, float y, int* item);    // point in the panel; item index, -2 = close button, -1 = none
 bool TocButtonHit(float x, float y);         // the floating outline button (panel closed)
+bool TocButtonRect(float* l, float* t, float* r, float* b);  // client DIP; false = not shown
 void TocClick(int item);
 void TocWheel(float dy);
 float TocItemY(int item);            // client DIP of an item's centre (tests)

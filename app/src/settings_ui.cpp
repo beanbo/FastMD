@@ -249,7 +249,7 @@ LRESULT CALLBACK Proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(h, &ps);
         Paint();
-        if (g_cv) BitBlt(dc, 0, 0, g_pxW, g_pxH, g_cv->DC(), 0, 0, SRCCOPY);
+        if (g_cv) BitBlt(dc, 0, 0, g_pxW, g_pxH, g_cv->DC(), 0, g_cv->ViewportTop(), SRCCOPY);
         EndPaint(h, &ps);
         return 0;
     }

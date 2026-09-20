@@ -400,7 +400,7 @@ static void Present(HDC hdc) {
     ScheduleImageScaling();  // a picture was drawn at a size we have no display-size copy of
     g.offscreenValid = false;
     HDC dst = hdc ? hdc : GetDC(g.hwnd);
-    BitBlt(dst, 0, 0, g.pxW, g.pxH, g.canvas->DC(), 0, 0, SRCCOPY);
+    BitBlt(dst, 0, 0, g.pxW, g.pxH, g.canvas->DC(), 0, g.canvas->ViewportTop(), SRCCOPY);
     if (!hdc) ReleaseDC(g.hwnd, dst);
 }
 
@@ -816,6 +816,10 @@ static LRESULT Query(WPARAM q, LPARAM lp) {
         for (const Image& im : g.doc.images)
             if (!im.sc.empty()) return im.scW.load();
         return 0;
+    case Q_FULL_REDRAW:
+        ForceFullRedraw();
+        Invalidate();
+        return 1;
     }
     return 0;
 }
@@ -1012,8 +1016,10 @@ static int MessageLoop() {
                 DispatchMessageW(&msg);
             }
             if (!g.animating || g.closing) continue;
-            float d = g.targetY - g.scrollY;
-            if (std::fabs(d) < 0.5f) { g.scrollY = g.targetY; g.animating = false; }
+            // the frame is drawn on whole device pixels (Render snaps the scroll), so a step below half a pixel would
+            // land on the same row again and the glide would never end: from there go straight to the target
+            float d = g.targetY - g.scrollY, px = 1.f / std::max(0.01f, Scale());
+            if (std::fabs(d) < 2.f * px) { g.scrollY = g.targetY; g.animating = false; }
             else g.scrollY += d * 0.3f;
             Frame();
         } else {

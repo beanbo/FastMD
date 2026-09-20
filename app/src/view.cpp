@@ -208,6 +208,7 @@ void HScrollSet(uint32_t i, float x) {
     x = std::round(std::clamp(x, 0.f, cw - vw));
     if (x == g.hx[i]) return;
     g.hx[i] = x;
+    g.hxSerial++;
     g.hbarFlash = (int)i;  // the scrollbar shows for a moment: position feedback for wheel / touchpad / find
     g.hbarFlashUntil = GetTickCount() + 900;
     if (g.hwnd) SetTimer(g.hwnd, TIMER_HBAR, 950, nullptr);
@@ -555,27 +556,41 @@ static void DrawScrollbar() {
     g.canvas->FillRoundRect(vw - w - 3, ty, vw - 3, ty + th, w * 0.5f, hot ? P_SCROLL_HOT : P_SCROLL);
 }
 
-void Render() {
-    TrimCache();
-    EnsureVisible();
-    g.canvas->Begin();
-    g.canvas->Clear(P_BG);
-    if (g.path.empty()) {
-        DrawHome();
-    } else {
-        float vh = ViewH();
-        size_t n = g.doc.blocks.size();
-        for (uint32_t i = FirstVisible(g.scrollY); i < n && g.Y[i] < g.scrollY + vh; i++) DrawBlock(i, g.Y[i] - g.scrollY);
-        float tl = TextLeft();
-        for (const QuoteSpan& q : g.doc.quotes) {
-            if (q.first == UINT32_MAX) continue;
-            float top = g.Y[q.first] - g.scrollY, bottom = g.Y[q.last] + g.H[q.last] - g.scrollY;
-            if (bottom < 0 || top > vh) continue;
-            uint8_t pal = q.alert ? (uint8_t)(P_ALERT_NOTE + q.alert - 1) : P_BORDER;
-            g.canvas->FillRect(tl + q.x, top, tl + q.x + Metrics::kQuoteBar, bottom, pal);
-        }
-        DrawScrollbar();
+// the document itself: the blocks of a band of the window and the quote bars beside them
+static void DrawDocumentBand(float top, float bottom) {
+    float vh = ViewH();
+    top = std::max(0.f, top);
+    bottom = std::min(vh, bottom);
+    if (bottom <= top) return;
+    size_t n = g.doc.blocks.size();
+    for (uint32_t i = FirstVisible(g.scrollY + top); i < n; i++) {
+        float y = g.Y[i] - g.scrollY;
+        if (y >= bottom) break;
+        DrawBlock(i, y);
     }
+    float tl = TextLeft();
+    for (const QuoteSpan& q : g.doc.quotes) {
+        if (q.first == UINT32_MAX) continue;
+        float t = g.Y[q.first] - g.scrollY, b = g.Y[q.last] + g.H[q.last] - g.scrollY;
+        if (b < top || t > bottom) continue;
+        uint8_t pal = q.alert ? (uint8_t)(P_ALERT_NOTE + q.alert - 1) : P_BORDER;
+        g.canvas->FillRect(tl + q.x, t, tl + q.x + Metrics::kQuoteBar, b, pal);
+    }
+}
+
+// a rectangle of the document redrawn from scratch (background included), for a strip that scrolled into view or a
+// place where something that stays put used to be
+static void RedrawDocRect(float l, float t, float r, float b) {
+    if (b <= t || r <= l) return;
+    g.canvas->PushClip(l, t, r, b);
+    g.canvas->FillRect(l, t, r, b, P_BG);
+    DrawDocumentBand(t, b);
+    g.canvas->PopClip();
+}
+
+// what stays in place while the document scrolls
+static void DrawChrome() {
+    if (!g.path.empty()) DrawScrollbar();
     DrawSettingsButton();  // under the outline drawer: in a narrow window the drawer may cover it (and takes the click)
     DrawToc();
     if (g.findOpen) DrawFindBar();
@@ -586,7 +601,113 @@ void Render() {
     if (pill && !g.path.empty()) DrawPill(*pill, DocLeft() + 10.f, ViewH() - 40.f, false);
     else if (pill) DrawPill(*pill, 10.f, ViewH() - 40.f, false);
     if (!g.toast.empty() && GetTickCount() < g.toastUntil) DrawPill(g.toast, DocLeft() + DocW() * 0.5f, ViewH() - 64.f, true);
+}
+
+// ------------------------------------------------------------------------------------------------ scrolled frames
+// Scrolling repeats the same picture moved by a few pixels, so redrawing all of it costs more than it should. The
+// canvas moves its window inside a taller buffer for free, and only the strip that came into view is drawn. That is
+// allowed when *nothing except* the scroll position changed — this key is everything a frame is drawn from, and it is
+// compared with the previous frame's.
+namespace {
+struct FrameKey {
+    uint32_t docSerial = 0, gen = 0, pixelSerial = 0, hxSerial = 0;
+    float scrollY = 0, textW = 0, wideW = 0, docH = 0, viewW = 0, viewH = 0, scale = 0, docLeft = 0;
+    uint32_t selA = 0, selB = 0;
+    int hoverLink = 0, hoverCode = 0, hoverHBlock = 0, hbarFlash = 0, focusLink = 0, dragHBlock = 0, tocHover = 0,
+        curMatch = 0, findHot = 0, recentHover = 0;
+    size_t matches = 0;
+    bool hoverCopyBtn = false, hotHBar = false, hotScroll = false, dark = false, selecting = false, tocBtnHot = false,
+         settingsBtnHot = false, draggingThumb = false, home = false, overText = false;
+    bool operator==(const FrameKey&) const = default;
+};
+FrameKey g_last;
+bool g_lastValid = false;
+
+FrameKey CurrentKey() {
+    FrameKey k;
+    k.docSerial = g.docSerial;
+    k.gen = g.gen.load();
+    k.pixelSerial = g.pixelSerial;
+    k.hxSerial = g.hxSerial;
+    k.scrollY = g.scrollY;
+    k.textW = g.textW;
+    k.wideW = g.wideW;
+    k.docH = g.docH;
+    k.viewW = ViewW();
+    k.viewH = ViewH();
+    k.scale = Scale();
+    k.docLeft = DocLeft();
+    k.selA = g.selAnchor;
+    k.selB = g.selFocus;
+    k.hoverLink = g.hoverLink;
+    k.hoverCode = g.hoverCode;
+    k.hoverHBlock = g.hoverHBlock;
+    k.hbarFlash = (g.hbarFlash >= 0 && GetTickCount() < g.hbarFlashUntil) ? g.hbarFlash : -1;
+    k.focusLink = g.focusLink;
+    k.dragHBlock = g.dragHBlock;
+    k.tocHover = g.tocHover;
+    k.curMatch = g.curMatch;
+    k.findHot = g.findHot;
+    k.recentHover = g.recentHover;
+    k.matches = g.matches.size();
+    k.hoverCopyBtn = g.hoverCopyBtn;
+    k.hotHBar = g.hotHBar;
+    k.hotScroll = g.hotScroll;
+    k.dark = PaletteIsDark();
+    k.selecting = g.selecting;
+    k.tocBtnHot = g.tocBtnHot;
+    k.settingsBtnHot = g.settingsBtnHot;
+    k.draggingThumb = g.draggingThumb;
+    k.home = g.path.empty();
+    // things drawn over the text: they would have to be repaired pixel by pixel, so those frames are drawn in full
+    bool pill = !g.tip.empty() || (g.hoverLink >= 0 && !g.selecting) || g.focusLink >= 0;
+    bool toast = !g.toast.empty() && GetTickCount() < g.toastUntil;
+    k.overText = g.findOpen || TocOverlayOpen() || pill || toast;
+    return k;
+}
+
+// returns true when the frame was produced by moving the window and redrawing the strip that came into view
+bool ScrollFrame(const FrameKey& k) {
+    if (!g_lastValid || k.home || k.overText || g.firstFrame) return false;
+    FrameKey prev = g_last;
+    if (k.scrollY == prev.scrollY) return false;
+    float dy = k.scrollY - prev.scrollY;
+    prev.scrollY = k.scrollY;
+    if (!(k == prev)) return false;
+    int dpx = (int)std::lround(dy * k.scale);
+    if (dpx == 0 || !g.canvas->ScrollViewport(dpx)) return false;
+    float vh = ViewH(), vw = ViewW(), dl = DocLeft(), d = dpx / k.scale;
+    if (dpx > 0) RedrawDocRect(dl, vh - d, vw, vh);  // scrolled down: the strip came in at the bottom
+    else RedrawDocRect(dl, 0, vw, -d);
+    // the chrome of the previous frame moved with the document: put back what its pixels covered, then draw it again
+    g.canvas->FillRect(vw - Metrics::kPadX, 0, vw, vh, P_BG);  // the scrollbar's column: the layout keeps text out of it
+    float l, t, r, b;
+    if (SettingsButtonRect(&l, &t, &r, &b)) RedrawDocRect(l, std::min(t, t - d), r, std::max(b, b - d));
+    if (TocButtonRect(&l, &t, &r, &b)) RedrawDocRect(l, std::min(t, t - d), r, std::max(b, b - d));
+    DrawChrome();  // the outline panel is opaque and repaints itself
+    return true;
+}
+}  // namespace
+
+void ForceFullRedraw() { g_lastValid = false; }
+
+void Render() {
+    TrimCache();
+    EnsureVisible();
+    float s = Scale();  // whole device pixels: a scrolled frame moves the picture by an exact number of them, so the
+    if (s > 0) g.scrollY = std::round(g.scrollY * s) / s;  // text keeps the same pixel grid it was drawn on
+    FrameKey k = CurrentKey();
+    k.scrollY = g.scrollY;
+    g.canvas->Begin();
+    if (!ScrollFrame(k)) {
+        g.canvas->Clear(P_BG);
+        if (g.path.empty()) DrawHome();
+        else DrawDocumentBand(0, ViewH());
+        DrawChrome();
+    }
     g.canvas->End();
+    g_last = k;
+    g_lastValid = true;
 }
 
 void ShowToast(const std::wstring& text, DWORD ms) {

@@ -167,6 +167,15 @@ bool TocHit(float x, float y, int* item) {
     return true;
 }
 
+bool TocButtonRect(float* l, float* t, float* r, float* b) {
+    if (Visible() || !TocAvailable() || g.firstFrame) return false;
+    *l = kBtnX;
+    *t = kBtnY;
+    *r = kBtnX + kBtn;
+    *b = kBtnY + kBtn;
+    return true;
+}
+
 bool TocButtonHit(float x, float y) {
     return !Visible() && TocAvailable() && x >= kBtnX && x < kBtnX + kBtn && y >= kBtnY && y < kBtnY + kBtn;
 }
