@@ -5,7 +5,12 @@
 #include "common.h"
 #include "theme.h"
 
-enum RunFlags : uint16_t { F_BOLD = 1, F_ITALIC = 2, F_CODE = 4, F_STRIKE = 8, F_LINK = 16, F_ICON = 32 };
+enum RunFlags : uint16_t {
+    F_BOLD = 1, F_ITALIC = 2, F_CODE = 4, F_STRIKE = 8, F_LINK = 16, F_ICON = 32,
+    F_KBD = 64,     // <kbd>: a key in a frame
+    F_SUP = 128,    // <sup> / <sub>: smaller and lifted or dropped off the baseline
+    F_SUB = 256,
+};
 
 struct Run {             // inline style run; offsets are absolute in Doc::text
     uint32_t start, len;
@@ -27,7 +32,7 @@ struct Block {
     uint8_t muted;       // blockquote / h6 → muted text colour
     uint8_t lang;        // code language id (highlighter)
     uint8_t alertTitle;  // Alert: this block is the title line of a GitHub alert
-    uint8_t _pad;
+    uint8_t align;       // 0 = left, 1 = centre, 2 = right (<p align=…>, <div align=…>)
     float indent;        // x offset from the column's content box (DIP)
     float gap;           // collapsed vertical margin above the block (DIP)
     uint32_t textOff, textLen;
@@ -45,6 +50,7 @@ struct Table {
 struct Image {
     std::wstring path;          // absolute local path ("" = remote / unsupported)
     int w = -1, h = -1;         // pixel size from the file header (-1 = unknown yet, 0 = failed) — layout
+    int attrW = 0, attrH = 0;   // size asked for by HTML width / height attributes (0 = not given)
     int canon = -1;             // index of the first image with the same path (holds the pixels)
     std::vector<uint32_t> px;   // decoded premultiplied BGRA (canonical entry only), filled by the image thread
     int pxW = 0, pxH = 0;       // size of px as decoded (a GIF frame can be smaller than its header's screen)
@@ -55,9 +61,9 @@ struct Image {
     std::atomic<int> scW{0}, scH{0};      // size of sc (0 = none yet)
     std::atomic<int> wantW{0}, wantH{0};  // display size the canvas last drew at (0 = the decoded size fits)
     Image() = default;
-    Image(const Image& o) : path(o.path), w(o.w), h(o.h) {}
+    Image(const Image& o) : path(o.path), w(o.w), h(o.h), attrW(o.attrW), attrH(o.attrH) {}
     Image& operator=(const Image& o) {
-        path = o.path; w = o.w; h = o.h; canon = -1;
+        path = o.path; w = o.w; h = o.h; attrW = o.attrW; attrH = o.attrH; canon = -1;
         px.clear(); pxW = pxH = 0; state = 0;
         sc.clear(); scW = 0; scH = 0; wantW = 0; wantH = 0;
         return *this;

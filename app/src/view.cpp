@@ -43,8 +43,10 @@ void BlockBox(uint32_t i, float* x, float* w) {
     float nat = L ? L->natural : g.textW;
     if (b.kind == BK_CODE) nat = std::min(nat, g.wideW);
     if (nat <= g.textW) {  // fits the text column: align with the text (code blocks span the column)
-        *x = tl;
         *w = b.kind == BK_CODE ? g.textW : nat;
+        *x = tl;
+        if (b.align == 1) *x = tl + std::floor((g.textW - *w) * 0.5f);  // <p align=center><img …>
+        else if (b.align == 2) *x = tl + std::max(0.f, g.textW - *w);
         return;
     }
     *w = std::min(nat, g.wideW);
@@ -321,7 +323,9 @@ static void ApplyColors(BlockLayout* L, const Block& b) {
     auto apply = [&](IDWriteTextLayout* tl, uint32_t textOff, uint32_t runOff, uint32_t runCount) {
         for (uint32_t k = 0; k < runCount; k++) {
             const Run& r = g.doc.runs[runOff + k];
-            if (r.color != P_DEFAULT) tl->SetDrawingEffect(g.canvas->Effect(r.color), DWRITE_TEXT_RANGE{r.start - textOff, r.len});
+            int shift = (r.flags & F_SUP) ? 1 : (r.flags & F_SUB) ? -1 : 0;
+            if (r.color != P_DEFAULT || shift)
+                tl->SetDrawingEffect(g.canvas->Effect(r.color, shift), DWRITE_TEXT_RANGE{r.start - textOff, r.len});
         }
     };
     if (L->text && b.kind != BK_IMAGE) apply(L->text, b.textOff, b.runOff, b.runCount);
@@ -335,17 +339,18 @@ static void ApplyColors(BlockLayout* L, const Block& b) {
 }
 
 static void InlineCodeBackgrounds(IDWriteTextLayout* tl, uint32_t textOff, uint32_t runOff, uint32_t runCount, int role,
-                                  std::vector<D2D1_RECT_F>& out) {
+                                  std::vector<D2D1_RECT_F>& out, std::vector<D2D1_RECT_F>* kbd = nullptr) {
     DWRITE_HIT_TEST_METRICS hm[16];
     for (uint32_t k = 0; k < runCount; k++) {
         const Run& r = g.doc.runs[runOff + k];
-        if (!(r.flags & F_CODE)) continue;
+        if (!(r.flags & (F_CODE | F_KBD))) continue;
+        std::vector<D2D1_RECT_F>& dst = (r.flags & F_KBD) && kbd ? *kbd : out;
         UINT32 cnt = 0;
         if (FAILED(tl->HitTestTextRange(r.start - textOff, r.len, 0, 0, hm, 16, &cnt))) continue;
         float fs = g.typo.size[role] * 0.85f, pad = fs * 0.2f;
         for (UINT32 j = 0; j < cnt; j++) {
             float base = hm[j].top + g.typo.baseline[role];
-            out.push_back(D2D1::RectF(hm[j].left, std::round(base - g.typo.monoAscent * fs - pad),
+            dst.push_back(D2D1::RectF(hm[j].left, std::round(base - g.typo.monoAscent * fs - pad),
                                       hm[j].left + hm[j].width, std::round(base + g.typo.monoDescent * fs + pad)));
         }
     }
@@ -479,10 +484,15 @@ static void DrawBlock(uint32_t i, float y) {
         if (L->text) {
             if (!L->codeBgValid) {
                 L->codeBg.clear();
-                InlineCodeBackgrounds(L->text, b.textOff, b.runOff, b.runCount, role, L->codeBg);
+                L->kbdBg.clear();
+                InlineCodeBackgrounds(L->text, b.textOff, b.runOff, b.runCount, role, L->codeBg, &L->kbdBg);
                 L->codeBgValid = true;
             }
             for (auto& r : L->codeBg) g.canvas->FillRoundRect(x + r.left, y + r.top, x + r.right, y + r.bottom, 4.f, P_INLINEBG);
+            for (auto& r : L->kbdBg) {  // <kbd>: a key cap
+                g.canvas->FillRoundRect(x + r.left, y + r.top, x + r.right, y + r.bottom + 1, 4.f, P_PANEL);
+                g.canvas->StrokeRoundRect(x + r.left, y + r.top, x + r.right, y + r.bottom + 1, 4.f, 1.f, P_BORDER);
+            }
             DrawHighlights(L->text, b.textOff, b.textLen, x, y);
             g.canvas->Text(L->text, x, y, col);
             DrawLinkFocus(L->text, b.textOff, b.textLen, x, y);
@@ -528,7 +538,7 @@ static void DrawBlock(uint32_t i, float y) {
     case BK_IMAGE: {
         Image& im0 = g.doc.images[b.aux];
         Image& im = im0.canon >= 0 ? g.doc.images[im0.canon] : im0;
-        float iw = L->natural;
+        float iw = L->natural;  // BlockBox has already placed the box for <p align=…>
         if (im.state.load() == 2) g.canvas->DrawImage(im, x, y, x + iw, y + L->height);
         else {
             g.canvas->FillRoundRect(x, y, x + iw, y + L->height, 6.f, P_PLACEHOLDER);

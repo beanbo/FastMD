@@ -6,8 +6,9 @@
 #include <cmath>
 
 namespace {
-struct ColorEffect final : IUnknown {  // drawing effect = palette index
+struct ColorEffect final : IUnknown {  // drawing effect = palette index + baseline shift (<sup> / <sub>)
     uint8_t pal = 0;
+    int8_t shift = 0;
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
         if (riid == __uuidof(IUnknown)) { *ppv = this; return S_OK; }
         *ppv = nullptr;
@@ -41,7 +42,7 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
     int bufH = 0, origin = 0;       // buffer height; buffer row shown as client y = 0
     long stride = 0;  // in pixels, negative for bottom-up
     uint32_t* row0 = nullptr;
-    ColorEffect fx[P_COUNT];
+    ColorEffect fx[P_COUNT][3];  // [palette][shift + 1]
     struct Clip { int l, t, r, b; float lDip, tDip, rDip, bDip; };
     std::vector<Clip> clips;
     std::vector<uint32_t> saved;  // pixels around a glyph run that crosses the clip rect
@@ -50,7 +51,8 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
 
     GdiCanvas(IDWriteFactory3* fac, int w, int h, float d) : f(fac) {
         scale = d;
-        for (int i = 0; i < P_COUNT; i++) fx[i].pal = (uint8_t)i;
+        for (int i = 0; i < P_COUNT; i++)
+            for (int s = 0; s < 3; s++) { fx[i][s].pal = (uint8_t)i; fx[i][s].shift = (int8_t)(s - 1); }
         f->GetGdiInterop(&interop);
         f->QueryInterface(__uuidof(IDWriteFactory4), (void**)&f4);
         f->CreateRenderingParams(&params);
@@ -282,7 +284,9 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
         clips.push_back(c);
     }
     void PopClip() override { if (!clips.empty()) clips.pop_back(); }
-    IUnknown* Effect(uint8_t pal) override { return &fx[pal]; }
+    IUnknown* Effect(uint8_t pal, int shift) override {
+        return &fx[pal < P_COUNT ? pal : 0][shift > 0 ? 2 : shift < 0 ? 0 : 1];
+    }
     void SetScale(float d) override { scale = d; if (brt) brt->SetPixelsPerDip(d); }
 
     // --------------------------------------------------------------------------------------- IDWriteTextRenderer
@@ -302,9 +306,17 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetPixelsPerDip(void*, FLOAT* p) override { *p = scale; return S_OK; }
+    const ColorEffect* EffectOf(IUnknown* e) const {
+        auto* c = static_cast<ColorEffect*>(e);
+        return (c >= &fx[0][0] && c < &fx[0][0] + P_COUNT * 3) ? c : nullptr;
+    }
     uint8_t PalOf(IUnknown* e) const {
-        if (e >= (const IUnknown*)&fx[0] && e < (const IUnknown*)&fx[P_COUNT]) return static_cast<ColorEffect*>(e)->pal;
-        return curDefault;
+        const ColorEffect* c = EffectOf(e);
+        return (c && c->pal != P_DEFAULT) ? c->pal : curDefault;
+    }
+    float ShiftOf(IUnknown* e) const {  // <sup> rides above the baseline, <sub> below it
+        const ColorEffect* c = EffectOf(e);
+        return c ? (c->shift > 0 ? -0.34f : c->shift < 0 ? 0.16f : 0.f) : 0.f;
     }
     static COLORREF Ref(uint32_t rgb) { return RGB((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255); }
     // Text is rasterised by DirectWrite straight into the DIB, which knows nothing about our clip rects. Inside a clip:
@@ -360,7 +372,7 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
     // baseline moves down by the viewport's offset (a whole number of pixels, so pixel snapping is unaffected).
     HRESULT DrawRun(FLOAT x, FLOAT y, DWRITE_MEASURING_MODE mode, const DWRITE_GLYPH_RUN& gr,
                     const DWRITE_GLYPH_RUN_DESCRIPTION* desc, IUnknown* effect) {
-        y += origin / scale;
+        y += origin / scale + ShiftOf(effect) * gr.fontEmSize;
         COLORREF c = Ref(g_pal[PalOf(effect)]);
         if (brt3) return brt3->DrawGlyphRunWithColorSupport(x, y, mode, &gr, params, c, 0, nullptr);
         // colour fonts (Segoe UI Emoji): draw the COLR v0 layers one by one

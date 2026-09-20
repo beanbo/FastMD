@@ -9,6 +9,7 @@
 #endif
 #include "../third_party/md4c/md4c.h"
 #include "emoji_table.h"
+#include "html.h"
 #include <cwchar>
 #include <unordered_map>
 
@@ -34,43 +35,7 @@ std::wstring GithubSlug(const wchar_t* s, size_t n) {
 
 uint32_t AlertColor(uint8_t alert) { return alert ? g_pal[P_ALERT_NOTE + alert - 1] : g_pal[P_BORDER]; }
 
-static void AppendEntity(std::wstring& t, const MD_CHAR* s, MD_SIZE n) {
-    auto put = [&](uint32_t cp) {
-        if (cp == 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) cp = 0xFFFD;
-        if (cp >= 0x10000) {
-            cp -= 0x10000;
-            t.push_back((wchar_t)(0xD800 + (cp >> 10)));
-            t.push_back((wchar_t)(0xDC00 + (cp & 0x3FF)));
-        } else t.push_back((wchar_t)cp);
-    };
-    if (n >= 4 && s[1] == L'#') {
-        uint32_t v = 0;
-        bool hex = (s[2] == L'x' || s[2] == L'X');
-        for (MD_SIZE i = hex ? 3 : 2; i + 1 < n; i++) {
-            wchar_t c = s[i];
-            v = hex ? v * 16 + (c <= '9' ? c - '0' : (c | 32) - 'a' + 10) : v * 10 + (c - '0');
-            if (v > 0x10FFFF) { v = 0xFFFD; break; }
-        }
-        put(v);
-        return;
-    }
-    static const struct { const wchar_t* name; uint16_t cp; } tab[] = {
-        {L"amp", '&'}, {L"lt", '<'}, {L"gt", '>'}, {L"quot", '"'}, {L"apos", '\''}, {L"nbsp", 0xA0},
-        {L"copy", 0xA9}, {L"reg", 0xAE}, {L"trade", 0x2122}, {L"mdash", 0x2014}, {L"ndash", 0x2013},
-        {L"hellip", 0x2026}, {L"laquo", 0xAB}, {L"raquo", 0xBB}, {L"times", 0xD7}, {L"middot", 0xB7},
-        {L"bull", 0x2022}, {L"rarr", 0x2192}, {L"larr", 0x2190}, {L"uarr", 0x2191}, {L"darr", 0x2193},
-        {L"deg", 0xB0}, {L"plusmn", 0xB1}, {L"para", 0xB6}, {L"sect", 0xA7}, {L"euro", 0x20AC},
-        {L"lsquo", 0x2018}, {L"rsquo", 0x2019}, {L"ldquo", 0x201C}, {L"rdquo", 0x201D}, {L"check", 0x2713},
-        {L"shy", 0xAD}, {L"ensp", 0x2002}, {L"emsp", 0x2003}, {L"thinsp", 0x2009}, {L"zwj", 0x200D},
-    };
-    if (n > 2) {
-        for (auto& e : tab) {
-            size_t l = wcslen(e.name);
-            if (l == n - 2 && wcsncmp(e.name, s + 1, l) == 0) { put(e.cp); return; }
-        }
-    }
-    t.append(s, n);
-}
+// AppendEntity lives in html.cpp: the same decoder serves Markdown entities and HTML attributes.
 
 // ------------------------------------------------------------------------------------------------ emoji
 // GitHub shortcodes: :rocket: → 🚀. The names come from the gemoji database (app/tools/gen_emoji.py), sorted, so a
@@ -151,7 +116,13 @@ struct Builder {
     const MD_CHAR* codeLang = nullptr;
     uint32_t codeLangLen = 0;
     int bold = 0, italic = 0, code = 0, strike = 0, link = 0, img = 0;
+    int kbd = 0, sup = 0, sub = 0;  // from HTML: <kbd>, <sup>, <sub>
     uint32_t curLink = 0;
+    std::vector<uint32_t> linkStack;  // hrefs of the open <a> tags (they may nest with Markdown links)
+    std::wstring htmlRaw;             // the raw text of an HTML block, processed when the block ends
+    bool inHtmlBlock = false;
+    uint8_t pendAlign = 0;            // <p align=center> etc. for the blocks that follow
+    std::vector<uint8_t> alignStack;  // alignment of the open HTML containers
     // image-only paragraph detection
     int paraImages = 0;
     bool paraOther = false;
@@ -189,6 +160,7 @@ struct Builder {
         atStart = false;
         pending = marginBottom;
         b.indent = indent;
+        b.align = pendAlign;
         b.muted = quoteDepth > 0;
         b.marker = pendMarker;
         b.listLevel = pendLevel;
@@ -333,7 +305,7 @@ struct Builder {
                 if (d.text[i] != L' ' && d.text[i] != L'\n' && d.text[i] != L'\t') { paraOther = true; break; }
         }
         uint16_t fl = (bold ? F_BOLD : 0) | (italic ? F_ITALIC : 0) | (code ? F_CODE : 0) | (strike ? F_STRIKE : 0) |
-                      (link ? F_LINK : 0);
+                      (link ? F_LINK : 0) | (kbd ? F_KBD : 0) | (sup ? F_SUP : 0) | (sub ? F_SUB : 0);
         if (leafKind == BK_CODE && collecting) fl = 0;
         if (!fl) return;
         uint8_t color = (fl & F_LINK) ? P_LINK : (fl & F_STRIKE) ? P_MUTED : P_DEFAULT;
@@ -346,6 +318,203 @@ struct Builder {
             }
         }
         d.runs.push_back(Run{start, len, fl, color, 0, lnk});
+    }
+
+    // --------------------------------------------------------------------------------------- HTML (plan 2.2)
+    int AddImage(const std::wstring& src, int w, int h) {
+        Image image;
+        bool remote = src.find(L"://") != std::wstring::npos || src.rfind(L"data:", 0) == 0;
+        if (!remote && !src.empty()) {
+            std::wstring p;
+            for (size_t i = 0; i < src.size(); i++) {  // %xx decoding + slashes
+                wchar_t c = src[i];
+                if (c == L'%' && i + 2 < src.size() && iswxdigit(src[i + 1]) && iswxdigit(src[i + 2])) {
+                    p.push_back((wchar_t)wcstol(src.substr(i + 1, 2).c_str(), nullptr, 16));
+                    i += 2;
+                } else {
+                    p.push_back(c == L'/' ? L'\\' : c);
+                }
+            }
+            image.path = (p.size() > 1 && p[1] == L':') ? p : d.baseDir + p;
+        }
+        image.attrW = w > 0 ? w : 0;  // HTML width / height: honoured like a browser does
+        image.attrH = h > 0 ? h : 0;
+        d.images.push_back(std::move(image));
+        return (int)d.images.size() - 1;
+    }
+
+    // tags that only change the look of the text around them
+    void HtmlInline(const HtmlTag& t) {
+        auto adj = [&](int& c) {
+            if (t.closing) { if (c > 0) c--; }
+            else if (!t.selfClose) c++;
+        };
+        const std::wstring& n = t.name;
+        if (n == L"br") { AppendText(L"\n", 1, false); return; }
+        if (n == L"b" || n == L"strong") adj(bold);
+        else if (n == L"i" || n == L"em" || n == L"cite" || n == L"var") adj(italic);
+        else if (n == L"code" || n == L"tt" || n == L"samp") adj(code);
+        else if (n == L"del" || n == L"s" || n == L"strike") adj(strike);
+        else if (n == L"kbd") adj(kbd);
+        else if (n == L"sup") adj(sup);
+        else if (n == L"sub") adj(sub);
+        else if (n == L"a") {
+            if (t.closing) {
+                if (link > 0) link--;
+                if (!linkStack.empty()) linkStack.pop_back();
+                curLink = linkStack.empty() ? 0 : linkStack.back();
+            } else {
+                if (const std::wstring* id = t.Attr(L"name")) pendAnchors.push_back(*id);
+                else if (const std::wstring* id2 = t.Attr(L"id")) pendAnchors.push_back(*id2);
+                if (const std::wstring* href = t.Attr(L"href")) {
+                    d.links.push_back(*href);
+                    curLink = (uint32_t)d.links.size() - 1;
+                    linkStack.push_back(curLink);
+                    link++;
+                }
+            }
+        }
+    }
+
+    uint8_t HtmlAlign(const HtmlTag& t) {
+        if (t.name == L"center") return 1;
+        if (const std::wstring* a = t.Attr(L"align")) {
+            std::wstring v = ToLower(*a);
+            return v == L"center" ? 1 : v == L"right" ? 2 : 0;
+        }
+        if (const std::wstring* st = t.Attr(L"style")) {
+            std::wstring v = ToLower(*st);
+            if (v.find(L"center") != std::wstring::npos) return 1;
+            if (v.find(L"right") != std::wstring::npos) return 2;
+        }
+        return 0;
+    }
+
+    void PushAlign(uint8_t a) {
+        alignStack.push_back(a ? a : pendAlign);  // a container without align keeps what it is inside
+        pendAlign = alignStack.back();
+    }
+    void PopAlign() {
+        if (!alignStack.empty()) alignStack.pop_back();
+        pendAlign = alignStack.empty() ? 0 : alignStack.back();
+    }
+
+    void EndHtmlLeaf() {  // HTML leaves keep no trailing space from the source layout
+        if (collecting) {
+            while (d.text.size() > tStart && d.text.back() == L' ') {
+                d.text.pop_back();
+                if (d.runs.size() > rStart) {
+                    Run& r = d.runs.back();
+                    if (r.start + r.len > d.text.size()) r.len = (uint32_t)(d.text.size() - r.start);
+                }
+            }
+        }
+        EndLeaf();
+    }
+
+    static bool IsHtmlContainer(const std::wstring& n) {
+        static const wchar_t* kNames[] = {L"p",      L"div",   L"center",  L"section", L"article", L"summary",
+                                          L"figure", L"figcaption", L"blockquote", L"ul", L"ol", L"li",
+                                          L"tr",     L"td",    L"th",      L"table",   L"tbody",   L"thead",
+                                          L"details", L"picture", L"body", L"html",    L"main",    L"header",
+                                          L"footer", L"nav",   L"dl",      L"dt",      L"dd"};
+        for (const wchar_t* k : kNames)
+            if (n == k) return true;
+        return false;
+    }
+
+    void HtmlBlockTag(const HtmlTag& t) {
+        const std::wstring& n = t.name;
+        if (n.size() == 2 && n[0] == L'h' && n[1] >= L'1' && n[1] <= L'6') {  // <h2>…</h2> is a heading like ##
+            EndHtmlLeaf();
+            if (t.closing) {
+                PopAlign();
+            } else {
+                PushAlign(HtmlAlign(t));
+                StartLeaf(BK_TEXT, (uint8_t)(n[1] - L'0'));
+            }
+            return;
+        }
+        if (IsHtmlContainer(n)) {
+            EndHtmlLeaf();
+            if (t.closing) PopAlign();
+            else if (!t.selfClose) PushAlign(HtmlAlign(t));
+            return;
+        }
+        if (n == L"hr") { EndHtmlLeaf(); Emit(BK_HR, 8, 24); return; }
+        if (n == L"img" && !t.closing) {
+            const std::wstring* src = t.Attr(L"src");
+            if (!src || src->empty()) return;
+            EndHtmlLeaf();
+            int idx = AddImage(*src, t.AttrInt(L"width"), t.AttrInt(L"height"));
+            Block& b = Emit(BK_IMAGE, 0, 16);
+            b.aux = (uint32_t)idx;
+            if (const std::wstring* alt = t.Attr(L"alt")) {
+                b.textOff = (uint32_t)d.text.size();
+                d.text += *alt;
+                b.textLen = (uint32_t)(d.text.size() - b.textOff);
+            }
+            return;
+        }
+        HtmlInline(t);
+    }
+
+    // tags whose contents are never shown, let alone run
+    static bool IsHtmlHidden(const std::wstring& n) {
+        return n == L"script" || n == L"style" || n == L"iframe" || n == L"noscript" || n == L"template" ||
+               n == L"object" || n == L"embed" || n == L"svg" || n == L"head";
+    }
+
+    // one HTML block: walk the tags in order, keeping the text and dropping what we do not know
+    void EmitHtmlBlock() {
+        uint8_t saved = pendAlign;
+        size_t alignDepth = alignStack.size();
+        const std::wstring& h = htmlRaw;
+        for (size_t i = 0; i < h.size();) {
+            if (h[i] == L'<') {
+                HtmlTag t;
+                size_t used = ParseHtmlTag(h.data() + i, h.size() - i, t);
+                if (used) {
+                    i += used;
+                    if (t.name.empty()) continue;  // comment
+                    if (!t.closing && !t.selfClose && IsHtmlHidden(t.name)) {
+                        std::wstring close = L"</" + t.name;
+                        size_t end = h.find(close, i);
+                        i = end == std::wstring::npos ? h.size() : end + close.size();
+                        while (i < h.size() && h[i] != L'>') i++;
+                        if (i < h.size()) i++;
+                        continue;
+                    }
+                    HtmlBlockTag(t);
+                    continue;
+                }
+            }
+            size_t j = i;
+            while (j < h.size() && h[j] != L'<') j++;
+            std::wstring txt;
+            AppendHtmlText(txt, h.data() + i, j - i);
+            i = j;
+            std::wstring out;  // HTML folds every run of spaces and line breaks into one space
+            for (wchar_t c : txt) {
+                bool space = c == L' ' || c == L'\t' || c == L'\r' || c == L'\n';
+                if (!space) out.push_back(c);
+                else if (!out.empty() && out.back() != L' ') out.push_back(L' ');
+                else if (out.empty() && collecting && d.text.size() > tStart && d.text.back() != L' ') out.push_back(L' ');
+            }
+            if (out.empty() || (!collecting && out == L" ")) continue;
+            if (!collecting) {
+                if (out.front() == L' ') out.erase(0, 1);
+                if (out.empty()) continue;
+                StartLeaf(BK_TEXT, 0);
+            }
+            AppendText(out.data(), (MD_SIZE)out.size(), false);
+        }
+        EndHtmlLeaf();
+        while (alignStack.size() > alignDepth) alignStack.pop_back();
+        pendAlign = saved;
+        bold = italic = code = strike = kbd = sup = sub = 0;  // an unclosed tag must not leak into the next block
+        link = 0;
+        linkStack.clear();
     }
 
     // --------------------------------------------------------------------------------------- blocks
@@ -418,7 +587,7 @@ struct Builder {
             StartLeaf(BK_CODE, 0);
             break;
         }
-        case MD_BLOCK_HTML: EndLeaf(); StartLeaf(BK_TEXT, 0); code = 0; break;  // raw HTML: tags stripped, text kept
+        case MD_BLOCK_HTML: EndLeaf(); htmlRaw.clear(); inHtmlBlock = true; break;  // gathered, then walked at leave
         case MD_BLOCK_P: EndLeaf(); StartLeaf(BK_TEXT, 0); break;
         case MD_BLOCK_TABLE: {
             EndLeaf();
@@ -510,15 +679,10 @@ struct Builder {
             Margin(4);
             break;
         }
-        case MD_BLOCK_HTML: {
-            // drop empty HTML blocks (comments, lone tags)
-            bool empty = true;
-            for (size_t i = tStart; i < d.text.size(); i++)
-                if (!iswspace(d.text[i])) { empty = false; break; }
-            if (empty) { d.text.resize(tStart); d.runs.resize(rStart); collecting = false; }
-            else EndLeaf();
+        case MD_BLOCK_HTML:
+            inHtmlBlock = false;
+            EmitHtmlBlock();
             break;
-        }
         case MD_BLOCK_TH:
         case MD_BLOCK_TD: {
             inCell = false;
@@ -588,23 +752,8 @@ struct Builder {
         }
         case MD_SPAN_IMG: {
             auto* im = (MD_SPAN_IMG_DETAIL*)det;
-            Image image;
-            std::wstring s(im->src.text, im->src.size);
-            bool remote = s.find(L"://") != std::wstring::npos || s.rfind(L"data:", 0) == 0;
-            if (!remote && !s.empty()) {
-                std::wstring p;
-                for (size_t i = 0; i < s.size(); i++) {  // %xx decoding + slashes
-                    wchar_t c = s[i];
-                    if (c == L'%' && i + 2 < s.size() && iswxdigit(s[i + 1]) && iswxdigit(s[i + 2])) {
-                        p.push_back((wchar_t)wcstol(s.substr(i + 1, 2).c_str(), nullptr, 16));
-                        i += 2;
-                    } else p.push_back(c == L'/' ? L'\\' : c);
-                }
-                image.path = (p.size() > 1 && p[1] == L':') ? p : d.baseDir + p;
-            }
-            d.images.push_back(image);
+            paraImage = AddImage(std::wstring(im->src.text, im->src.size), 0, 0);
             paraImages++;
-            paraImage = (int)d.images.size() - 1;
             img++;
             break;
         }
@@ -635,9 +784,12 @@ struct Builder {
         case MD_TEXT_SOFTBR: AppendText(L" ", 1, false); break;
         case MD_TEXT_ENTITY: AppendText(s, n, true); break;
         case MD_TEXT_HTML: {
-            // inline / block HTML: strip tags, keep <br> as a line break
-            if (n >= 3 && s[0] == L'<' && (s[1] | 32) == L'b' && (s[2] | 32) == L'r') { AppendText(L"\n", 1, false); break; }
-            if (n && s[0] == L'<') break;
+            if (inHtmlBlock) { htmlRaw.append(s, n); break; }  // a block: kept whole, walked when it ends
+            HtmlTag tag;                                       // inline: one tag per callback, text comes as normal
+            if (n && s[0] == L'<' && ParseHtmlTag(s, n, tag)) {
+                if (!tag.name.empty()) HtmlInline(tag);
+                break;
+            }
             AppendText(s, n, false);
             break;
         }

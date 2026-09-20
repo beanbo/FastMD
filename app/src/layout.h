@@ -49,6 +49,7 @@ struct BlockLayout {
     float natural = 0;                  // code / table / image: natural content width (DIP) for breakout
     bool colored = false;               // drawing effects applied
     std::vector<D2D1_RECT_F> codeBg;    // inline-code backgrounds (layout-relative), lazily computed
+    std::vector<D2D1_RECT_F> kbdBg;     // <kbd>: the same, but framed
     bool codeBgValid = false;
     ~BlockLayout() { if (text) text->Release(); delete table; }
 };
@@ -57,4 +58,5 @@ float BlockHeightEstimate(const Doc& d, const Typography& t, const Block& b, flo
 BlockLayout* LayoutBlock(const Doc& d, const Typography& t, uint32_t index, float width);
 int ImageSize(Doc& d, uint32_t imageIndex, int* w, int* h);  // reads PNG/JPEG/GIF/BMP header; thread-safe
 float ImageDisplayHeight(const Image& im, float width);
+float ImageDisplayWidth(const Image& im, float width);   // honours the HTML width attribute
 float HeadingRuleExtra(const Typography& t, int heading);    // padding + 1 px rule under h1/h2

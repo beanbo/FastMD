@@ -27,7 +27,7 @@ endif()
 configure_file(src/version.h.in ${CMAKE_BINARY_DIR}/generated/version.h @ONLY)
 
 add_executable(FastMD WIN32
-    src/view.cpp src/window.cpp src/loader.cpp src/parse.cpp src/layout.cpp src/canvas_gdi.cpp
+    src/view.cpp src/window.cpp src/loader.cpp src/parse.cpp src/html.cpp src/layout.cpp src/canvas_gdi.cpp
     src/highlight.cpp src/theme.cpp src/util.cpp
     src/find.cpp src/toc.cpp src/home.cpp src/store.cpp src/shell.cpp src/settings_ui.cpp src/strings.cpp
     third_party/md4c/md4c.c

@@ -640,6 +640,35 @@ def test_footnotes():
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ 2.2 HTML
+def test_html():
+    """the HTML subset: centred blocks and images, <kbd>, <sub>/<sup>, headings, and nothing from <script>"""
+    ok = True
+    doc = OUT / "html.md"
+    shutil.copy(HERE / "html.md", doc)
+    proc, hwnd = launch(doc, size="--size=900x900")
+    try:
+        img = shot(hwnd, "28-html")
+        cmd(hwnd, "SELECT_ALL", 0.3)
+        cmd(hwnd, "COPY", 0.4)
+        text = clipboard()
+        ok &= check("2.2 script and style contents are dropped", "alert(" not in text and "color: red" not in text)
+        ok &= check("2.2 tags are gone, their text stays", "<kbd>" not in text and "Ctrl" in text and "ссылкой" in text,
+                    repr(text[:40]))
+        ok &= check("2.2 an HTML comment is not shown", "комментарий" not in text)
+        ok &= check("2.2 <h3> counts as a heading in the outline", q(hwnd, "TOC_COUNT") >= 2, str(q(hwnd, "TOC_COUNT")))
+        # the centred logo: its own box is narrower than the column and sits in the middle of it
+        left, width = q(hwnd, "TEXT_LEFT"), q(hwnd, "TEXT_W")
+        row = img.crop((0, 100, img.width, 200)).convert("RGB")
+        px = row.load()
+        cols = [x for x in range(img.width) if sum(px[x, 50]) < 700]  # the picture is a saturated gradient
+        centred = cols and abs((cols[0] + cols[-1]) // 2 - (left + width // 2)) <= 8
+        ok &= check("2.2 <p align=center> centres the picture", centred, f"{cols[:1]}..{cols[-1:]} column {left}+{width}")
+    finally:
+        close_and_wait(proc, hwnd)
+    return ok
+
+
 # ------------------------------------------------------------------------------------------------ partial frames
 def same_pixels(a, b):
     return ImageChops.difference(a.convert("RGB"), b.convert("RGB")).getbbox() is None
@@ -677,8 +706,9 @@ def test_image_scaling(doc):
     ok = True
     proc, hwnd = launch(doc, size="--size=520x700")
     try:
-        post(hwnd, WM_KEYDOWN, 0x23, 0, 1.0)  # End: the picture is at the bottom
-        time.sleep(1.5)
+        post(hwnd, WM_KEYDOWN, 0x23, 0, 1.2)  # End: the picture is at the bottom
+        post(hwnd, WM_KEYDOWN, 0x23, 0, 1.2)  # again, in case a reading position was still gliding into place
+        time.sleep(1.2)
         w, col = q(hwnd, "IMG_SCALED"), q(hwnd, "TEXT_W")
         ok &= check("a picture wider than the column gets a copy at the drawn size", w > 0 and abs(w - col) <= 1,
                     f"{w} vs column {col}")
@@ -833,7 +863,7 @@ def main():
     shutil.copy(REPO / "bench" / "corpus" / "img" / "diagram0.png", OUT / "img" / "diagram0.png")
     ok = True
     for t in (lambda: test_basics(doc), lambda: test_hscroll(doc), test_outline, lambda: test_positions(doc), test_find,
-              test_start_screen, lambda: test_links(doc), test_footnotes, test_scroll_frames,
+              test_start_screen, lambda: test_links(doc), test_footnotes, test_html, test_scroll_frames,
               lambda: test_image_scaling(doc),
               lambda: test_columns(doc),
               lambda: test_settings(doc),

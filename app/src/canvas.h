@@ -18,7 +18,9 @@ struct Canvas {
     virtual void DrawImage(::Image& im, float l, float t, float r, float b) = 0;
     virtual void PushClip(float l, float t, float r, float b) = 0;
     virtual void PopClip() = 0;
-    virtual IUnknown* Effect(uint8_t pal) = 0;  // object for IDWriteTextLayout::SetDrawingEffect
+    // object for IDWriteTextLayout::SetDrawingEffect: a palette entry (P_DEFAULT = the block's own colour) and a
+    // baseline shift of +1 for <sup> or -1 for <sub>
+    virtual IUnknown* Effect(uint8_t pal, int shift = 0) = 0;
     virtual void SetScale(float pixelsPerDip) = 0;
     virtual void Resize(int w, int h) = 0;
     virtual HDC DC() = 0;

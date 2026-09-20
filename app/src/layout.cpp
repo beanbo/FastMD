@@ -196,9 +196,19 @@ int ImageSize(Doc& d, uint32_t idx, int* w, int* h) {
     return cw > 0;
 }
 
+float ImageDisplayWidth(const Image& im, float width) {
+    if (im.attrW > 0) return std::min((float)im.attrW, width);  // width="…" from HTML wins, as in a browser
+    if (im.w > 0) return std::min((float)im.w, width);
+    return std::min(width, 320.f);
+}
+
 float ImageDisplayHeight(const Image& im, float width) {
+    float w = ImageDisplayWidth(im, width);
+    if (im.attrW > 0) {  // keep the ratio the attributes ask for, or the file's own
+        float ratio = im.attrH > 0 ? (float)im.attrH / im.attrW : (im.w > 0 && im.h > 0 ? (float)im.h / im.w : 0.5f);
+        return std::round(w * ratio);
+    }
     if (im.w <= 0 || im.h <= 0) return 44.f;  // placeholder with alt text
-    float w = std::min((float)im.w, width);
     return std::round(im.h * w / im.w);
 }
 
@@ -247,7 +257,8 @@ static void ApplyRuns(const Doc& d, const Typography& t, IDWriteTextLayout* L, u
             L->SetFontFamilyName(t.iconFamily, rg);
             L->SetFontWeight(DWRITE_FONT_WEIGHT_NORMAL, rg);
         }
-        if (r.flags & F_CODE) {
+        if (r.flags & (F_SUP | F_SUB)) L->SetFontSize(std::round(t.size[role] * 0.72f), rg);  // lifted in the canvas
+        if (r.flags & (F_CODE | F_KBD)) {
             float fs = std::round(t.size[role] * 0.85f * 2.f) / 2.f;
             L->SetFontFamilyName(t.monoFamily, rg);
             L->SetFontSize(fs, rg);
@@ -332,6 +343,8 @@ BlockLayout* LayoutBlock(const Doc& d, const Typography& t, uint32_t index, floa
     case BK_TEXT: {
         int role = b.heading ? b.heading : R_BODY;
         if (SUCCEEDED(t.factory->CreateTextLayout(d.text.data() + b.textOff, b.textLen, t.fmt[role], w, 1e7f, &bl->text))) {
+            if (b.align)  // <p align=center> and friends
+                bl->text->SetTextAlignment(b.align == 1 ? DWRITE_TEXT_ALIGNMENT_CENTER : DWRITE_TEXT_ALIGNMENT_TRAILING);
             ApplyRuns(d, t, bl->text, b.textOff, b.runOff, b.runCount, role, b.heading != 0);
             DWRITE_TEXT_METRICS m{};
             bl->text->GetMetrics(&m);
@@ -360,7 +373,7 @@ BlockLayout* LayoutBlock(const Doc& d, const Typography& t, uint32_t index, floa
         int iw, ih;
         ImageSize(const_cast<Doc&>(d), b.aux, &iw, &ih);
         bl->height = ImageDisplayHeight(d.images[b.aux], w);
-        bl->natural = iw > 0 ? std::min((float)iw, w) : std::min(w, 320.f);
+        bl->natural = ImageDisplayWidth(d.images[b.aux], w);
         if (b.textLen)  // alt text for the placeholder / failed image
             t.factory->CreateTextLayout(d.text.data() + b.textOff, b.textLen, t.fmt[R_BODY], w, 1e7f, &bl->text);
         break;
