@@ -334,6 +334,7 @@ struct Builder {
     int AddImage(const std::wstring& src, int w, int h) {
         Image image;
         bool remote = src.find(L"://") != std::wstring::npos || src.rfind(L"data:", 0) == 0;
+        if (remote && src.rfind(L"data:", 0) != 0) image.url = src;  // fetched after the first frame (loader.cpp)
         if (!remote && !src.empty()) {
             std::wstring p;
             for (size_t i = 0; i < src.size(); i++) {  // %xx decoding + slashes

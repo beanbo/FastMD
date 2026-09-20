@@ -36,6 +36,7 @@ enum Cmd : UINT {
     CMD_TOC, CMD_COL_NARROW, CMD_COL_NORMAL, CMD_COL_WIDE, CMD_COL_FULL, CMD_COL_NARROWER, CMD_COL_WIDER,
     CMD_WRAP, CMD_SETTINGS, CMD_LINK_OPEN, CMD_IMG_COPY, CMD_IMG_OPEN,
     CMD_FIND_CASE, CMD_FIND_WORD, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_FIND_CLOSE, CMD_LINK_NEXT, CMD_LINK_PREV,
+    CMD_LOAD_REMOTE,
 };
 
 // WM_APP_QUERY ids (tests): pixel values are client pixels
@@ -69,6 +70,7 @@ struct Config {
     int fontSize = 16;          // body text (DIP); scales the whole type ramp
     bool smoothScroll = true;
     uint8_t language = LANG_AUTO;
+    uint8_t remoteImages = 0;   // pictures from the network: 0 = always (as on GitHub), 1 = ask, 2 = never
     std::wstring editor;        // exe for Ctrl+E; "" = the system "edit" verb
     bool findCase = false, findWord = false;
 };
@@ -110,6 +112,7 @@ struct App {
     std::atomic<Doc*> fullDoc{nullptr};
     bool fullPending = false, imagesStarted = false, loadFailed = false;
     bool scalingImages = false;    // a scaler thread is making display-size copies right now
+    bool remoteAllowedOnce = false;  // "ask": the reader allowed the network pictures of this document
     FILETIME fileTime{};
     uint64_t fileSize = 0;
     std::vector<HistoryEntry> back, fwd;
@@ -325,6 +328,9 @@ void StartBackgroundWork();          // after the first frame: measure, images, 
 void OnMeasured(MeasureJob* job);
 void OnFullDoc();
 void OnImagesLoaded();
+bool RemoteImagesAllowed();          // the privacy setting, plus a one-off allowance for this document
+bool DocHasRemoteImages();           // something is waiting to be fetched
+void LoadRemoteImages();             // allow them for this document and start fetching
 void ScheduleImageScaling();         // after a frame: start the scaler if an image was drawn at a size we have no copy of
 void OnScaledImages(std::vector<ScaledImage>* list, uint32_t gen);
 void StartMeasure();

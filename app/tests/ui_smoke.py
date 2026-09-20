@@ -690,6 +690,60 @@ def test_html():
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ 2.3 remote pictures
+def test_remote_images():
+    """fetched after the first frame from a local server, kept in the disk cache, skipped when told not to"""
+    import http.server
+    import socketserver
+    import threading
+    ok = True
+    png = (REPO / "bench" / "corpus" / "img" / "diagram0.png").read_bytes()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        hits = 0
+
+        def do_GET(self):
+            Handler.hits += 1
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(png)))
+            self.end_headers()
+            self.wfile.write(png)
+
+        def log_message(self, *a):
+            pass
+
+    srv = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    doc = OUT / "remote.md"
+    doc.write_text(f"# Сеть\n\n![картинка](http://127.0.0.1:{port}/a.png)\n", encoding="utf-8")
+    try:
+        set_reg("RemoteImages", 2)  # never
+        proc, hwnd = launch(doc)
+        time.sleep(2.0)
+        ok &= check("2.3 'never' asks the network for nothing", Handler.hits == 0, str(Handler.hits))
+        close_and_wait(proc, hwnd)
+
+        set_reg("RemoteImages", 0)  # always
+        proc, hwnd = launch(doc)
+        time.sleep(3.0)
+        ok &= check("2.3 the picture is fetched after the first frame", Handler.hits == 1, str(Handler.hits))
+        img = shot(hwnd, "30-remote")
+        drawn = sum(1 for x in range(120, 800, 8) for y in range(60, 400, 8) if sum(img.getpixel((x, y))) < 700)
+        ok &= check("2.3 and it is drawn", drawn > 200, str(drawn))
+        close_and_wait(proc, hwnd)
+
+        proc, hwnd = launch(doc)
+        time.sleep(2.5)
+        ok &= check("2.3 opening it again reads the disk cache", Handler.hits == 1, str(Handler.hits))
+        close_and_wait(proc, hwnd)
+    finally:
+        srv.shutdown()
+        del_reg("RemoteImages")
+    return ok
+
+
 # ------------------------------------------------------------------------------------------------ partial frames
 def same_pixels(a, b):
     return ImageChops.difference(a.convert("RGB"), b.convert("RGB")).getbbox() is None
@@ -796,7 +850,7 @@ def test_settings(doc):
         click_setting(hwnd, sh, 2)      # theme: dark
         click_setting(hwnd, sh, 101)    # font: Sitka
         click_setting(hwnd, sh, 205)    # text size 20
-        click_setting(hwnd, sh, 602)    # English
+        click_setting(hwnd, sh, 702)    # English
         shot(sh, "20-settings")
         shot(hwnd, "21-settings-applied")
         ok &= check("1.9 theme applies at once", q(hwnd, "THEME_DARK") == 1)
@@ -811,7 +865,7 @@ def test_settings(doc):
         ok &= check("1.9 settings persist", q(hwnd, "FONT_SIZE") == 20 and q(hwnd, "LANG") == 1 and q(hwnd, "SITKA") == 1)
         cmd(hwnd, "SETTINGS", 0.8)
         sh = q(hwnd, "SETTINGS_HWND")
-        for id_ in (0, 100, 202, 600):  # back to the defaults
+        for id_ in (0, 100, 202, 700):  # back to the defaults
             click_setting(hwnd, sh, id_)
         post(sh, WM_KEYDOWN, 0x1B, 0, 0.3)
     finally:
@@ -884,7 +938,8 @@ def main():
     shutil.copy(REPO / "bench" / "corpus" / "img" / "diagram0.png", OUT / "img" / "diagram0.png")
     ok = True
     for t in (lambda: test_basics(doc), lambda: test_hscroll(doc), test_outline, lambda: test_positions(doc), test_find,
-              test_start_screen, lambda: test_links(doc), test_footnotes, test_html, test_scroll_frames,
+              test_start_screen, lambda: test_links(doc), test_footnotes, test_html, test_remote_images,
+              test_scroll_frames,
               lambda: test_image_scaling(doc),
               lambda: test_columns(doc),
               lambda: test_settings(doc),

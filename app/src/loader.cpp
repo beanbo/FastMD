@@ -4,6 +4,7 @@
 //   runtime : OpenDocument / Reload / history on the UI thread (big files: prefix parse first, full parse in background).
 //   after the first frame of a document: exact heights on worker threads, WIC image decoding, file watcher.
 #include "app.h"
+#include "net.h"
 #include <shlobj.h>
 #include <wincodec.h>
 
@@ -278,8 +279,31 @@ static DWORD WINAPI ImageThread(void* p) {
     IWICImagingFactory* wic = nullptr;
     CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
     auto& imgs = g.doc.images;
+    bool fetched = false;
     for (size_t i = 0; i < imgs.size() && !g.closing && g.docGen == myGen; i++) {
         Image& im = imgs[i];
+        if (im.path.empty() && !im.url.empty() && RemoteImagesAllowed()) {
+            // from the network, strictly after the first frame: the cache file is the picture's path from then on
+            std::wstring cache = CacheFileFor(im.url);
+            if (GetFileAttributesW(cache.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                std::vector<uint8_t> body;
+                if (HttpGet(im.url, body, 16u << 20, false)) {
+                    CreateDirectoryW((DataDir() + L"cache").c_str(), nullptr);
+                    std::wstring tmp = cache + L".part";
+                    HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+                    if (f != INVALID_HANDLE_VALUE) {
+                        DWORD wrote = 0;
+                        bool okw = WriteFile(f, body.data(), (DWORD)body.size(), &wrote, nullptr) && wrote == body.size();
+                        CloseHandle(f);
+                        if (okw && MoveFileExW(tmp.c_str(), cache.c_str(), MOVEFILE_REPLACE_EXISTING)) im.path = cache;
+                        else DeleteFileW(tmp.c_str());
+                    }
+                }
+            } else {
+                im.path = cache;
+            }
+            fetched = true;
+        }
         if (im.path.empty()) { im.state = 3; continue; }
         size_t c = i;
         for (size_t k = 0; k < i; k++) if (imgs[k].path == im.path) { c = k; break; }
@@ -307,9 +331,12 @@ static DWORD WINAPI ImageThread(void* p) {
         SafeRelease(fr);
         SafeRelease(dec);
         im.state = ok ? 2 : 3;
+        // downloads take their time: show each picture as it arrives instead of waiting for the last one
+        if (ok && !im.url.empty() && !g.closing && g.docGen == myGen) PostMessageW(g.hwnd, WM_APP_IMAGES, 0, 0);
     }
     SafeRelease(wic);
     if (SUCCEEDED(hrCo)) CoUninitialize();
+    if (fetched) TrimHttpCache();
     if (!g.closing && g.docGen == myGen) PostMessageW(g.hwnd, WM_APP_IMAGES, 0, 0);
     return 0;
 }
@@ -318,6 +345,21 @@ static void StartImages() {
     if (g.imagesStarted || g.doc.images.empty()) return;
     g.imagesStarted = true;
     Spawn(ImageThread, (void*)(uintptr_t)(uint32_t)g.docGen, THREAD_PRIORITY_BELOW_NORMAL);
+}
+
+bool RemoteImagesAllowed() { return g.cfg.remoteImages == 0 || (g.cfg.remoteImages == 1 && g.remoteAllowedOnce); }
+
+bool DocHasRemoteImages() {
+    for (const Image& im : g.doc.images)
+        if (!im.url.empty() && im.path.empty()) return true;
+    return false;
+}
+
+void LoadRemoteImages() {  // "ask": the reader said yes for this document
+    if (!DocHasRemoteImages()) return;
+    g.remoteAllowedOnce = true;
+    g.imagesStarted = false;
+    StartImages();
 }
 
 // --------------------------------------------------------------------------------------- display-size copies (WIC)

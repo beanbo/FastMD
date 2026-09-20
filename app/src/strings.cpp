@@ -92,6 +92,12 @@ const Pair kStr[] = {
     {L"Файлы .md", L".md files"},
     {L"Открывать .md в FastMD…", L"Open .md files with FastMD…"},
     {L"FastMD %s · лицензия GPL-3.0", L"FastMD %s · GPL-3.0 license"},
+    {L"Картинки из сети", L"Pictures from the web"},
+    {L"Всегда", L"Always"},
+    {L"Спрашивать", L"Ask"},
+    {L"Никогда", L"Never"},
+    {L"Загрузить картинки из сети", L"Load the pictures from the web"},
+    {L"Картинки из сети не загружены", L"Pictures from the web were not loaded"},
     // shell
     {L"Markdown (*.md; *.markdown; *.mdx; *.txt)", L"Markdown (*.md; *.markdown; *.mdx; *.txt)"},
     {L"Все файлы", L"All files"},

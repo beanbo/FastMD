@@ -52,7 +52,8 @@ struct Table {
     uint32_t alignOff;       // Doc::aligns[alignOff + c]: 0 default, 1 left, 2 center, 3 right
 };
 struct Image {
-    std::wstring path;          // absolute local path ("" = remote / unsupported)
+    std::wstring path;          // absolute local path ("" = not fetched yet / unsupported)
+    std::wstring url;           // https:// source, downloaded into the cache after the first frame
     int w = -1, h = -1;         // pixel size from the file header (-1 = unknown yet, 0 = failed) — layout
     int attrW = 0, attrH = 0;   // size asked for by HTML width / height attributes (0 = not given)
     int canon = -1;             // index of the first image with the same path (holds the pixels)
@@ -65,9 +66,9 @@ struct Image {
     std::atomic<int> scW{0}, scH{0};      // size of sc (0 = none yet)
     std::atomic<int> wantW{0}, wantH{0};  // display size the canvas last drew at (0 = the decoded size fits)
     Image() = default;
-    Image(const Image& o) : path(o.path), w(o.w), h(o.h), attrW(o.attrW), attrH(o.attrH) {}
+    Image(const Image& o) : path(o.path), url(o.url), w(o.w), h(o.h), attrW(o.attrW), attrH(o.attrH) {}
     Image& operator=(const Image& o) {
-        path = o.path; w = o.w; h = o.h; attrW = o.attrW; attrH = o.attrH; canon = -1;
+        path = o.path; url = o.url; w = o.w; h = o.h; attrW = o.attrW; attrH = o.attrH; canon = -1;
         px.clear(); pxW = pxH = 0; state = 0;
         sc.clear(); scW = 0; scH = 0; wantW = 0; wantH = 0;
         return *this;

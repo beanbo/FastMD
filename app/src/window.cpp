@@ -300,6 +300,7 @@ void Command(UINT id) {
         ShowToast(Tr(g.cfg.wrapCode ? S_WRAP_ON : S_WRAP_OFF), 1000);
         break;
     case CMD_SETTINGS: SettingsOpen(); break;
+    case CMD_LOAD_REMOTE: LoadRemoteImages(); break;
     case CMD_FIND_CASE: if (!g.findOpen) FindOpen(); FindToggleCase(); break;
     case CMD_FIND_WORD: if (!g.findOpen) FindOpen(); FindToggleWord(); break;
     case CMD_FIND_NEXT: FindStep(1); break;
@@ -358,6 +359,8 @@ static void ContextMenu(int sx, int sy, bool keyboard) {
         AppendMenuW(column, MF_STRING | (g.cfg.column == k ? MF_CHECKED : 0), CMD_COL_NARROW + k, Tr(cols[k]));
     AppendMenuW(m, MF_POPUP, (UINT_PTR)column, Tr(S_MENU_COLUMN));
     AppendMenuW(m, MF_STRING | (g.cfg.wrapCode ? MF_CHECKED : 0), CMD_WRAP, Tr(S_MENU_WRAP));
+    if (DocHasRemoteImages() && !RemoteImagesAllowed())  // the privacy setting says ask / never
+        AppendMenuW(m, MF_STRING, CMD_LOAD_REMOTE, Tr(S_MENU_LOAD_REMOTE));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, CMD_SETTINGS, Tr(S_MENU_SETTINGS));
     AppendMenuW(m, MF_STRING, CMD_ASSOCIATE, Tr(S_MENU_ASSOCIATE));

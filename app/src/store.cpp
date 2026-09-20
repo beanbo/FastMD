@@ -165,6 +165,7 @@ void LoadConfig(Config& c, std::wstring* findQuery) {
     c.fontSize = (int)std::clamp(GetDword(k, L"FontSize", 16), 12ul, 24ul);
     c.smoothScroll = GetDword(k, L"SmoothScroll", 1) != 0;
     c.language = (uint8_t)std::min<DWORD>(GetDword(k, L"Language", LANG_AUTO), LANG_EN);
+    c.remoteImages = (uint8_t)std::min<DWORD>(GetDword(k, L"RemoteImages", 0), 2);
     c.editor = GetString(k, L"Editor");
     c.findCase = GetDword(k, L"FindCase", 0) != 0;
     c.findWord = GetDword(k, L"FindWord", 0) != 0;
@@ -186,6 +187,7 @@ void SaveConfig(const Config& c, const std::wstring& findQuery) {
     SetDword(k, L"FontSize", (DWORD)c.fontSize);
     SetDword(k, L"SmoothScroll", c.smoothScroll);
     SetDword(k, L"Language", c.language);
+    SetDword(k, L"RemoteImages", c.remoteImages);
     SetString(k, L"Editor", c.editor);
     SetDword(k, L"FindCase", c.findCase);
     SetDword(k, L"FindWord", c.findWord);
