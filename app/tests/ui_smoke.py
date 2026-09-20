@@ -664,6 +664,27 @@ def test_html():
         cols = [x for x in range(img.width) if sum(px[x, 50]) < 700]  # the picture is a saturated gradient
         centred = cols and abs((cols[0] + cols[-1]) // 2 - (left + width // 2)) <= 8
         ok &= check("2.2 <p align=center> centres the picture", centred, f"{cols[:1]}..{cols[-1:]} column {left}+{width}")
+        ok &= check("2.2 a picture inside a line leaves no stray character in the text", "￼" not in text)
+        # three 90 px badges in one line: their pixels span far more than one badge would
+        band = img.crop((0, 240, img.width, 300)).convert("RGB")
+        bp = band.load()
+        xs = [x for x in range(img.width) for y in range(0, 60, 6) if sum(bp[x, y]) < 700]
+        ok &= check("2.2 badges sit side by side on one line", xs and max(xs) - min(xs) > 200,
+                    f"{min(xs) if xs else '-'}..{max(xs) if xs else '-'}")
+        ok &= check("2.2 an HTML table becomes a table", "Возможность\tFastMD" in text, repr(text[-120:]))
+        ok &= check("2.2 a folded <details> hides its text", "Спрятанный" not in text)
+        # click the summary: the text appears and the document grows
+        post(hwnd, WM_KEYDOWN, 0x23, 0, 1.2)  # End: the <details> is at the bottom
+        post(hwnd, WM_KEYDOWN, 0x23, 0, 1.2)
+        tall = q(hwnd, "DOCH")
+        sh = shot(hwnd, "29-details")
+        found = find_color(sh, (0x59, 0x63, 0x6e), (q(hwnd, "TEXT_LEFT") - 20, 0, q(hwnd, "TEXT_LEFT"), 900), tol=60)
+        if found:
+            click(hwnd, found[0] + 2, found[1] + 2, 1.0)
+        cmd(hwnd, "SELECT_ALL", 0.3)
+        cmd(hwnd, "COPY", 0.4)
+        ok &= check("2.2 clicking the summary unfolds it", "Спрятанный" in clipboard() and q(hwnd, "DOCH") > tall,
+                    f"{tall} → {q(hwnd, 'DOCH')}")
     finally:
         close_and_wait(proc, hwnd)
     return ok

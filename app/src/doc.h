@@ -10,6 +10,7 @@ enum RunFlags : uint16_t {
     F_KBD = 64,     // <kbd>: a key in a frame
     F_SUP = 128,    // <sup> / <sub>: smaller and lifted or dropped off the baseline
     F_SUB = 256,
+    F_IMAGE = 512,  // one U+FFFC standing for a picture inside the line (HTML <img>: badges, icons)
 };
 
 struct Run {             // inline style run; offsets are absolute in Doc::text
@@ -18,6 +19,7 @@ struct Run {             // inline style run; offsets are absolute in Doc::text
     uint8_t color;       // Pal, P_DEFAULT = inherit
     uint8_t _pad;
     uint32_t link;       // index into Doc::links when F_LINK
+    uint32_t image;      // index into Doc::images when F_IMAGE
 };
 
 enum BlockKind : uint8_t { BK_TEXT, BK_CODE, BK_HR, BK_TABLE, BK_IMAGE };
@@ -39,6 +41,8 @@ struct Block {
     uint32_t runOff, runCount;
     uint32_t number;     // ordered list number
     uint32_t aux;        // table index / image index
+    uint16_t details;    // <details>: 0 = none, else group + 1; bit 15 marks the <summary> line
+    uint16_t _pad2;
 };
 
 struct Cell { uint32_t textOff, textLen, runOff, runCount; };
@@ -85,6 +89,8 @@ struct Doc {
     std::vector<std::wstring> links;
     std::vector<Heading> headings;
     std::vector<Anchor> anchors;
+    std::vector<uint8_t> detailsOpen;  // one per <details> group: is it unfolded right now
+    bool themed = false;               // holds a <picture> that depends on the colour theme
     std::wstring baseDir;          // directory of the .md file (with trailing backslash)
 };
 

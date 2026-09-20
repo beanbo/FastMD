@@ -54,11 +54,20 @@ void BlockBox(uint32_t i, float* x, float* w) {
 }
 
 // ------------------------------------------------------------------------------------------------ geometry
+// inside a folded <details>: everything but the summary line takes no space and is not drawn
+bool BlockHidden(const Block& b) {
+    if (!b.details || (b.details & 0x8000)) return false;
+    uint32_t gi = (uint32_t)(b.details & 0x7FFF) - 1;
+    return gi < g.doc.detailsOpen.size() && !g.doc.detailsOpen[gi];
+}
+
 void RecomputeY() {
     float y = Metrics::kPadTop;
     size_t n = g.doc.blocks.size();
     for (size_t i = 0; i < n; i++) {
-        y += g.doc.blocks[i].gap;
+        const Block& b = g.doc.blocks[i];
+        if (BlockHidden(b)) { g.Y[i] = y; continue; }
+        y += b.gap;
         g.Y[i] = y;
         y += g.H[i];
     }
@@ -91,6 +100,11 @@ void InitGeometry() {
     for (size_t i = 0; i < n; i++) {
         bool exact = false;
         const Block& b = g.doc.blocks[i];
+        if (BlockHidden(b)) {  // folded away: no height, and nothing to measure
+            g.H[i] = 0.f;
+            g.known[i] = 1;
+            continue;
+        }
         g.H[i] = BlockHeightEstimate(g.doc, g.typo, b, LayoutWidthFor(b, g.textW, g.wideW), &exact);
         g.known[i] = exact;
     }
@@ -117,6 +131,7 @@ void EnsureVisible() {
     for (; i < n; i++) {
         g.Y[i] += delta;
         if (g.Y[i] >= bottom) break;
+        if (BlockHidden(g.doc.blocks[i])) continue;
         if (!g.cache[i]) {
             float old = g.H[i];
             EnsureLayout((uint32_t)i);
@@ -449,6 +464,31 @@ static void DrawTable(uint32_t i, const Block& b, BlockLayout* L, float x, float
 
 const float kAnchorGap = 24.f;  // where the heading's link icon sits, left of the text column
 
+// the <summary> line under the pointer (-1 = none): clicking it folds the <details> open or shut
+int SummaryAt(float px, float py) {
+    if (g.path.empty() || g.Y.size() != g.doc.blocks.size()) return -1;
+    float vh = ViewH();
+    size_t n = g.doc.blocks.size();
+    for (uint32_t i = FirstVisible(g.scrollY); i < n; i++) {
+        float top = g.Y[i] - g.scrollY;
+        if (top > vh) break;
+        const Block& b = g.doc.blocks[i];
+        if (!(b.details & 0x8000) || py < top || py >= top + g.H[i]) continue;
+        float x, w;
+        BlockBox(i, &x, &w);
+        if (px >= x - 24.f && px <= x + w) return (int)i;
+    }
+    return -1;
+}
+
+void ToggleDetails(uint32_t i) {
+    if (i >= g.doc.blocks.size()) return;
+    uint32_t gi = (uint32_t)(g.doc.blocks[i].details & 0x7FFF);
+    if (!gi || gi > g.doc.detailsOpen.size()) return;
+    g.doc.detailsOpen[gi - 1] = !g.doc.detailsOpen[gi - 1];
+    Relayout();
+}
+
 // the heading under the pointer, and whether the pointer is on its link icon rather than on the text
 int HeadingAt(float px, float py, bool* onIcon) {
     if (onIcon) *onIcon = false;
@@ -471,6 +511,7 @@ int HeadingAt(float px, float py, bool* onIcon) {
 
 static void DrawBlock(uint32_t i, float y) {
     const Block& b = g.doc.blocks[i];
+    if (BlockHidden(b)) return;
     BlockLayout* L = EnsureLayout(i);
     ApplyColors(L, b);
     float x, w;
@@ -498,6 +539,18 @@ static void DrawBlock(uint32_t i, float y) {
             DrawLinkFocus(L->text, b.textOff, b.textLen, x, y);
         }
         if (b.heading == 1 || b.heading == 2) g.canvas->FillRect(x, y + L->height - 1, right, y + L->height, P_BORDER);
+        if (b.details & 0x8000) {  // <summary>: a triangle that shows whether the block is folded (drawn, not a glyph)
+            uint32_t gi = (uint32_t)(b.details & 0x7FFF) - 1;
+            bool open = gi < g.doc.detailsOpen.size() && g.doc.detailsOpen[gi];
+            float cx = x - 14.f, cy = y + g.typo.baseline[role] - 5.f, s = 4.f;
+            if (open) {
+                g.canvas->Line(cx - s, cy - 1.f, cx, cy + s - 1.f, 1.6f, P_MUTED);
+                g.canvas->Line(cx, cy + s - 1.f, cx + s, cy - 1.f, 1.6f, P_MUTED);
+            } else {
+                g.canvas->Line(cx - 1.f, cy - s, cx + s - 1.f, cy, 1.6f, P_MUTED);
+                g.canvas->Line(cx + s - 1.f, cy, cx - 1.f, cy + s, 1.6f, P_MUTED);
+            }
+        }
         // pointing at a heading offers its own link, in the column's left padding
         if (b.heading && (int)i == g.hoverHeading && !g.firstFrame)
             DrawIcon(0xE71B, x - kAnchorGap, y + g.typo.baseline[role] - 16.f, 20.f, 12.f, P_MUTED);  // Segoe Fluent: Link
@@ -924,6 +977,7 @@ void SelectBlockAt(uint32_t pos) {
 
 static void AppendCRLF(std::wstring& out, const wchar_t* s, size_t n) {
     for (size_t i = 0; i < n; i++) {
+        if (s[i] == L'\xFFFC') continue;  // the stand-in for a picture inside the line is not text
         if (s[i] == L'\n' && (i == 0 || s[i - 1] != L'\r')) out.push_back(L'\r');
         out.push_back(s[i]);
     }
@@ -946,7 +1000,7 @@ std::wstring SelectionText() {
         if (b.textOff >= e && b.textLen) break;
         if (b.textOff > e) break;
         uint32_t bs = std::max(s, b.textOff), be = std::min(e, BlockEnd(b));
-        if (b.kind == BK_HR || b.kind == BK_IMAGE || be <= bs) continue;
+        if (b.kind == BK_HR || b.kind == BK_IMAGE || be <= bs || BlockHidden(b)) continue;
         if (any) out += b.gap >= 12.f ? L"\r\n\r\n" : L"\r\n";
         any = true;
         if (b.kind == BK_TABLE) {

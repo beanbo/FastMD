@@ -419,3 +419,5 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
 }  // namespace
 
 Canvas* CreateGdiCanvas(IDWriteFactory3* f, int w, int h, float pixelsPerDip) { return new GdiCanvas(f, w, h, pixelsPerDip); }
+
+Canvas* CanvasOfRenderer(IDWriteTextRenderer* r) { return static_cast<GdiCanvas*>(r); }

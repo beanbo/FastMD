@@ -116,6 +116,8 @@ void ApplyTheme() {
     }
     FindRelayoutInput();
     SettingsRefresh();
+    // a <picture> chose its source by the old theme: read the document again to pick the other one
+    if (g.doc.themed && !g.path.empty() && g.ready && !g.firstFrame) ReloadDocument();
     Invalidate();
 }
 
@@ -544,6 +546,7 @@ static void OnMouseMove(int mx, int my) {
     int code = (overlay || hot) ? -1 : CodeBlockAt(x, y, &onBtn);
     bool onAnchor = false;
     int heading = (overlay || hot || link >= 0) ? -1 : HeadingAt(x, y, &onAnchor);
+    bool onSummary = !overlay && !hot && link < 0 && SummaryAt(x, y) >= 0;
     std::wstring tip = tocBtn ? std::wstring(Tr(S_TOC_BUTTON_TIP))
                      : gear   ? std::wstring(Tr(S_SETTINGS_BUTTON_TIP))
                               : std::wstring(FindTip(fpart));
@@ -567,7 +570,7 @@ static void OnMouseMove(int mx, int my) {
         Invalidate();
     }
     LPCWSTR cur = IDC_ARROW;
-    if (link >= 0 || onBtn || tocBtn || gear || onAnchor || tocItem >= 0 || tocItem == -2 || home >= 0 ||
+    if (link >= 0 || onBtn || tocBtn || gear || onAnchor || onSummary || tocItem >= 0 || tocItem == -2 || home >= 0 ||
         (fpart != FP_NONE && fpart != FP_BAR && fpart != FP_FIELD && fpart != FP_COUNT))
         cur = IDC_HAND;
     else if (fpart == FP_FIELD) cur = IDC_IBEAM;
@@ -622,6 +625,11 @@ static void OnLButtonDown(int mx, int my, WPARAM keys) {
     if (onBtn && code >= 0) {
         CopyToClipboard(BlockPlainText((uint32_t)code));
         ShowToast(Tr(S_CODE_COPIED), 900);
+        return;
+    }
+    int summary = SummaryAt(x, y);  // <details>: the summary line folds it open or shut
+    if (summary >= 0) {
+        ToggleDetails((uint32_t)summary);
         return;
     }
     bool onAnchor = false;  // the link icon beside a heading: its own address, copied and jumped to

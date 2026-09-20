@@ -123,6 +123,15 @@ struct Builder {
     bool inHtmlBlock = false;
     uint8_t pendAlign = 0;            // <p align=center> etc. for the blocks that follow
     std::vector<uint8_t> alignStack;  // alignment of the open HTML containers
+    uint16_t curDetails = 0;          // <details> group the blocks belong to (0 = none), kept across blocks
+    bool inSummary = false;
+    // <table> in HTML: cells are collected row by row, the table is emitted when it closes
+    std::vector<std::vector<Cell>> htmlRows;
+    bool inHtmlTable = false;
+    uint32_t htmlCellStart = 0, htmlCellRun = 0;
+    // <picture>: the <source> that matches the current theme wins over the plain <img>
+    bool inPicture = false;
+    std::wstring pictureSrc;
     // image-only paragraph detection
     int paraImages = 0;
     bool paraOther = false;
@@ -161,6 +170,7 @@ struct Builder {
         pending = marginBottom;
         b.indent = indent;
         b.align = pendAlign;
+        b.details = curDetails ? (uint16_t)(curDetails | (inSummary ? 0x8000 : 0)) : 0;
         b.muted = quoteDepth > 0;
         b.marker = pendMarker;
         b.listLevel = pendLevel;
@@ -351,6 +361,40 @@ struct Builder {
         };
         const std::wstring& n = t.name;
         if (n == L"br") { AppendText(L"\n", 1, false); return; }
+        if (n == L"picture") {
+            inPicture = !t.closing;
+            pictureSrc.clear();
+            return;
+        }
+        if (n == L"source" && inPicture) {  // <source media="(prefers-color-scheme: dark)" srcset="…">
+            const std::wstring* media = t.Attr(L"media");
+            const std::wstring* set = t.Attr(L"srcset");
+            if (!set || set->empty()) return;
+            std::wstring m = media ? ToLower(*media) : L"";
+            bool wantDark = m.find(L"dark") != std::wstring::npos;
+            bool wantLight = m.find(L"light") != std::wstring::npos;
+            if ((wantDark && PaletteIsDark()) || (wantLight && !PaletteIsDark()) || (!wantDark && !wantLight)) {
+                std::wstring first = set->substr(0, set->find_first_of(L" ,"));
+                if (!first.empty() && (pictureSrc.empty() || wantDark || wantLight)) pictureSrc = first;
+            }
+            d.themed = true;  // the picture depends on the theme: a theme switch re-reads the document
+            return;
+        }
+        if (n == L"img") {  // a picture inside the line, like a browser: badges, icons, logos
+            const std::wstring* src = t.Attr(L"src");
+            if (t.closing) return;
+            std::wstring chosen = inPicture && !pictureSrc.empty() ? pictureSrc : (src ? *src : std::wstring());
+            if (chosen.empty()) return;
+            EnsureLeaf();
+            if (!collecting && !inCell) StartLeaf(BK_TEXT, 0);
+            int idx = AddImage(chosen, t.AttrInt(L"width"), t.AttrInt(L"height"));
+            uint32_t start = (uint32_t)d.text.size();
+            d.text.push_back(L'\xFFFC');  // object replacement character: the line box holds the picture
+            uint16_t fl = (uint16_t)(F_IMAGE | (link ? F_LINK : 0));
+            d.runs.push_back(Run{start, 1, fl, P_DEFAULT, 0, link ? curLink : 0, (uint32_t)idx});
+            paraOther = true;
+            return;
+        }
         if (n == L"b" || n == L"strong") adj(bold);
         else if (n == L"i" || n == L"em" || n == L"cite" || n == L"var") adj(italic);
         else if (n == L"code" || n == L"tt" || n == L"samp") adj(code);
@@ -416,11 +460,45 @@ struct Builder {
         static const wchar_t* kNames[] = {L"p",      L"div",   L"center",  L"section", L"article", L"summary",
                                           L"figure", L"figcaption", L"blockquote", L"ul", L"ol", L"li",
                                           L"tr",     L"td",    L"th",      L"table",   L"tbody",   L"thead",
-                                          L"details", L"picture", L"body", L"html",    L"main",    L"header",
+                                          L"details", L"body",    L"html",    L"main", L"header",
                                           L"footer", L"nav",   L"dl",      L"dt",      L"dd"};
         for (const wchar_t* k : kNames)
             if (n == k) return true;
         return false;
+    }
+
+    void EmitHtmlTable() {
+        inHtmlTable = false;
+        inCell = false;
+        size_t cols = 0;
+        for (auto& r : htmlRows) cols = std::max(cols, r.size());
+        if (!cols) { htmlRows.clear(); return; }
+        Table tb{};
+        tb.cols = (uint32_t)cols;
+        tb.rows = (uint32_t)htmlRows.size();
+        tb.cellOff = (uint32_t)d.cells.size();
+        tb.alignOff = (uint32_t)d.aligns.size();
+        d.cells.resize(d.cells.size() + cols * htmlRows.size(), Cell{0, 0, 0, 0});
+        d.aligns.resize(d.aligns.size() + cols, 0);
+        uint32_t first = UINT32_MAX, last = 0;
+        for (size_t r = 0; r < htmlRows.size(); r++) {
+            for (size_t c = 0; c < htmlRows[r].size(); c++) {
+                const Cell& cell = htmlRows[r][c];
+                d.cells[tb.cellOff + r * cols + c] = cell;
+                first = std::min(first, cell.textOff);
+                last = std::max(last, cell.textOff + cell.textLen);
+            }
+        }
+        for (size_t k = 0; k < cols * htmlRows.size(); k++) {  // rows shorter than the widest: empty cells at the end
+            Cell& c = d.cells[tb.cellOff + k];
+            if (!c.textLen && !c.textOff) { c.textOff = last; c.runOff = (uint32_t)d.runs.size(); }
+        }
+        d.tables.push_back(tb);
+        Block& b = Emit(BK_TABLE, 0, 16);
+        b.aux = (uint32_t)d.tables.size() - 1;
+        b.textOff = first == UINT32_MAX ? (uint32_t)d.text.size() : first;
+        b.textLen = last > b.textOff ? last - b.textOff : 0;
+        htmlRows.clear();
     }
 
     void HtmlBlockTag(const HtmlTag& t) {
@@ -435,6 +513,58 @@ struct Builder {
             }
             return;
         }
+        if (n == L"table") {
+            EndHtmlLeaf();
+            if (t.closing) EmitHtmlTable();
+            else { htmlRows.clear(); inHtmlTable = true; inCell = false; }
+            return;
+        }
+        if (inHtmlTable && (n == L"tr" || n == L"td" || n == L"th")) {
+            if (n == L"tr") {
+                if (!t.closing) htmlRows.emplace_back();
+                return;
+            }
+            if (t.closing) {  // finish the cell: its text range and runs become a table cell
+                if (!inCell) return;
+                inCell = false;
+                uint32_t end = (uint32_t)d.text.size();
+                while (end > htmlCellStart && d.text[end - 1] == L' ') end--;
+                d.text.resize(end);
+                if (htmlRows.empty()) htmlRows.emplace_back();
+                htmlRows.back().push_back(Cell{htmlCellStart, end - htmlCellStart, htmlCellRun,
+                                               (uint32_t)d.runs.size() - htmlCellRun});
+                bold = italic = code = strike = kbd = sup = sub = 0;
+                link = 0;
+                linkStack.clear();
+                return;
+            }
+            if (htmlRows.empty()) htmlRows.emplace_back();
+            inCell = true;  // AppendText puts the text and its runs straight into the cell's range
+            htmlCellStart = (uint32_t)d.text.size();
+            htmlCellRun = (uint32_t)d.runs.size();
+            if (n == L"th") bold++;
+            return;
+        }
+        if (n == L"details") {  // a block folded away until its summary is clicked
+            EndHtmlLeaf();
+            if (t.closing) {
+                curDetails = 0;
+                inSummary = false;
+                PopAlign();
+            } else {
+                d.detailsOpen.push_back(t.Attr(L"open") ? 1 : 0);
+                curDetails = (uint16_t)d.detailsOpen.size();
+                PushAlign(HtmlAlign(t));
+            }
+            return;
+        }
+        if (n == L"summary") {
+            EndHtmlLeaf();
+            inSummary = !t.closing;
+            if (t.closing) PopAlign();
+            else PushAlign(HtmlAlign(t));
+            return;
+        }
         if (IsHtmlContainer(n)) {
             EndHtmlLeaf();
             if (t.closing) PopAlign();
@@ -442,20 +572,6 @@ struct Builder {
             return;
         }
         if (n == L"hr") { EndHtmlLeaf(); Emit(BK_HR, 8, 24); return; }
-        if (n == L"img" && !t.closing) {
-            const std::wstring* src = t.Attr(L"src");
-            if (!src || src->empty()) return;
-            EndHtmlLeaf();
-            int idx = AddImage(*src, t.AttrInt(L"width"), t.AttrInt(L"height"));
-            Block& b = Emit(BK_IMAGE, 0, 16);
-            b.aux = (uint32_t)idx;
-            if (const std::wstring* alt = t.Attr(L"alt")) {
-                b.textOff = (uint32_t)d.text.size();
-                d.text += *alt;
-                b.textLen = (uint32_t)(d.text.size() - b.textOff);
-            }
-            return;
-        }
         HtmlInline(t);
     }
 
@@ -501,8 +617,8 @@ struct Builder {
                 else if (!out.empty() && out.back() != L' ') out.push_back(L' ');
                 else if (out.empty() && collecting && d.text.size() > tStart && d.text.back() != L' ') out.push_back(L' ');
             }
-            if (out.empty() || (!collecting && out == L" ")) continue;
-            if (!collecting) {
+            if (out.empty() || (!collecting && !inCell && out == L" ")) continue;
+            if (!collecting && !inCell) {
                 if (out.front() == L' ') out.erase(0, 1);
                 if (out.empty()) continue;
                 StartLeaf(BK_TEXT, 0);

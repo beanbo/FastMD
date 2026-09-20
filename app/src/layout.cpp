@@ -1,5 +1,6 @@
 // DirectWrite typography + per-block layout.
 #include "layout.h"
+#include "canvas.h"  // pictures inside a line draw straight onto the canvas behind the text renderer
 
 namespace {
 struct RoleSpec { float size, lineH; DWRITE_FONT_WEIGHT weight; bool display; };
@@ -243,6 +244,59 @@ float BlockHeightEstimate(const Doc& d, const Typography& t, const Block& b, flo
     }
 }
 
+// A picture inside a line of text (HTML <img>): DirectWrite reserves the box, the canvas paints it. The bottom of
+// the picture sits on the baseline, the way a browser places it.
+namespace {
+struct InlineImage final : IDWriteInlineObject {
+    const Doc* doc;
+    uint32_t index;
+    float w, h;
+    ULONG refs = 1;
+    InlineImage(const Doc* d, uint32_t i, float ww, float hh) : doc(d), index(i), w(ww), h(hh) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(IDWriteInlineObject)) {
+            *ppv = static_cast<IDWriteInlineObject*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        ULONG r = --refs;
+        if (!r) delete this;
+        return r;
+    }
+    HRESULT STDMETHODCALLTYPE Draw(void*, IDWriteTextRenderer* renderer, FLOAT x, FLOAT y, BOOL, BOOL,
+                                   IUnknown*) override {
+        Canvas* c = CanvasOfRenderer(renderer);
+        if (!c || index >= doc->images.size()) return S_OK;
+        Image& im0 = const_cast<Doc*>(doc)->images[index];
+        Image& im = im0.canon >= 0 ? const_cast<Doc*>(doc)->images[im0.canon] : im0;
+        if (im.state.load() == 2) c->DrawImage(im, x, y, x + w, y + h);
+        else c->FillRoundRect(x, y, x + w, y + h, 4.f, P_PLACEHOLDER);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetMetrics(DWRITE_INLINE_OBJECT_METRICS* m) override {
+        m->width = w;
+        m->height = h;
+        m->baseline = h;
+        m->supportsSideways = FALSE;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetOverhangMetrics(DWRITE_OVERHANG_METRICS* o) override {
+        *o = DWRITE_OVERHANG_METRICS{};
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetBreakConditions(DWRITE_BREAK_CONDITION* before,
+                                                 DWRITE_BREAK_CONDITION* after) override {
+        *before = *after = DWRITE_BREAK_CONDITION_CAN_BREAK;
+        return S_OK;
+    }
+};
+}  // namespace
+
 static void ApplyRuns(const Doc& d, const Typography& t, IDWriteTextLayout* L, uint32_t textOff, uint32_t runOff,
                       uint32_t runCount, int role, bool heading) {
     IDWriteTextLayout1* L1 = nullptr;
@@ -256,6 +310,16 @@ static void ApplyRuns(const Doc& d, const Typography& t, IDWriteTextLayout* L, u
         if (r.flags & F_ICON) {
             L->SetFontFamilyName(t.iconFamily, rg);
             L->SetFontWeight(DWRITE_FONT_WEIGHT_NORMAL, rg);
+        }
+        if (r.flags & F_IMAGE) {
+            int iw = 0, ih = 0;
+            ImageSize(const_cast<Doc&>(d), r.image, &iw, &ih);  // header size, cached in the image
+            float maxW = std::max(24.f, L->GetMaxWidth());
+            const Image& im = d.images[r.image];
+            auto* obj = new InlineImage(&d, r.image, ImageDisplayWidth(im, maxW), ImageDisplayHeight(im, maxW));
+            L->SetInlineObject(obj, rg);
+            obj->Release();
+            continue;
         }
         if (r.flags & (F_SUP | F_SUB)) L->SetFontSize(std::round(t.size[role] * 0.72f), rg);  // lifted in the canvas
         if (r.flags & (F_CODE | F_KBD)) {

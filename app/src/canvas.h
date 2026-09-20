@@ -32,3 +32,5 @@ struct Canvas {
 };
 
 Canvas* CreateGdiCanvas(IDWriteFactory3* f, int w, int h, float pixelsPerDip);
+// the canvas behind the renderer DirectWrite hands to an inline object (the canvas is the renderer)
+Canvas* CanvasOfRenderer(IDWriteTextRenderer* renderer);

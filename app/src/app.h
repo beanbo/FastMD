@@ -257,6 +257,9 @@ std::wstring SelectionText();
 std::wstring BlockPlainText(uint32_t i);
 int HeadingBlockBySlug(const std::wstring& slug);
 int HeadingAt(float x, float y, bool* onIcon);  // heading under the pointer (-1 = none), and its link icon
+int SummaryAt(float x, float y);                // <summary> line under the pointer (-1 = none)
+void ToggleDetails(uint32_t block);             // fold the block's <details> open or shut
+bool BlockHidden(const Block& b);               // inside a folded <details>
 std::wstring SlugOfBlock(uint32_t block);       // "" if the block is not a heading
 void ScrollToBlock(uint32_t i, bool animate);
 void RevealTextPos(uint32_t pos, bool center);  // scroll (and h-scroll a wide block) so a text position is visible

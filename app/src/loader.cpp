@@ -215,6 +215,7 @@ static DWORD WINAPI MeasureThread(void* p) {
     for (uint32_t i = job->from; i < job->to; i++) {
         if (g.gen != job->gen || g.closing) break;
         const Block& b = g.doc.blocks[i];
+        if (BlockHidden(b)) { job->h[i - job->from] = 0.f; continue; }  // folded <details>: no height
         float w = LayoutWidthFor(b, job->textW, job->wideW);
         bool exact = false;
         float h = BlockHeightEstimate(g.doc, t, b, w, &exact);
@@ -423,9 +424,13 @@ void OnImagesLoaded() {
     WithAnchor([] {
         for (size_t i = 0; i < g.doc.blocks.size(); i++) {
             const Block& b = g.doc.blocks[i];
-            if (b.kind != BK_IMAGE) continue;
+            bool inlineImg = false;  // a badge inside a line changes the line's height once it is known
+            for (uint32_t k = 0; k < b.runCount && !inlineImg; k++)
+                inlineImg = (g.doc.runs[b.runOff + k].flags & F_IMAGE) != 0;
+            if (b.kind != BK_IMAGE && !inlineImg) continue;
             if (g.cache[i]) { delete g.cache[i]; g.cache[i] = nullptr; g.cachedCount--; }
-            g.H[i] = ImageDisplayHeight(g.doc.images[b.aux], LayoutWidthFor(b, g.textW, g.wideW) - b.indent);
+            if (b.kind == BK_IMAGE)
+                g.H[i] = ImageDisplayHeight(g.doc.images[b.aux], LayoutWidthFor(b, g.textW, g.wideW) - b.indent);
         }
         RecomputeY();
     });
