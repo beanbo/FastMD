@@ -442,6 +442,28 @@ static void DrawTable(uint32_t i, const Block& b, BlockLayout* L, float x, float
     if (clip) g.canvas->PopClip();
 }
 
+const float kAnchorGap = 24.f;  // where the heading's link icon sits, left of the text column
+
+// the heading under the pointer, and whether the pointer is on its link icon rather than on the text
+int HeadingAt(float px, float py, bool* onIcon) {
+    if (onIcon) *onIcon = false;
+    if (g.path.empty() || g.Y.size() != g.doc.blocks.size()) return -1;
+    float vh = ViewH();
+    size_t n = g.doc.blocks.size();
+    for (uint32_t i = FirstVisible(g.scrollY); i < n; i++) {
+        float top = g.Y[i] - g.scrollY;
+        if (top > vh) break;
+        const Block& b = g.doc.blocks[i];
+        if (!b.heading || b.kind != BK_TEXT || py < top || py >= top + g.H[i]) continue;
+        float x, w;
+        BlockBox(i, &x, &w);
+        if (px < x - kAnchorGap - 4.f || px > x + w) return -1;
+        if (onIcon) *onIcon = px < x - 2.f;
+        return (int)i;
+    }
+    return -1;
+}
+
 static void DrawBlock(uint32_t i, float y) {
     const Block& b = g.doc.blocks[i];
     BlockLayout* L = EnsureLayout(i);
@@ -466,6 +488,9 @@ static void DrawBlock(uint32_t i, float y) {
             DrawLinkFocus(L->text, b.textOff, b.textLen, x, y);
         }
         if (b.heading == 1 || b.heading == 2) g.canvas->FillRect(x, y + L->height - 1, right, y + L->height, P_BORDER);
+        // pointing at a heading offers its own link, in the column's left padding
+        if (b.heading && (int)i == g.hoverHeading && !g.firstFrame)
+            DrawIcon(0xE71B, x - kAnchorGap, y + g.typo.baseline[role] - 16.f, 20.f, 12.f, P_MUTED);  // Segoe Fluent: Link
         markerBase = y + g.typo.baseline[role];
         break;
     case BK_CODE: {
@@ -614,7 +639,7 @@ struct FrameKey {
     float scrollY = 0, textW = 0, wideW = 0, docH = 0, viewW = 0, viewH = 0, scale = 0, docLeft = 0;
     uint32_t selA = 0, selB = 0;
     int hoverLink = 0, hoverCode = 0, hoverHBlock = 0, hbarFlash = 0, focusLink = 0, dragHBlock = 0, tocHover = 0,
-        curMatch = 0, findHot = 0, recentHover = 0;
+        curMatch = 0, findHot = 0, recentHover = 0, hoverHeading = 0;
     size_t matches = 0;
     bool hoverCopyBtn = false, hotHBar = false, hotScroll = false, dark = false, selecting = false, tocBtnHot = false,
          settingsBtnHot = false, draggingThumb = false, home = false, overText = false;
@@ -649,6 +674,7 @@ FrameKey CurrentKey() {
     k.curMatch = g.curMatch;
     k.findHot = g.findHot;
     k.recentHover = g.recentHover;
+    k.hoverHeading = g.hoverHeading;
     k.matches = g.matches.size();
     k.hoverCopyBtn = g.hoverCopyBtn;
     k.hotHBar = g.hotHBar;
@@ -933,6 +959,12 @@ std::wstring SelectionText() {
         }
     }
     return out;
+}
+
+std::wstring SlugOfBlock(uint32_t block) {
+    for (const Heading& h : g.doc.headings)
+        if (h.block == block) return h.slug;
+    return L"";
 }
 
 int HeadingBlockBySlug(const std::wstring& slug) {

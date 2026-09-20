@@ -201,6 +201,7 @@ struct App {
     int hbarFlash = -1;             // block whose horizontal scrollbar shows briefly after it scrolled
     DWORD hbarFlashUntil = 0;
     bool settingsBtnHot = false;    // the gear button (top-right corner) under the mouse
+    int hoverHeading = -1;          // heading under the mouse: shows the link icon beside it
     std::wstring tip;               // tooltip pill (buttons)
     std::wstring toast;
     DWORD toastUntil = 0;
@@ -255,6 +256,8 @@ bool HasSelection();
 std::wstring SelectionText();
 std::wstring BlockPlainText(uint32_t i);
 int HeadingBlockBySlug(const std::wstring& slug);
+int HeadingAt(float x, float y, bool* onIcon);  // heading under the pointer (-1 = none), and its link icon
+std::wstring SlugOfBlock(uint32_t block);       // "" if the block is not a heading
 void ScrollToBlock(uint32_t i, bool animate);
 void RevealTextPos(uint32_t pos, bool center);  // scroll (and h-scroll a wide block) so a text position is visible
 bool LinkRange(int li, uint32_t* start, uint32_t* end);  // text range of a link (first run … last run)

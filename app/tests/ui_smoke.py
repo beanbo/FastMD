@@ -348,13 +348,11 @@ def test_basics(doc):
         ok &= check("dark theme background", sum(bg) < 120, str(bg))
         cmd(hwnd, "THEME_LIGHT", 0.4)
 
-        img = shot(hwnd, "09-top-light")
-        second = find_color(img, (0x09, 0x69, 0xDA), (150, 262, 900, 320))
-        if second:
-            second = (second[0] + 3, second[1] + 2)
-        ok &= check("found the relative .md link", second is not None, str(second))
-        if second:
-            click(hwnd, *second, 0.8)
+        shot(hwnd, "09-top-light")
+        href = focus_link_href(hwnd, "other.md")  # by address, so the layout may change freely
+        ok &= check("found the relative .md link", href == "other.md", repr(href))
+        if href == "other.md":
+            post(hwnd, WM_KEYDOWN, 0x0D, 0, 1.0)  # Enter opens the focused link
             shot(hwnd, "10-other-doc")
             ok &= check("navigated to other.md", title_of(hwnd).startswith("other.md"), title_of(hwnd))
             post(hwnd, WM_SYSKEYDOWN, 0x25, 0, 0.8)  # Alt+Left
@@ -584,6 +582,13 @@ def test_links(doc):
         post(hwnd, WM_KEYDOWN, 0x23, 0, 1.0)  # End: the image at the bottom
         cmd(hwnd, "IMG_COPY", 0.4)
         ok &= check("1.7 'copy image' puts a bitmap on the clipboard", clipboard_has(8))  # CF_DIB
+        # 2.8: the link icon beside a heading copies that heading's address
+        cmd(hwnd, "TOC", 0.6)
+        click(hwnd, 100, q(hwnd, "TOC_ITEM_Y", 1), 1.2)  # jump to a heading: it lands at the top of the view
+        click(hwnd, q(hwnd, "TEXT_LEFT") - 14, 26, 0.6)
+        ok &= check("2.8 the icon beside a heading copies its address", clipboard().startswith("features.md#"),
+                    repr(clipboard()))
+        cmd(hwnd, "TOC", 0.4)
     finally:
         close_and_wait(proc, hwnd)
     return ok

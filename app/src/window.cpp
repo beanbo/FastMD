@@ -542,12 +542,16 @@ static void OnMouseMove(int mx, int my) {
     int hblock = (overlay || hot) ? -1 : HScrollBlockAt(x, y, &onHBar);
     int link = (overlay || hot) ? -1 : LinkAt(x, y);
     int code = (overlay || hot) ? -1 : CodeBlockAt(x, y, &onBtn);
+    bool onAnchor = false;
+    int heading = (overlay || hot || link >= 0) ? -1 : HeadingAt(x, y, &onAnchor);
     std::wstring tip = tocBtn ? std::wstring(Tr(S_TOC_BUTTON_TIP))
                      : gear   ? std::wstring(Tr(S_SETTINGS_BUTTON_TIP))
                               : std::wstring(FindTip(fpart));
     if (fpart != g.findHot || tocItem != g.tocHover || tocBtn != g.tocBtnHot || gear != g.settingsBtnHot ||
         hot != g.hotScroll || link != g.hoverLink || code != g.hoverCode || onBtn != g.hoverCopyBtn ||
-        hblock != g.hoverHBlock || onHBar != g.hotHBar || home != g.recentHover || tip != g.tip) {
+        hblock != g.hoverHBlock || onHBar != g.hotHBar || home != g.recentHover || heading != g.hoverHeading ||
+        tip != g.tip) {
+        g.hoverHeading = heading;
         g.findHot = fpart;
         g.tocHover = tocItem;
         g.tocBtnHot = tocBtn;
@@ -563,7 +567,7 @@ static void OnMouseMove(int mx, int my) {
         Invalidate();
     }
     LPCWSTR cur = IDC_ARROW;
-    if (link >= 0 || onBtn || tocBtn || gear || tocItem >= 0 || tocItem == -2 || home >= 0 ||
+    if (link >= 0 || onBtn || tocBtn || gear || onAnchor || tocItem >= 0 || tocItem == -2 || home >= 0 ||
         (fpart != FP_NONE && fpart != FP_BAR && fpart != FP_FIELD && fpart != FP_COUNT))
         cur = IDC_HAND;
     else if (fpart == FP_FIELD) cur = IDC_IBEAM;
@@ -619,6 +623,17 @@ static void OnLButtonDown(int mx, int my, WPARAM keys) {
         CopyToClipboard(BlockPlainText((uint32_t)code));
         ShowToast(Tr(S_CODE_COPIED), 900);
         return;
+    }
+    bool onAnchor = false;  // the link icon beside a heading: its own address, copied and jumped to
+    int heading = HeadingAt(x, y, &onAnchor);
+    if (onAnchor && heading >= 0) {
+        std::wstring slug = SlugOfBlock((uint32_t)heading);
+        if (!slug.empty()) {
+            CopyToClipboard(FileNameOf(g.path) + L"#" + slug);
+            ScrollToBlock((uint32_t)heading, true);
+            ShowToast(Tr(S_LINK_COPIED), 900);
+            return;
+        }
     }
     g.downOnLink = LinkAt(x, y) >= 0;
     DWORD now = GetMessageTime();
@@ -898,9 +913,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_MOUSELEAVE:
         if (g.hotScroll || g.hoverLink >= 0 || g.hoverCode >= 0 || g.hoverHBlock >= 0 || g.findHot != -1 ||
-            g.tocHover != -1 || g.tocBtnHot || g.settingsBtnHot || g.recentHover >= 0 || !g.tip.empty()) {
+            g.tocHover != -1 || g.tocBtnHot || g.settingsBtnHot || g.recentHover >= 0 || g.hoverHeading >= 0 ||
+            !g.tip.empty()) {
             g.hotScroll = g.tocBtnHot = g.settingsBtnHot = g.hotHBar = false;
-            g.hoverLink = g.hoverCode = g.hoverHBlock = g.recentHover = -1;
+            g.hoverLink = g.hoverCode = g.hoverHBlock = g.recentHover = g.hoverHeading = -1;
             g.findHot = g.tocHover = -1;
             g.hoverCopyBtn = false;
             g.tip.clear();

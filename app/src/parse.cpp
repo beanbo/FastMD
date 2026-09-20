@@ -646,7 +646,63 @@ struct Builder {
         return 0;
     }
 
-    // YAML front matter at the very top: "---" … "---" / "..." → yaml code block. Returns chars consumed.
+    // Simple front matter ("key: value" lines and nothing else) becomes a two-column table of properties; anything
+    // nested — indentation, list items, keys without a value — is left to the YAML block. Returns false if not simple.
+    bool FrontMatterTable(const wchar_t* s, size_t n) {
+        std::vector<std::pair<std::wstring, std::wstring>> props;
+        for (size_t i = 0; i < n;) {
+            size_t le = i;
+            while (le < n && s[le] != L'\n') le++;
+            size_t end = le;
+            while (end > i && (s[end - 1] == L'\r' || s[end - 1] == L' ' || s[end - 1] == L'\t')) end--;
+            if (end == i) { i = le + 1; continue; }        // blank line
+            if (s[i] == L' ' || s[i] == L'\t') return false;  // nested block
+            if (s[i] == L'#') { i = le + 1; continue; }    // comment
+            size_t colon = i;
+            while (colon < end && s[colon] != L':') colon++;
+            if (colon >= end || colon == i) return false;
+            for (size_t k = i; k < colon; k++) {
+                wchar_t c = s[k];
+                if (!(iswalnum(c) || c == L'_' || c == L'-' || c == L'.' || c == L' ')) return false;
+            }
+            size_t vs = colon + 1;
+            while (vs < end && (s[vs] == L' ' || s[vs] == L'\t')) vs++;
+            if (vs >= end) return false;  // "key:" alone starts a nested value
+            std::wstring value(s + vs, end - vs);
+            if (value.size() > 1 && (value.front() == L'"' || value.front() == L'\'') && value.back() == value.front())
+                value = value.substr(1, value.size() - 2);
+            props.emplace_back(std::wstring(s + i, colon - i), std::move(value));
+            if (props.size() > 40) return false;
+            i = le + 1;
+        }
+        if (props.empty()) return false;
+        Table tb{};
+        tb.cols = 2;
+        tb.rows = (uint32_t)props.size();
+        tb.cellOff = (uint32_t)d.cells.size();
+        tb.alignOff = (uint32_t)d.aligns.size();
+        d.cells.resize(d.cells.size() + 2 * props.size(), Cell{0, 0, 0, 0});
+        d.aligns.resize(d.aligns.size() + 2, 0);
+        d.tables.push_back(tb);
+        uint32_t first = (uint32_t)d.text.size();
+        for (size_t r = 0; r < props.size(); r++) {
+            uint32_t ks = (uint32_t)d.text.size(), kr = (uint32_t)d.runs.size();
+            d.text += props[r].first;
+            uint32_t klen = (uint32_t)d.text.size() - ks;
+            d.runs.push_back(Run{ks, klen, F_BOLD, P_DEFAULT, 0, 0});
+            d.cells[tb.cellOff + r * 2] = Cell{ks, klen, kr, 1};
+            uint32_t vs2 = (uint32_t)d.text.size();
+            d.text += props[r].second;
+            d.cells[tb.cellOff + r * 2 + 1] = Cell{vs2, (uint32_t)d.text.size() - vs2, (uint32_t)d.runs.size(), 0};
+        }
+        Block& b = Emit(BK_TABLE, 0, 16);
+        b.aux = (uint32_t)d.tables.size() - 1;
+        b.textOff = first;
+        b.textLen = (uint32_t)d.text.size() - first;
+        return true;
+    }
+
+    // YAML front matter at the very top: "---" … "---" / "..." → property table or yaml code block. Returns chars consumed.
     size_t FrontMatter(const wchar_t* s, size_t n) {
         auto lineEnd = [&](size_t i) { while (i < n && s[i] != L'\n') i++; return i; };
         auto isDelim = [&](size_t ls, size_t le, bool closing) {
@@ -661,6 +717,7 @@ struct Builder {
             size_t le = lineEnd(i);
             if (isDelim(i, le, true)) {
                 if (i == bodyStart) return 0;  // "---\n---" is two thematic breaks, not front matter
+                if (FrontMatterTable(s + bodyStart, i - bodyStart)) return le < n ? le + 1 : n;
                 StartLeaf(BK_CODE, 0);
                 for (size_t k = bodyStart; k < i; k++)
                     if (s[k] != L'\r') d.text.push_back(s[k]);
