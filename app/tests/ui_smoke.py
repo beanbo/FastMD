@@ -601,7 +601,7 @@ def focus_link_href(hwnd, want, steps=40):
 
 
 def test_footnotes():
-    """footnote references and definitions jump to each other; GitHub alerts survived the md4c update"""
+    """footnote jumps, GitHub alerts after the md4c update, emoji shortcodes and formulas"""
     ok = True
     doc = OUT / "footnotes.md"
     shutil.copy(HERE / "footnotes.md", doc)
@@ -623,6 +623,13 @@ def test_footnotes():
         post(hwnd, WM_KEYDOWN, 0x0D, 0, 1.0)
         back = q(hwnd, "SCROLLY")
         ok &= check("2.1 the arrow jumps back up to the reference", back < at_def, f"{at_def} → {back}")
+        cmd(hwnd, "SELECT_ALL", 0.3)
+        cmd(hwnd, "COPY", 0.4)
+        text = clipboard()
+        ok &= check("2.6 emoji shortcodes become the emoji", "\U0001F680" in text and ":+1:" not in text,
+                    repr(text[text.find("Шорткоды"):][:40]))
+        ok &= check("2.6 shortcodes inside code stay as typed", ":rocket:" in text)
+        ok &= check("2.9 a formula is kept as text", "E = mc^2" in text and "$100" in text)
     finally:
         close_and_wait(proc, hwnd)
     return ok

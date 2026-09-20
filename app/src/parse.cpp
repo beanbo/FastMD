@@ -8,6 +8,7 @@
 #define MD4C_USE_UTF16
 #endif
 #include "../third_party/md4c/md4c.h"
+#include "emoji_table.h"
 #include <cwchar>
 #include <unordered_map>
 
@@ -69,6 +70,47 @@ static void AppendEntity(std::wstring& t, const MD_CHAR* s, MD_SIZE n) {
         }
     }
     t.append(s, n);
+}
+
+// ------------------------------------------------------------------------------------------------ emoji
+// GitHub shortcodes: :rocket: → 🚀. The names come from the gemoji database (app/tools/gen_emoji.py), sorted, so a
+// candidate is looked up with a binary search. Unknown names stay as they were typed, and code is never touched.
+static const wchar_t* EmojiFor(const wchar_t* name, size_t n, uint32_t* len) {
+    size_t lo = 0, hi = std::size(kEmoji);
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        const EmojiEntry& e = kEmoji[mid];
+        const char* s = kEmojiNames + e.name;
+        size_t k = n < e.nameLen ? n : e.nameLen;
+        int cmp = 0;
+        for (size_t i = 0; i < k && cmp == 0; i++) cmp = (int)name[i] - (int)(unsigned char)s[i];
+        if (cmp == 0 && n != e.nameLen) cmp = n < e.nameLen ? -1 : 1;
+        if (cmp == 0) { *len = e.charsLen; return kEmojiChars + e.chars; }
+        if (cmp < 0) hi = mid;
+        else lo = mid + 1;
+    }
+    return nullptr;
+}
+
+static void AppendWithEmoji(std::wstring& t, const MD_CHAR* s, MD_SIZE n) {
+    for (MD_SIZE i = 0; i < n;) {
+        if (s[i] == L':') {
+            MD_SIZE j = i + 1;
+            while (j < n && j - i <= 40) {
+                wchar_t c = s[j];
+                if (!((c >= L'a' && c <= L'z') || (c >= L'0' && c <= L'9') || c == L'_' || c == L'+' || c == L'-')) break;
+                j++;
+            }
+            uint32_t len = 0;
+            const wchar_t* e = (j < n && j > i + 1 && s[j] == L':') ? EmojiFor(s + i + 1, j - i - 1, &len) : nullptr;
+            if (e) {
+                t.append(e, len);
+                i = j + 1;
+                continue;
+            }
+        }
+        t.push_back(s[i++]);
+    }
 }
 
 // ------------------------------------------------------------------------------------------------ builder
@@ -279,8 +321,10 @@ struct Builder {
         EnsureLeaf();
         if (!collecting && !inCell) return;
         uint32_t start = (uint32_t)d.text.size();
+        bool raw = code || (leafKind == BK_CODE && collecting);  // code keeps :colons: and every character as typed
         if (isEntity) AppendEntity(d.text, s, n);
-        else d.text.append(s, n);
+        else if (raw) d.text.append(s, n);
+        else AppendWithEmoji(d.text, s, n);
         uint32_t len = (uint32_t)d.text.size() - start;
         if (!len) return;
         if (img) return;  // alt text: not styled as a run, but kept (shown if not an image block)
@@ -521,6 +565,8 @@ struct Builder {
         case MD_SPAN_STRONG: bold++; break;
         case MD_SPAN_CODE: code++; break;
         case MD_SPAN_DEL: strike++; break;
+        // formulas are shown as code until they are typeset for real (plan 4.1)
+        case MD_SPAN_LATEXMATH: case MD_SPAN_LATEXMATH_DISPLAY: code++; break;
         case MD_SPAN_A: {
             auto* a = (MD_SPAN_A_DETAIL*)det;
             d.links.emplace_back(a->href.text, a->href.size);
@@ -573,6 +619,7 @@ struct Builder {
         case MD_SPAN_STRONG: bold--; break;
         case MD_SPAN_CODE: code--; break;
         case MD_SPAN_DEL: strike--; break;
+        case MD_SPAN_LATEXMATH: case MD_SPAN_LATEXMATH_DISPLAY: code--; break;
         case MD_SPAN_A: link--; break;
         case MD_SPAN_IMG: img--; break;
         default: break;
@@ -645,7 +692,7 @@ bool ParseMarkdown(Doc& d, const wchar_t* src, size_t n) {
     size_t skip = b.FrontMatter(src, n);
     MD_PARSER p{};
     p.abi_version = 0;
-    p.flags = MD_DIALECT_GITHUB;
+    p.flags = MD_DIALECT_GITHUB | MD_FLAG_LATEXMATHSPANS;  // $…$ and $$…$$ as on GitHub
     p.enter_block = cbEnter;
     p.leave_block = cbLeave;
     p.enter_span = cbSpanEnter;
