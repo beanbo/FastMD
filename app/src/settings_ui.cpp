@@ -249,7 +249,7 @@ LRESULT CALLBACK Proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(h, &ps);
         Paint();
-        if (g_cv) BitBlt(dc, 0, 0, g_pxW, g_pxH, g_cv->DC(), 0, 0, SRCCOPY);
+        if (g_cv) BitBlt(dc, 0, 0, g_pxW, g_pxH, g_cv->DC(), 0, g_cv->ViewportTop(), SRCCOPY);
         EndPaint(h, &ps);
         return 0;
     }
@@ -346,4 +346,31 @@ void SettingsRefresh() {
     if (!g_wnd) return;
     Chrome();
     InvalidateRect(g_wnd, nullptr, FALSE);
+}
+
+// ------------------------------------------------------------------------------------------------ gear button
+// The document window's way in besides Ctrl+, and the menu: a gear in the top-right corner, the same size as the
+// outline button in the top-left one, placed just left of the scrollbar's 14 DIP hit zone so the glyph stays in the
+// column's side padding. An icon-font glyph, so it waits for the second frame; the find bar takes that corner while open.
+bool SettingsButtonRect(float* l, float* t, float* r, float* b) {
+    const float kBtn = 30.f, kTop = 8.f, kRight = 14.f;
+    if (g.firstFrame || g.findOpen) return false;
+    *r = ViewW() - kRight;
+    *l = *r - kBtn;
+    *t = kTop;
+    *b = kTop + kBtn;
+    return true;
+}
+
+bool SettingsButtonHit(float x, float y) {
+    float l, t, r, b;
+    return SettingsButtonRect(&l, &t, &r, &b) && x >= l && x < r && y >= t && y < b;
+}
+
+void DrawSettingsButton() {
+    float l, t, r, b;
+    if (!SettingsButtonRect(&l, &t, &r, &b)) return;
+    bool hot = g.settingsBtnHot;
+    if (hot) g.canvas->FillRoundRect(l, t, r, b, 6.f, P_HOVER);
+    DrawIcon(0xE713, l, t, r - l, 15.f, hot ? P_TEXT : P_MUTED);  // Segoe Fluent Icons: Settings
 }

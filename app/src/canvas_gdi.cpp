@@ -36,13 +36,16 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
     IDWriteRenderingParams* params = nullptr;
     HDC dc = nullptr;
     uint32_t* bits = nullptr;
-    int W = 0, H = 0;
+    int W = 0, H = 0;              // the window's client size in pixels
+    static const int kSlack = 512;  // spare buffer rows above and below it, so scrolling never copies the frame
+    int bufH = 0, origin = 0;       // buffer height; buffer row shown as client y = 0
     long stride = 0;  // in pixels, negative for bottom-up
     uint32_t* row0 = nullptr;
     ColorEffect fx[P_COUNT];
     struct Clip { int l, t, r, b; float lDip, tDip, rDip, bDip; };
     std::vector<Clip> clips;
     std::vector<uint32_t> saved;  // pixels around a glyph run that crosses the clip rect
+    std::vector<int> xmap;        // DrawImage: source column of each visible column
     uint8_t curDefault = P_TEXT;
 
     GdiCanvas(IDWriteFactory3* fac, int w, int h, float d) : f(fac) {
@@ -63,9 +66,11 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
     void Resize(int w, int h) override {
         W = std::max(1, w);
         H = std::max(1, h);
-        if (brt) brt->Resize(W, H);
+        bufH = H + kSlack;
+        origin = (bufH - H) / 2;
+        if (brt) brt->Resize(W, bufH);
         else {
-            interop->CreateBitmapRenderTarget(nullptr, W, H, &brt);
+            interop->CreateBitmapRenderTarget(nullptr, W, bufH, &brt);
             brt->QueryInterface(__uuidof(IDWriteBitmapRenderTarget3), (void**)&brt3);  // not on Win11 26200
         }
         brt->SetPixelsPerDip(scale);
@@ -82,10 +87,31 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
         GdiFlush();
         bool topDown = (bits[0] & 0xffffff) == 0x010203;
         bits[0] = save;
-        if (!topDown) { row0 = bits + (size_t)(H - 1) * pitch; stride = -pitch; }
+        if (!topDown) { row0 = bits + (size_t)(bufH - 1) * pitch; stride = -pitch; }
         else { row0 = bits; stride = pitch; }
     }
-    inline uint32_t* Row(int y) { return row0 + (ptrdiff_t)y * stride; }
+    inline uint32_t* Row(int y) { return row0 + (ptrdiff_t)(y + origin) * stride; }
+    int ViewportTop() const override { return origin; }
+    bool ScrollViewport(int dy) override {
+        if (dy == 0 || std::abs(dy) >= H || H >= bufH) return false;
+        int next = origin + dy;
+        if (next < 0 || next + H > bufH) {  // out of spare rows: move the window's rows back to the middle, once
+            int mid = (bufH - H) / 2;
+            MoveRows(origin, mid, H);
+            origin = mid;
+            next = origin + dy;
+            if (next < 0 || next + H > bufH) return false;
+        }
+        origin = next;
+        return true;
+    }
+    void MoveRows(int from, int to, int count) {  // whole rows inside the buffer; the ranges may overlap
+        if (from == to) return;
+        int step = to < from ? 1 : -1;
+        int first = to < from ? 0 : count - 1;
+        for (int k = 0, y = first; k < count; k++, y += step)
+            memcpy(row0 + (ptrdiff_t)(to + y) * stride, row0 + (ptrdiff_t)(from + y) * stride, (size_t)W * 4);
+    }
     float S() const { return scale; }
     void ClipPx(int& x0, int& y0, int& x1, int& y1) {
         x0 = std::max(x0, 0); y0 = std::max(y0, 0); x1 = std::min(x1, W); y1 = std::min(y1, H);
@@ -101,7 +127,11 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
     HDC DC() override { return dc; }
     void Clear(uint8_t pal) override {
         uint32_t c = g_pal[pal];
-        for (int y = 0; y < H; y++) { uint32_t* p = Row(y); for (int x = 0; x < W; x++) p[x] = c; }
+        // bounds in locals: a pixel store may alias the int members, so with W / H in the loop the compiler re-read W
+        // after every pixel and wrote one pixel per iteration; now it emits rep stosd (≈0.4 ms less per full-screen
+        // frame at 3440×1440; hand-written SSE2 stores, streaming or not, were slower than rep stosd)
+        const int w = W, h = H;
+        for (int y = 0; y < h; y++) { uint32_t* p = Row(y); for (int x = 0; x < w; x++) p[x] = c; }
     }
     void FillRect(float l, float t, float r, float b, uint8_t pal) override {
         float s = S();
@@ -202,21 +232,42 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
         if (dw <= 0 || dh <= 0) return;
         int cx0 = x0, cy0 = y0, cx1 = x1, cy1 = y1;
         ClipPx(cx0, cy0, cx1, cy1);
-        for (int y = cy0; y < cy1; y++) {
-            uint32_t* p = Row(y);
-            int sy = (int)((int64_t)(y - y0) * im.pxH / dh);
-            const uint32_t* srow = im.px.data() + (size_t)sy * im.pxW;
-            for (int x = cx0; x < cx1; x++) {
-                uint32_t sp = srow[(int64_t)(x - x0) * im.pxW / dw];  // nearest (1:1 at 100 %)
-                uint32_t a = sp >> 24;
-                if (a == 255) p[x] = sp & 0xffffff;
-                else if (a) {  // premultiplied over opaque
-                    uint32_t d = p[x], ia = 255 - a;
-                    uint32_t rb = (sp & 0xff00ff) + ((((d & 0xff00ff) * ia) >> 8) & 0xff00ff);
-                    uint32_t g = (sp & 0x00ff00) + ((((d & 0x00ff00) * ia) >> 8) & 0x00ff00);
-                    p[x] = (rb & 0xff00ff) | (g & 0x00ff00);
-                }
+        if (cx0 >= cx1) return;
+        const int n = cx1 - cx0;
+        auto put = [](uint32_t* p, uint32_t sp) {
+            uint32_t a = sp >> 24;
+            if (a == 255) *p = sp & 0xffffff;
+            else if (a) {  // premultiplied over opaque
+                uint32_t d = *p, ia = 255 - a;
+                uint32_t rb = (sp & 0xff00ff) + ((((d & 0xff00ff) * ia) >> 8) & 0xff00ff);
+                uint32_t g = (sp & 0x00ff00) + ((((d & 0x00ff00) * ia) >> 8) & 0x00ff00);
+                *p = (rb & 0xff00ff) | (g & 0x00ff00);
             }
+        };
+        // a copy at exactly this size (loader.cpp makes it in the background): one row at a time, no scaling here
+        if (im.scW.load(std::memory_order_acquire) == dw && im.scH.load() == dh && im.sc.size() >= (size_t)dw * dh) {
+            const uint32_t* src = im.sc.data() + (size_t)(cy0 - y0) * dw + (cx0 - x0);
+            for (int y = cy0; y < cy1; y++, src += dw) {
+                uint32_t* p = Row(y) + cx0;
+                for (int i = 0; i < n; i++) put(p + i, src[i]);
+            }
+            return;
+        }
+        if (dw != im.pxW || dh != im.pxH) {  // ask for that copy; until it is ready, scale by the nearest neighbour
+            im.wantW.store(dw, std::memory_order_relaxed);
+            im.wantH.store(dh, std::memory_order_relaxed);
+        }
+        // the nearest source column of every visible column, once per call: a 64-bit division per pixel cost ≈0.5 ms
+        // per frame with large images in a full-screen window
+        const int sw = im.pxW, sh = im.pxH;
+        xmap.resize(n);
+        for (int i = 0; i < n; i++) xmap[i] = (int)((int64_t)(cx0 + i - x0) * sw / dw);
+        const int* xm = xmap.data();
+        const uint32_t* src = im.px.data();
+        for (int y = cy0; y < cy1; y++) {
+            uint32_t* p = Row(y) + cx0;
+            const uint32_t* srow = src + (size_t)((int64_t)(y - y0) * sh / dh) * sw;
+            for (int i = 0; i < n; i++) put(p + i, srow[xm[i]]);  // nearest (1:1 at 100 %)
         }
     }
     void PushClip(float l, float t, float r, float b) override {
@@ -305,8 +356,11 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
         }
         return hr;
     }
+    // DirectWrite rasterises into the buffer's own coordinates and knows nothing about the scrolled viewport, so the
+    // baseline moves down by the viewport's offset (a whole number of pixels, so pixel snapping is unaffected).
     HRESULT DrawRun(FLOAT x, FLOAT y, DWRITE_MEASURING_MODE mode, const DWRITE_GLYPH_RUN& gr,
                     const DWRITE_GLYPH_RUN_DESCRIPTION* desc, IUnknown* effect) {
+        y += origin / scale;
         COLORREF c = Ref(g_pal[PalOf(effect)]);
         if (brt3) return brt3->DrawGlyphRunWithColorSupport(x, y, mode, &gr, params, c, 0, nullptr);
         // colour fonts (Segoe UI Emoji): draw the COLR v0 layers one by one

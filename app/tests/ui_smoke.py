@@ -13,7 +13,7 @@ import sys
 import time
 import winreg
 
-from PIL import Image
+from PIL import Image, ImageChops
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -43,7 +43,7 @@ Q = {"SCROLLY": 1, "DOCH": 2, "TOC_OPEN": 3, "TOC_DOCKED": 4, "TOC_COUNT": 5, "T
      "HSCROLL_BLOCK": 8, "HSCROLL_X": 9, "FOCUS_LINK": 10, "MATCHES": 11, "CUR_MATCH": 12, "TEXT_LEFT": 13,
      "TEXT_W": 14, "RECENT_COUNT": 15, "FIND_EDIT": 16, "SETTINGS_HWND": 17, "FIND_OPEN": 18, "COLUMN": 19,
      "FONT_SIZE": 20, "WRAP": 21, "LANG": 22, "FIND_PART_X": 23, "BLOCK_Y": 24, "RESTORED": 25, "THEME_DARK": 26,
-     "TARGETY": 27, "SETTINGS_HIT": 28, "SITKA": 29}
+     "TARGETY": 27, "SETTINGS_HIT": 28, "SITKA": 29, "SETTINGS_BTN": 30, "IMG_SCALED": 31, "FULL_REDRAW": 32}
 FP_NEXT, FP_CASE = 7, 3  # FindPart
 
 u32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
@@ -219,6 +219,23 @@ def find_color(img, rgb, box, tol=24):
             if sum(abs(p[i] - rgb[i]) for i in range(3)) < tol:
                 return x, y
     return None
+
+
+def ink(img, box, bg=(255, 255, 255), tol=90):
+    """pixels inside box (l, t, r, b) that clearly differ from the background: something is drawn there"""
+    px = img.load()
+    l, t, r, b = box
+    return sum(1 for y in range(max(0, t), min(b, img.height)) for x in range(max(0, l), min(r, img.width))
+               if sum(abs(px[x, y][i] - bg[i]) for i in range(3)) > tol)
+
+
+def gear_box(hwnd):
+    """client-pixel box of the settings button, None while it is not shown"""
+    c = q(hwnd, "SETTINGS_BTN")
+    if c < 0:
+        return None
+    x, y = c & 0xFFFF, c >> 16
+    return (x - 15, y - 15, x + 15, y + 15)
 
 
 def check(name, cond, info=""):
@@ -490,6 +507,9 @@ def test_find():
         click(hwnd, c & 0xFFFF, c >> 16, 0.3)
         img = shot(hwnd, "16-find-marks")
         ok &= check("1.5 matches are marked on the scrollbar", find_color(img, (0xbf, 0x87, 0x00), (980, 60, 1000, 790), tol=30) is not None)
+        ok &= check("the find bar takes the settings button's corner", q(hwnd, "SETTINGS_BTN") == -1)
+        cmd(hwnd, "FIND_CLOSE", 0.3)
+        ok &= check("the settings button is back once find closes", q(hwnd, "SETTINGS_BTN") >= 0)
     finally:
         close_and_wait(proc, hwnd)
     proc, hwnd = launch(MEDIUM)
@@ -512,7 +532,10 @@ def test_start_screen():
     try:
         n = q(hwnd, "RECENT_COUNT")
         ok &= check("1.6 without a file the start screen lists recent documents", n >= 2, str(n))
-        shot(hwnd, "17-start-screen")
+        img = shot(hwnd, "17-start-screen")
+        box = gear_box(hwnd)
+        ok &= check("the start screen has the settings button too", box is not None and ink(img, box) > 12,
+                    f"{box} ink={ink(img, box) if box else 0}")
         type_text(hwnd, "medium")
         ok &= check("1.6 typing filters by name", q(hwnd, "RECENT_COUNT") == 1)
         post(hwnd, WM_KEYDOWN, 0x0D, 0, 0.8)
@@ -566,6 +589,60 @@ def test_links(doc):
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ partial frames
+def same_pixels(a, b):
+    return ImageChops.difference(a.convert("RGB"), b.convert("RGB")).getbbox() is None
+
+
+def test_scroll_frames():
+    """a scrolled frame redraws only the strip that came into view: it must match a full redraw pixel for pixel"""
+    ok = True
+    proc, hwnd = launch(MEDIUM, size="--size=1100x800")
+    try:
+        for name, notches in (("down", -5), ("up", 2), ("far", -40)):
+            wheel(hwnd, 500, 400, notches, wait=1.2)
+            y = q(hwnd, "SCROLLY")
+            partial = shot(hwnd, f"24-scroll-{name}")
+            q(hwnd, "FULL_REDRAW")
+            time.sleep(0.5)
+            full = shot(hwnd, f"24-scroll-{name}-full")
+            ok &= check(f"scrolling {name}: the partial frame matches a full redraw",
+                        q(hwnd, "SCROLLY") == y and same_pixels(partial, full), f"scrollY={y}")
+        cmd(hwnd, "TOC", 0.6)
+        wheel(hwnd, 700, 400, -4, wait=1.2)
+        partial = shot(hwnd, "25-scroll-outline")
+        q(hwnd, "FULL_REDRAW")
+        time.sleep(0.5)
+        ok &= check("the same with the outline open", same_pixels(partial, shot(hwnd, "25-scroll-outline-full")))
+        cmd(hwnd, "TOC", 0.4)
+    finally:
+        close_and_wait(proc, hwnd)
+    return ok
+
+
+# ------------------------------------------------------------------------------------------------ images at display size
+def test_image_scaling(doc):
+    """a picture wider than its column is drawn from a copy made in the background at exactly that size"""
+    ok = True
+    proc, hwnd = launch(doc, size="--size=520x700")
+    try:
+        post(hwnd, WM_KEYDOWN, 0x23, 0, 1.0)  # End: the picture is at the bottom
+        time.sleep(1.5)
+        w, col = q(hwnd, "IMG_SCALED"), q(hwnd, "TEXT_W")
+        ok &= check("a picture wider than the column gets a copy at the drawn size", w > 0 and abs(w - col) <= 1,
+                    f"{w} vs column {col}")
+        shot(hwnd, "23-image-scaled")
+        cmd(hwnd, "ZOOM_IN", 0.5)
+        time.sleep(1.5)
+        w2, col2 = q(hwnd, "IMG_SCALED"), q(hwnd, "TEXT_W")
+        ok &= check("zooming remakes the copy at the new size", w2 > 0 and abs(w2 - col2) <= 1 and w2 != w,
+                    f"{w} → {w2}, column {col2}")
+        cmd(hwnd, "ZOOM_RESET", 0.4)
+    finally:
+        close_and_wait(proc, hwnd)
+    return ok
+
+
 # ------------------------------------------------------------------------------------------------ 1.8 column width
 def test_columns(doc):
     ok = True
@@ -604,9 +681,15 @@ def test_settings(doc):
     ok = True
     proc, hwnd = launch(doc)
     try:
-        cmd(hwnd, "SETTINGS", 0.8)
+        box = gear_box(hwnd)
+        img = shot(hwnd, "22-gear-button")
+        ok &= check("the settings button is drawn in the top-right corner",
+                    box is not None and box[0] > 900 and box[1] < 20 and ink(img, box) > 12,
+                    f"{box} ink={ink(img, box) if box else 0}")
+        if box:
+            click(hwnd, (box[0] + box[2]) // 2, (box[1] + box[3]) // 2, 0.8)
         sh = q(hwnd, "SETTINGS_HWND")
-        ok &= check("1.9 the settings window opens", sh != 0)
+        ok &= check("1.9 a click on the settings button opens the settings window", sh != 0)
         h0 = q(hwnd, "DOCH")
         click_setting(hwnd, sh, 2)      # theme: dark
         click_setting(hwnd, sh, 101)    # font: Sitka
@@ -699,7 +782,9 @@ def main():
     shutil.copy(REPO / "bench" / "corpus" / "img" / "diagram0.png", OUT / "img" / "diagram0.png")
     ok = True
     for t in (lambda: test_basics(doc), lambda: test_hscroll(doc), test_outline, lambda: test_positions(doc), test_find,
-              test_start_screen, lambda: test_links(doc), lambda: test_columns(doc), lambda: test_settings(doc),
+              test_start_screen, lambda: test_links(doc), test_scroll_frames, lambda: test_image_scaling(doc),
+              lambda: test_columns(doc),
+              lambda: test_settings(doc),
               lambda: test_placement(doc)):
         ok &= t()
     reset_profile()

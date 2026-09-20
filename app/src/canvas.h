@@ -22,6 +22,10 @@ struct Canvas {
     virtual void SetScale(float pixelsPerDip) = 0;
     virtual void Resize(int w, int h) = 0;
     virtual HDC DC() = 0;
+    // Scrolling without moving pixels: the buffer is taller than the window, so the window's rows inside it simply
+    // shift. The caller then redraws the strip that came into view. false = too far, redraw the whole frame.
+    virtual bool ScrollViewport(int dyPx) = 0;
+    virtual int ViewportTop() const = 0;  // first buffer row of the window (source row of the blit)
     float scale = 1.f;  // pixels per DIP (DPI / 96 × zoom)
 };
 

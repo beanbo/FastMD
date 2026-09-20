@@ -49,9 +49,19 @@ struct Image {
     std::vector<uint32_t> px;   // decoded premultiplied BGRA (canonical entry only), filled by the image thread
     int pxW = 0, pxH = 0;       // size of px as decoded (a GIF frame can be smaller than its header's screen)
     std::atomic<int> state{0};  // 0 = not requested, 1 = loading, 2 = ready, 3 = failed
+    // the same picture at its display size: drawn as a row copy, and scaled with a real filter instead of the
+    // nearest-neighbour fallback. Made in the background (loader.cpp) for the size the canvas asks for.
+    std::vector<uint32_t> sc;             // UI thread only
+    std::atomic<int> scW{0}, scH{0};      // size of sc (0 = none yet)
+    std::atomic<int> wantW{0}, wantH{0};  // display size the canvas last drew at (0 = the decoded size fits)
     Image() = default;
     Image(const Image& o) : path(o.path), w(o.w), h(o.h) {}
-    Image& operator=(const Image& o) { path = o.path; w = o.w; h = o.h; canon = -1; px.clear(); pxW = pxH = 0; state = 0; return *this; }
+    Image& operator=(const Image& o) {
+        path = o.path; w = o.w; h = o.h; canon = -1;
+        px.clear(); pxW = pxH = 0; state = 0;
+        sc.clear(); scW = 0; scH = 0; wantW = 0; wantH = 0;
+        return *this;
+    }
 };
 struct QuoteSpan { float x; uint32_t first, last; uint8_t alert; };
 struct Heading { uint32_t block; uint8_t level; std::wstring slug; };

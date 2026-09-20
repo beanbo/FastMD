@@ -21,20 +21,10 @@ void CloseRect(float* l, float* t, float* r, float* b) {
 float ListH() { return std::max(0.f, ViewH() - kHeaderH - 6.f); }
 float MaxListScroll() { return std::max(0.f, g.toc.size() * kItemH - ListH()); }
 
-void IconAt(wchar_t icon, float l, float t, float size, float fontSize, uint8_t pal) {
-    IDWriteTextLayout* L = nullptr;
-    if (FAILED(g.dwf->CreateTextLayout(&icon, 1, g.typo.uiIcon, size, size, &L))) return;
-    L->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-    L->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    L->SetFontSize(fontSize, DWRITE_TEXT_RANGE{0, 1});
-    g.canvas->Text(L, l, t, pal);
-    L->Release();
-}
-
 void DrawButton() {
     bool hot = g.tocBtnHot;
     if (hot) g.canvas->FillRoundRect(kBtnX, kBtnY, kBtnX + kBtn, kBtnY + kBtn, 6.f, P_HOVER);
-    IconAt(0xE8FD, kBtnX, kBtnY, kBtn, 15.f, hot ? P_TEXT : P_MUTED);  // Segoe Fluent Icons: BulletedList
+    DrawIcon(0xE8FD, kBtnX, kBtnY, kBtn, 15.f, hot ? P_TEXT : P_MUTED);  // Segoe Fluent Icons: BulletedList
 }
 }  // namespace
 
@@ -114,7 +104,7 @@ void DrawToc() {
     float cl, ct, cr, cb;
     CloseRect(&cl, &ct, &cr, &cb);
     if (g.tocHover == -2) g.canvas->FillRoundRect(cl, ct, cr, cb, 6.f, P_HOVER);
-    if (!g.firstFrame) IconAt(0xE711, cl, ct, 28.f, 11.f, g.tocHover == -2 ? P_TEXT : P_MUTED);  // Cancel
+    if (!g.firstFrame) DrawIcon(0xE711, cl, ct, 28.f, 11.f, g.tocHover == -2 ? P_TEXT : P_MUTED);  // Cancel
     // items
     int cur = TocCurrent();
     float listTop = kHeaderH, listH = ListH();
@@ -174,6 +164,15 @@ bool TocHit(float x, float y, int* item) {
         int k = (int)std::floor((y - kHeaderH + g.tocScroll) / kItemH);
         if (k >= 0 && k < (int)g.toc.size()) *item = k;
     }
+    return true;
+}
+
+bool TocButtonRect(float* l, float* t, float* r, float* b) {
+    if (Visible() || !TocAvailable() || g.firstFrame) return false;
+    *l = kBtnX;
+    *t = kBtnY;
+    *r = kBtnX + kBtn;
+    *b = kBtnY + kBtn;
     return true;
 }
 
