@@ -589,6 +589,45 @@ def test_links(doc):
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ 2.1 footnotes, alerts
+def focus_link_href(hwnd, want, steps=40):
+    """Tab through the links until the focused one has this href; returns the href actually found"""
+    for _ in range(steps):
+        post(hwnd, WM_KEYDOWN, 0x09, 0, 0.12)  # Tab
+        cmd(hwnd, "LINK_COPY", 0.12)
+        if clipboard() == want:
+            return want
+    return clipboard()
+
+
+def test_footnotes():
+    """footnote references and definitions jump to each other; GitHub alerts survived the md4c update"""
+    ok = True
+    doc = OUT / "footnotes.md"
+    shutil.copy(HERE / "footnotes.md", doc)
+    proc, hwnd = launch(doc, size="--size=900x700")
+    try:
+        img = shot(hwnd, "26-alerts")
+        left = q(hwnd, "TEXT_LEFT")
+        ok &= check("2.1 GitHub alerts keep their bar and title (md4c admonitions)",
+                    find_color(img, (0x09, 0x69, 0xda), (left - 2, 100, left + 8, 400), tol=30) is not None)
+        href = focus_link_href(hwnd, "#fn-1")
+        ok &= check("2.1 a footnote reference is a link to its definition", href == "#fn-1", repr(href))
+        before = q(hwnd, "SCROLLY")
+        post(hwnd, WM_KEYDOWN, 0x0D, 0, 1.0)  # Enter: open the focused link
+        at_def = q(hwnd, "SCROLLY")
+        ok &= check("2.1 it jumps down to the definition", at_def > before, f"{before} → {at_def}")
+        shot(hwnd, "27-footnotes")
+        href = focus_link_href(hwnd, "#fnref-1")
+        ok &= check("2.1 the definition links back to the reference", href == "#fnref-1", repr(href))
+        post(hwnd, WM_KEYDOWN, 0x0D, 0, 1.0)
+        back = q(hwnd, "SCROLLY")
+        ok &= check("2.1 the arrow jumps back up to the reference", back < at_def, f"{at_def} → {back}")
+    finally:
+        close_and_wait(proc, hwnd)
+    return ok
+
+
 # ------------------------------------------------------------------------------------------------ partial frames
 def same_pixels(a, b):
     return ImageChops.difference(a.convert("RGB"), b.convert("RGB")).getbbox() is None
@@ -782,7 +821,8 @@ def main():
     shutil.copy(REPO / "bench" / "corpus" / "img" / "diagram0.png", OUT / "img" / "diagram0.png")
     ok = True
     for t in (lambda: test_basics(doc), lambda: test_hscroll(doc), test_outline, lambda: test_positions(doc), test_find,
-              test_start_screen, lambda: test_links(doc), test_scroll_frames, lambda: test_image_scaling(doc),
+              test_start_screen, lambda: test_links(doc), test_footnotes, test_scroll_frames,
+              lambda: test_image_scaling(doc),
               lambda: test_columns(doc),
               lambda: test_settings(doc),
               lambda: test_placement(doc)):

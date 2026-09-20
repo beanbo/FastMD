@@ -939,6 +939,8 @@ int HeadingBlockBySlug(const std::wstring& slug) {
     std::wstring low = ToLower(slug);
     for (const Heading& h : g.doc.headings)
         if (h.slug == low || h.slug == slug) return (int)h.block;
+    for (const Anchor& a : g.doc.anchors)  // footnote jumps, both ways
+        if (a.slug == slug || a.slug == low) return (int)(a.block < g.doc.blocks.size() ? a.block : 0);
     return -1;
 }
 

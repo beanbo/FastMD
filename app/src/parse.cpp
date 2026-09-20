@@ -1,7 +1,8 @@
 // Markdown → flat block model. md4c is compiled with MD4C_USE_UTF16, so it parses the UTF-16 buffer directly and
 // text callbacks point into it (no per-run UTF-8 → UTF-16 conversion).
-// Extras on top of md4c 0.5.3: GitHub alerts (> [!NOTE] …), YAML front matter (shown as a yaml code block),
-// GitHub-style heading slugs for #anchors / outline.
+// md4c is pinned at master 7fc1815a (2026-09-17), which parses GitHub alerts (admonitions) and footnotes itself.
+// Extras on top of it: YAML front matter (shown as a yaml code block), GitHub-style heading slugs for #anchors and
+// the outline, footnote numbering into links that jump both ways, and our own alert parsing as a fallback.
 #include "doc.h"
 #ifndef MD4C_USE_UTF16
 #define MD4C_USE_UTF16
@@ -116,6 +117,8 @@ struct Builder {
     // pending list marker (attached to the next leaf)
     uint8_t pendMarker = MK_NONE, pendLevel = 0;
     uint32_t pendNumber = 0;
+    std::vector<std::wstring> pendAnchors;  // #targets for the next emitted block (footnote jumps)
+    uint32_t fnId = 0;                      // footnote definition being collected
     // tables
     int tIndex = -1;
     uint32_t row = 0, col = 0;
@@ -151,7 +154,29 @@ struct Builder {
         b.textOff = (uint32_t)d.text.size();  // every block owns a [textOff, textOff+textLen) range, in order
         pendMarker = MK_NONE;
         d.blocks.push_back(b);
+        for (std::wstring& a : pendAnchors) d.anchors.push_back(Anchor{std::move(a), (uint32_t)d.blocks.size() - 1});
+        pendAnchors.clear();
         return d.blocks.back();
+    }
+
+    // the title line of a GitHub alert: icon + name, its own block in the alert's colour
+    void EmitAlertTitle(uint8_t alert) {
+        if (!alert || alert > std::size(kAlerts)) return;
+        const AlertSpec& spec = kAlerts[alert - 1];
+        uint32_t ts = (uint32_t)d.text.size(), rs = (uint32_t)d.runs.size();
+        d.text.push_back(spec.icon);
+        d.text += L"  ";
+        d.text += spec.title;
+        uint32_t T = (uint32_t)d.text.size() - ts;
+        uint8_t pal = (uint8_t)(P_ALERT_NOTE + alert - 1);
+        d.runs.push_back(Run{ts, 1, F_ICON, pal, 0, 0});
+        d.runs.push_back(Run{ts + 1, T - 1, F_BOLD, pal, 0, 0});
+        Block& tb = Emit(BK_TEXT, 0, 8);
+        tb.alertTitle = alert;
+        tb.textOff = ts;
+        tb.textLen = T;
+        tb.runOff = rs;
+        tb.runCount = 2;
     }
 
     // The first paragraph of a blockquote starting with [!NOTE] etc. turns the quote into a GitHub alert: the tag is
@@ -241,10 +266,10 @@ struct Builder {
         leafIsLiImplicit = false;
     }
 
-    // implicit text leaf for tight list items (md4c sends LI text without a P block)
+    // implicit text leaf: md4c sends the text of tight list items and of footnote definitions without a P block
     void EnsureLeaf() {
         if (collecting || inCell) return;
-        if (!stack.empty() && stack.back().type == C_LI) {
+        if (fnId || (!stack.empty() && stack.back().type == C_LI)) {
             StartLeaf(BK_TEXT, 0);
             leafIsLiImplicit = true;
         }
@@ -283,13 +308,34 @@ struct Builder {
     int Enter(MD_BLOCKTYPE t, void* det) {
         switch (t) {
         case MD_BLOCK_DOC: break;
-        case MD_BLOCK_QUOTE: {
+        case MD_BLOCK_QUOTE:
+        case MD_BLOCK_ADMONITION: {  // md4c reports > [!NOTE] … as an admonition; a plain quote has no alert
             EndLeaf();
-            QuoteSpan q{indent, (uint32_t)d.blocks.size(), UINT32_MAX, AL_NONE};
+            uint8_t alert = AL_NONE;
+            if (t == MD_BLOCK_ADMONITION) {
+                const MD_ATTRIBUTE& ty = ((MD_BLOCK_ADMONITION_DETAIL*)det)->type;
+                for (size_t a = 0; a < std::size(kAlerts); a++)
+                    if (ty.size == wcslen(kAlerts[a].title) && _wcsnicmp(ty.text, kAlerts[a].title, ty.size) == 0)
+                        alert = (uint8_t)(a + 1);
+            }
+            QuoteSpan q{indent, (uint32_t)d.blocks.size(), UINT32_MAX, alert};
             d.quotes.push_back(q);
             stack.push_back(Ctx{C_QUOTE, false, false, 0, 0, (int)d.quotes.size() - 1});
             indent += 20.f;  // 4 px bar + 16 px padding (GitHub: padding 0 1em, border-left .25em)
             quoteDepth++;
+            EmitAlertTitle(alert);
+            break;
+        }
+        // footnotes: the definitions md4c collected at the end of the document, numbered and linked back
+        case MD_BLOCK_FOOTNOTE_DEF_SECTION: EndLeaf(); Emit(BK_HR, 24, 16); break;
+        case MD_BLOCK_FOOTNOTE_DEF: {
+            EndLeaf();
+            fnId = ((MD_BLOCK_FOOTNOTE_DEF_DETAIL*)det)->id;
+            pendMarker = MK_NUMBER;
+            pendNumber = fnId;
+            pendLevel = 1;
+            pendAnchors.push_back(L"fn-" + std::to_wstring(fnId));
+            indent += 32.f;
             break;
         }
         case MD_BLOCK_UL:
@@ -366,7 +412,8 @@ struct Builder {
 
     int Leave(MD_BLOCKTYPE t, void*) {
         switch (t) {
-        case MD_BLOCK_QUOTE: {
+        case MD_BLOCK_QUOTE:
+        case MD_BLOCK_ADMONITION: {
             EndLeaf();
             Ctx c = stack.back();
             stack.pop_back();
@@ -400,6 +447,25 @@ struct Builder {
             break;
         }
         case MD_BLOCK_H: case MD_BLOCK_CODE: case MD_BLOCK_P: EndLeaf(); break;
+        case MD_BLOCK_FOOTNOTE_DEF: {
+            EndLeaf();
+            indent -= 32.f;
+            // back to the place that referenced it: an arrow appended to the definition's last line
+            if (fnId && !d.blocks.empty()) {
+                Block& b = d.blocks.back();
+                if (b.kind == BK_TEXT && b.textOff + b.textLen == d.text.size()) {
+                    uint32_t start = (uint32_t)d.text.size();
+                    d.text += L" \x21A9";  // ↩
+                    d.links.push_back(L"#fnref-" + std::to_wstring(fnId));
+                    d.runs.push_back(Run{start + 1, 1, F_LINK, P_LINK, 0, (uint32_t)d.links.size() - 1});
+                    b.textLen += 2;
+                    b.runCount = (uint32_t)d.runs.size() - b.runOff;
+                }
+            }
+            fnId = 0;
+            Margin(4);
+            break;
+        }
         case MD_BLOCK_HTML: {
             // drop empty HTML blocks (comments, lone tags)
             bool empty = true;
@@ -460,6 +526,18 @@ struct Builder {
             d.links.emplace_back(a->href.text, a->href.size);
             curLink = (uint32_t)d.links.size() - 1;
             link++;
+            break;
+        }
+        case MD_SPAN_FOOTNOTE_REF: {  // self-contained: md4c sends no text for it, the number is ours to draw
+            if (!collecting && !inCell) break;
+            auto* f = (MD_SPAN_FOOTNOTE_REF_DETAIL*)det;
+            std::wstring tag = L"[" + std::to_wstring(f->id) + L"]";
+            uint32_t start = (uint32_t)d.text.size();
+            d.text += tag;
+            d.links.push_back(L"#fn-" + std::to_wstring(f->id));
+            d.runs.push_back(Run{start, (uint32_t)tag.size(), F_LINK, P_LINK, 0, (uint32_t)d.links.size() - 1});
+            if (f->ref_id == 1) pendAnchors.push_back(L"fnref-" + std::to_wstring(f->id));
+            paraOther = true;
             break;
         }
         case MD_SPAN_IMG: {

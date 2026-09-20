@@ -65,6 +65,7 @@ struct Image {
 };
 struct QuoteSpan { float x; uint32_t first, last; uint8_t alert; };
 struct Heading { uint32_t block; uint8_t level; std::wstring slug; };
+struct Anchor { std::wstring slug; uint32_t block; };  // #target that is not a heading (footnotes)
 
 struct Doc {
     std::wstring text;             // concatenated rendered text of all blocks
@@ -77,6 +78,7 @@ struct Doc {
     std::vector<QuoteSpan> quotes;
     std::vector<std::wstring> links;
     std::vector<Heading> headings;
+    std::vector<Anchor> anchors;
     std::wstring baseDir;          // directory of the .md file (with trailing backslash)
 };
 
