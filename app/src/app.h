@@ -433,6 +433,7 @@ uint32_t DragFormats(int kind, int arg);  // which formats that drag would carry
 void PrintDocument();                // Ctrl+P: the system print dialog, then the job
 void ExportPdf();                    // the same job through "Microsoft Print to PDF" into a chosen file
 bool RegisterAssociation(bool openSettings);
+bool PreviewRegister(bool on);       // window.cpp: the preview pane and thumbnails in Explorer (plan 5.2, 5.3)
 void UnregisterAssociation();
 std::wstring UrlDecode(const std::wstring& s);
 

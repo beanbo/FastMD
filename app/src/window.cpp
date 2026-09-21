@@ -1151,8 +1151,9 @@ done:
 }
 
 // The preview handler registers itself: the exe only loads the DLL beside it and calls the entry point. Everything
-// it writes is under HKCU, so no administrator is involved (plan 5.2).
-static bool PreviewRegister(bool on) {
+// it writes is under HKCU, so no administrator is involved (plan 5.2). Registering the .md association does this
+// too, so the pane and the thumbnails come with the association rather than needing a separate step.
+bool PreviewRegister(bool on) {
     wchar_t path[MAX_PATH];
     DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
     if (!n || n >= MAX_PATH) return false;

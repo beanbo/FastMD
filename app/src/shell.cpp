@@ -286,6 +286,7 @@ bool RegisterAssociation(bool openSettings) {
         ok &= setStr(L"Software\\Classes\\Applications\\FastMD.exe\\SupportedTypes", ext, L"");
     }
     ok &= setStr(L"Software\\RegisteredApplications", L"FastMD", L"Software\\FastMD\\Capabilities");
+    PreviewRegister(true);  // the preview pane and the thumbnails come with the association (plan 5.2, 5.3)
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     if (openSettings)
         ShellExecuteW(nullptr, L"open", L"ms-settings:defaultapps?registeredAppUser=FastMD", nullptr, nullptr, SW_SHOWNORMAL);
@@ -299,5 +300,6 @@ void UnregisterAssociation() {
     RegDeleteKeyValueW(HKEY_CURRENT_USER, L"Software\\RegisteredApplications", L"FastMD");
     for (const wchar_t* ext : {L".md", L".markdown", L".mdown", L".mkd", L".mdx"})
         RegDeleteKeyValueW(HKEY_CURRENT_USER, (std::wstring(L"Software\\Classes\\") + ext + L"\\OpenWithProgids").c_str(), L"FastMD.Markdown");
+    PreviewRegister(false);
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
 }
