@@ -174,6 +174,35 @@ def main():
     check("5.2 there is a document on it, not an empty pane", ink > 400, f"{ink} dark samples")
 
 
+    # The pane has no worker threads, so pictures, formulas and diagrams are prepared while the document loads.
+    # These two documents are small on purpose: anything drawn below the first line can only be the picture or the
+    # formula itself.
+    import shutil
+    (OUT / "img").mkdir(exist_ok=True)
+    shutil.copy(HERE.parents[1] / "bench" / "corpus" / "img" / "diagram0.png", OUT / "img" / "diagram0.png")
+    for name, text, probe in (
+            ("preview-pic", "# Картинка\n\n![схема](img/diagram0.png)\n",
+             "5.2 a picture in the pane is really drawn"),
+            ("preview-math", "# Формула\n\n$$\\frac{a}{b} = \\sqrt{2\\pi}$$\n",
+             "5.2 a formula in the pane is really typeset")):
+        small = OUT / f"{name}.md"
+        small.write_text(text, encoding="utf-8")
+        call(prev, 6)  # Unload
+        call(obj, 3, str(small), 0)
+        call(prev, 3, host, rect)
+        call(prev, 4, rect)
+        call(prev, 5)
+        deadline = time.time() + 0.4
+        while time.time() < deadline and u32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
+            u32.TranslateMessage(ctypes.byref(msg))
+            u32.DispatchMessageW(ctypes.byref(msg))
+        img2 = shot(host, W, H, f"34-{name}")
+        p2 = img2.load()
+        bg = p2[W - 30, H - 30]
+        drawn = sum(1 for y in range(90, 260) for x in range(20, 360)  # the band under the heading, pixel by pixel
+                    if sum(abs(p2[x, y][i] - bg[i]) for i in range(3)) > 90)
+        check(probe, drawn > 150, f"{drawn} pixels differ from the background")
+
     # ---- thumbnails (plan 5.3): the same DLL, its own class
     thumb = ctypes.c_void_p()
     hr = ole32.CoCreateInstance(ctypes.byref(guid(THUMB_CLSID_TEXT)), None, 1,

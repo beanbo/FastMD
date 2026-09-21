@@ -974,8 +974,11 @@ def test_pdf():
                     break
                 time.sleep(0.5)
             time.sleep(0.5)
-            ok &= check("3.4 the window gets its own layout back", (q(hwnd, "TEXT_W"), q(hwnd, "SCROLLY")) == before,
-                        f'{before} → {(q(hwnd, "TEXT_W"), q(hwnd, "SCROLLY"))}')
+            after = (q(hwnd, "TEXT_W"), q(hwnd, "SCROLLY"))
+            # if this ever fails, say what happened to the window: zeros mean it stopped answering, not that the
+            # layout came back wrong
+            ok &= check("3.4 the window gets its own layout back", after == before,
+                        f'{before} → {after}, process alive={proc.poll() is None}, window={bool(u32.IsWindow(hwnd))}')
         finally:
             close_and_wait(proc, hwnd)
     finally:

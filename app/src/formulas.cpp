@@ -10,9 +10,15 @@ using TexFreeFn = void(__cdecl*)(uint8_t*, size_t);
 using MerFn = int(__cdecl*)(const uint8_t*, size_t, int, uint8_t**, size_t*);
 using MerFreeFn = void(__cdecl*)(uint8_t*, size_t);
 
-std::wstring BesideExe(const wchar_t* name) {
+// Where our own binary lives. Not the process: in the preview handler the process is Explorer's prevhost.exe, and
+// the libraries sit next to the DLL that asks for them, not next to the host.
+std::wstring BesideThisModule(const wchar_t* name) {
+    HMODULE self = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)&BesideThisModule, &self))
+        self = nullptr;
     wchar_t path[MAX_PATH];
-    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    DWORD n = GetModuleFileNameW(self, path, MAX_PATH);
     if (!n || n >= MAX_PATH) return L"";
     std::wstring dir(path, n);
     size_t slash = dir.find_last_of(L'\\');
@@ -21,7 +27,7 @@ std::wstring BesideExe(const wchar_t* name) {
 
 // the file is there: asked while the document is still being parsed, so it must not load anything
 bool FileExists(const wchar_t* name) {
-    std::wstring p = BesideExe(name);
+    std::wstring p = BesideThisModule(name);
     return !p.empty() && GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
@@ -44,7 +50,7 @@ struct Lib {
         AcquireSRWLockExclusive(&lock);
         if (state == 0) {
             state = 2;
-            std::wstring path = BesideExe(file);
+            std::wstring path = BesideThisModule(file);
             if (!path.empty()) {
                 if (HMODULE h = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)) {
                     render = GetProcAddress(h, renderName);

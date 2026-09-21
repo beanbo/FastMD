@@ -8,7 +8,11 @@
 // preview), so there is no regsvr32 and no administrator anywhere in the story.
 #include "app.h"
 
+#include "formulas.h"
+#include "svg.h"
+
 #include <shlobj.h>
+#include <wincodec.h>
 #include <thumbcache.h>
 #include <shlwapi.h>
 
@@ -62,6 +66,85 @@ void LayoutForSize(int w, int h) {
     RecomputeY();
 }
 
+// Pictures, formulas and diagrams, right here on the calling thread. The window does this on worker threads after
+// its first frame; a preview pane has no threads of its own and no frame to protect, so it simply does the work
+// before laying the document out - and stays offline: nothing is fetched from the network.
+void LoadImagesSync() {
+    auto& imgs = g.doc.images;
+    if (imgs.empty()) return;
+    const float fontPx = (float)g.cfg.fontSize;
+    const uint32_t color = g_pal[P_TEXT];
+    const bool dark = PaletteIsDark();
+    IWICImagingFactory* wic = nullptr;
+    for (size_t i = 0; i < imgs.size(); i++) {
+        Image& im = imgs[i];
+        std::vector<uint8_t> svg;
+        float mw = 0, mh = 0, asc = 0;
+        if (im.mathKind) {  // a formula or a diagram: the same source twice is drawn once
+            size_t c = i;
+            for (size_t k = 0; k < i; k++)
+                if (imgs[k].mathKind == im.mathKind && imgs[k].math == im.math) { c = k; break; }
+            im.canon = (int)c;
+            if (c != i) continue;
+            bool ok = im.mathKind == 3 ? MermaidSvg(im.math, dark, svg)
+                                       : TexSvg(im.math, im.mathKind == 2, fontPx, color, svg, &mw, &mh, &asc);
+            if (!ok) { im.state = 3; continue; }
+        } else if (!im.path.empty()) {
+            size_t c = i;
+            for (size_t k = 0; k < i; k++)
+                if (!imgs[k].mathKind && imgs[k].path == im.path) { c = k; break; }
+            im.canon = (int)c;
+            if (c != i) continue;
+            if (!ReadFileBytes(im.path.c_str(), svg, 16u << 20)) { im.state = 3; continue; }
+            if (!IsSvgData(svg.data(), svg.size())) {  // an ordinary picture: WIC, if COM is up in this host
+                if (!wic) CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
+                IWICBitmapDecoder* dec = nullptr;
+                IWICBitmapFrameDecode* fr = nullptr;
+                IWICFormatConverter* conv = nullptr;
+                UINT w = 0, h = 0;
+                bool ok = wic &&
+                          SUCCEEDED(wic->CreateDecoderFromFilename(im.path.c_str(), nullptr, GENERIC_READ,
+                                                                   WICDecodeMetadataCacheOnDemand, &dec)) &&
+                          SUCCEEDED(dec->GetFrame(0, &fr)) && SUCCEEDED(wic->CreateFormatConverter(&conv)) &&
+                          SUCCEEDED(conv->Initialize(fr, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone,
+                                                     nullptr, 0, WICBitmapPaletteTypeCustom)) &&
+                          SUCCEEDED(conv->GetSize(&w, &h)) && w > 0 && h > 0;
+                if (ok) {
+                    std::vector<uint32_t> px((size_t)w * h);
+                    ok = SUCCEEDED(conv->CopyPixels(nullptr, w * 4, (UINT)(px.size() * 4), (BYTE*)px.data()));
+                    if (ok) {
+                        im.px.swap(px);
+                        im.pxW = (int)w;
+                        im.pxH = (int)h;
+                        if (im.w <= 0) { im.w = (int)w; im.h = (int)h; }
+                    }
+                }
+                SafeRelease(conv);
+                SafeRelease(fr);
+                SafeRelease(dec);
+                im.state = ok ? 2 : 3;
+                continue;
+            }
+        } else {
+            im.state = 3;  // from the network: the pane does not go there
+            continue;
+        }
+        // vector art, from a file or from a formula
+        if ((mw <= 0 || mh <= 0) && !SvgMeasure(svg.data(), svg.size(), &mw, &mh)) { im.state = 3; continue; }
+        int w = std::clamp((int)std::lround(mw), 1, 4096), h = std::clamp((int)std::lround(mh), 1, 4096);
+        std::vector<uint32_t> px;
+        if (!SvgRender(svg.data(), svg.size(), w, h, px)) { im.state = 3; continue; }
+        im.px.swap(px);
+        im.pxW = w;
+        im.pxH = h;
+        if (im.mathKind || im.w <= 0) { im.w = w; im.h = h; }
+        im.ascent = asc > 0 ? asc : (float)h;
+        im.svg.swap(svg);
+        im.state = 2;
+    }
+    SafeRelease(wic);
+}
+
 void LoadDocument(const std::wstring& path, int w, int h) {
     g.path = path;
     g.doc = Doc();
@@ -76,6 +159,7 @@ void LoadDocument(const std::wstring& path, int w, int h) {
         g.typo.Init(g.dwf);
     }
     g.scrollY = g.targetY = 0;
+    LoadImagesSync();  // before the layout: with the real sizes known, nothing has to be laid out twice
     LayoutForSize(w, h);
     InitialLayout();
     g.ready = true;

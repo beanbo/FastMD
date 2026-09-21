@@ -31,8 +31,12 @@ bool Ensure() {
     AcquireSRWLockExclusive(&g_lock);
     if (g_state == 0) {
         g_state = 2;
+        // beside our own binary: in the preview handler the process is prevhost.exe, the DLL is ours
+        HMODULE self = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCWSTR)&Ensure, &self);
         wchar_t path[MAX_PATH];
-        DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+        DWORD n = GetModuleFileNameW(self, path, MAX_PATH);
         if (n && n < MAX_PATH) {
             std::wstring dll(path, n);
             size_t slash = dll.find_last_of(L'\\');

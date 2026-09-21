@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 # the one place the version lives: src/version.h (generated) feeds the exe resource and the settings window
-project(FastMD VERSION 1.0.0 LANGUAGES C CXX RC)
+project(FastMD VERSION 1.0.1 LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,6 +41,9 @@ target_compile_definitions(FastMD PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN N
 target_compile_options(FastMD PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus /EHsc
     $<$<CONFIG:Release>:/O2 /Oi /GL /Gy /DNDEBUG> ${FASTMD_SEC_C})
 set_source_files_properties(third_party/md4c/md4c.c PROPERTIES COMPILE_OPTIONS "/wd4244;/wd4267")
+# the version resource is generated from version.h, and the resource compiler's dependencies are not scanned:
+# without this a version bump left the old number inside the exe
+set_source_files_properties(res/fastmd.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_BINARY_DIR}/generated/version.h)
 
 # Everything not needed for the first frame is delay-loaded: dwrite is mapped on the doc thread (in parallel with
 # window creation); COM/WIC/shell/dialogs only when used after the first frame.
@@ -123,7 +126,7 @@ if(FASTMD_SETUP)
     configure_file(setup/setup_payload.rc.in ${SETUP_RC} @ONLY)
     # the resource script embeds files the other targets write, so it must be recompiled when they change
     set_source_files_properties(${SETUP_RC} PROPERTIES OBJECT_DEPENDS
-        "${PAYLOAD_EXE};${PAYLOAD_SVG};${PAYLOAD_TEX};${PAYLOAD_MERMAID};${PAYLOAD_PREVIEW}")
+        "${PAYLOAD_EXE};${PAYLOAD_SVG};${PAYLOAD_TEX};${PAYLOAD_MERMAID};${PAYLOAD_PREVIEW};${CMAKE_BINARY_DIR}/generated/version.h")
     add_executable(FastMD_Setup WIN32 setup/setup.cpp ${SETUP_RC})
     set_target_properties(FastMD_Setup PROPERTIES OUTPUT_NAME "FastMD-Setup")
     target_include_directories(FastMD_Setup PRIVATE ${CMAKE_BINARY_DIR}/generated ${CMAKE_SOURCE_DIR}/setup)
