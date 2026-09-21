@@ -1239,6 +1239,22 @@ static void AppendCRLF(std::wstring& out, const wchar_t* s, size_t n) {
     }
 }
 
+// Text of a range, with a formula coming out as the source it was written from: what is copied is what the author
+// typed, not a hole where the picture of the formula stands.
+static void AppendWithMath(std::wstring& out, uint32_t runOff, uint32_t runCount, uint32_t s, uint32_t e) {
+    uint32_t at = s;
+    for (uint32_t k = 0; k < runCount && at < e; k++) {
+        const Run& r = g.doc.runs[runOff + k];
+        if (!(r.flags & F_IMAGE) || r.start < at || r.start >= e || r.image >= g.doc.images.size()) continue;
+        const Image& im = g.doc.images[r.image];
+        if (!im.mathKind || im.alt.empty()) continue;
+        AppendCRLF(out, g.doc.text.data() + at, r.start - at);
+        out += im.alt;
+        at = r.start + r.len;
+    }
+    if (at < e) AppendCRLF(out, g.doc.text.data() + at, e - at);
+}
+
 std::wstring BlockPlainText(uint32_t i) {
     const Block& b = g.doc.blocks[i];
     std::wstring out;
@@ -1256,7 +1272,9 @@ std::wstring SelectionText() {
         if (b.textOff >= e && b.textLen) break;
         if (b.textOff > e) break;
         uint32_t bs = std::max(s, b.textOff), be = std::min(e, BlockEnd(b));
-        if (b.kind == BK_HR || b.kind == BK_IMAGE || be <= bs || BlockHidden(b)) continue;
+        // a formula or a diagram of its own: its source is the block's text, so it copies as it was written
+        bool mathBlock = b.kind == BK_IMAGE && b.aux < g.doc.images.size() && g.doc.images[b.aux].mathKind;
+        if (b.kind == BK_HR || (b.kind == BK_IMAGE && !mathBlock) || be <= bs || BlockHidden(b)) continue;
         if (any) out += b.gap >= 12.f ? L"\r\n\r\n" : L"\r\n";
         any = true;
         if (b.kind == BK_TABLE) {
@@ -1269,13 +1287,13 @@ std::wstring SelectionText() {
                     bool in = cell.textOff + cell.textLen > bs && cell.textOff < be;
                     if (!in) continue;
                     if (rowAny) out.push_back(L'\t');
-                    if (ce > cs) out.append(g.doc.text, cs, ce - cs);
+                    if (ce > cs) AppendWithMath(out, cell.runOff, cell.runCount, cs, ce);
                     rowAny = true;
                 }
                 if (rowAny && r + 1 < t.rows && g.doc.cells[t.cellOff + (r + 1) * t.cols].textOff < be) out += L"\r\n";
             }
         } else {
-            AppendCRLF(out, g.doc.text.data() + bs, be - bs);
+            AppendWithMath(out, b.runOff, b.runCount, bs, be);
         }
     }
     return out;

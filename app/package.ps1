@@ -20,11 +20,17 @@ $zip = Join-Path $dist "FastMD-$ver-win-x64.zip"
 New-Item -ItemType Directory -Force $stage | Out-Null
 Get-ChildItem $stage -File | Remove-Item
 Copy-Item $exe $stage
-Copy-Item (Join-Path $PSScriptRoot 'build\Release\fastmd-svg.dll') $stage  # SVG rendering, loaded on demand
+# loaded only when a document needs them: SVG pictures, TeX formulas, Mermaid diagrams
+foreach ($name in 'fastmd-svg.dll', 'fastmd-tex.dll', 'fastmd-mermaid.dll') {
+    Copy-Item (Join-Path $PSScriptRoot "build\Release\$name") $stage
+}
 Copy-Item (Join-Path $PSScriptRoot '..\LICENSE') (Join-Path $stage 'LICENSE.txt')
 Copy-Item (Join-Path $PSScriptRoot 'third_party\md4c\LICENSE.md') (Join-Path $stage 'THIRD-PARTY-md4c.txt')
 Copy-Item (Join-Path $PSScriptRoot 'third_party\lunasvg\LICENSE') (Join-Path $stage 'THIRD-PARTY-lunasvg.txt')
 Copy-Item (Join-Path $PSScriptRoot 'third_party\plutovg\LICENSE') (Join-Path $stage 'THIRD-PARTY-plutovg.txt')
+Copy-Item (Join-Path $PSScriptRoot 'third_party\ratex\LICENSE-ratex.txt') (Join-Path $stage 'THIRD-PARTY-ratex.txt')
+Copy-Item (Join-Path $PSScriptRoot 'third_party\ratex\OFL-katex-fonts.txt') (Join-Path $stage 'THIRD-PARTY-katex-fonts.txt')
+Copy-Item (Join-Path $PSScriptRoot 'third_party\ratex\LICENSE-mermaid-rs-renderer.txt') (Join-Path $stage 'THIRD-PARTY-mermaid-rs-renderer.txt')
 Copy-Item (Join-Path $PSScriptRoot '..\CHANGELOG.md') $stage
 $readme = @"
 FastMD $ver - lightning-fast Markdown reader for Windows
@@ -35,7 +41,8 @@ right-click inside the window -> "Open .md files with FastMD..." and confirm in 
 Keys: Ctrl+F find, Ctrl+Shift+O outline, Ctrl+, settings, Ctrl+E open in editor, Ctrl+Alt+Left/Right column width.
 The exe is not code-signed yet: Windows SmartScreen may warn on the first run (More info -> Run anyway).
 License: GNU GPL v3.0 (LICENSE.txt). Source code: https://github.com/beanbo/FastMD/tree/v$ver
-md4c (Markdown parser): MIT (THIRD-PARTY-md4c.txt).
+md4c (Markdown parser): MIT (THIRD-PARTY-md4c.txt). Formulas: RaTeX, MIT, with KaTeX fonts under the
+SIL Open Font License. Diagrams: mermaid-rs-renderer, MIT. Pictures: lunasvg and plutovg, MIT.
 
 FastMD $ver - молниеносный просмотрщик Markdown для Windows
 Запустите FastMD.exe: установка и права администратора не нужны. Чтобы .md открывались двойным кликом,

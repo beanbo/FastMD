@@ -107,7 +107,8 @@ static void ApplyWindowChrome(HWND h) {
 
 void ApplyTheme() {
     bool dark = WantDark();
-    if (dark == PaletteIsDark()) return;
+    // high contrast: the palette comes from the system colours, and those can change without the dark flag moving
+    if (dark == PaletteIsDark() && PaletteIsHighContrast() == SystemHighContrast() && !SystemHighContrast()) return;
     SetDarkPalette(dark);
     if (g.hwnd) {
         ApplyWindowChrome(g.hwnd);
@@ -460,6 +461,7 @@ static void AfterFirstFrame() {
     if (!g.path.empty()) SHAddToRecentDocs(SHARD_PATHW, g.path.c_str());
     if (!g_msgSettings) g_msgSettings = RegisterWindowMessageW(L"FastMD.SettingsChanged");
     LoadPositionsAsync();  // reading position of this document; marks it as recently opened
+    CrashReportIfAny();    // the previous run left a minidump: offer the folder, once
     DebugFlush();
     if (g.cfg.scrollTest) ScrollTest();
 }
@@ -891,6 +893,15 @@ static LRESULT Query(WPARAM q, LPARAM lp) {
         return 1;
     case Q_SEL_ANCHOR: return g.selAnchor;
     case Q_SEL_FOCUS: return g.selFocus;
+    case Q_MATH: {  // formulas and diagrams: how many there are, how many are drawn, how many could not be
+        LRESULT n = 0;
+        for (const Image& im : g.doc.images) {
+            if (!im.mathKind) continue;
+            int st = im.canon >= 0 ? g.doc.images[im.canon].state.load() : im.state.load();
+            if (lp == 0 || (lp == 1 && st == 2) || (lp == 2 && st == 3)) n++;
+        }
+        return n;
+    }
     case Q_DRAG: {  // 0xFFFF as the picture's block means "the one on screen", as the image menu items do
         int kind = (int)(lp >> 16), arg = (int)(lp & 0xFFFF);
         if (kind == DRAG_IMAGE && arg == 0xFFFF) arg = g.ctxImage >= 0 ? g.ctxImage : FirstVisibleImage();
@@ -1036,7 +1047,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_SETTINGCHANGE:
-        if (lp && lstrcmpiW((LPCWSTR)lp, L"ImmersiveColorSet") == 0) ApplyTheme();
+        // theme switched, or high contrast turned on or off (plan 6.2): the palette is rebuilt either way
+        if ((lp && lstrcmpiW((LPCWSTR)lp, L"ImmersiveColorSet") == 0) || wp == SPI_SETHIGHCONTRAST) ApplyTheme();
+        return 0;
+    case WM_SYSCOLORCHANGE:
+    case WM_THEMECHANGED:
+        ApplyTheme();
         return 0;
     case WM_COMMAND:  // menu ids; also lets tests and automation drive the viewer (tests/ui_smoke.py)
         if (g.ready && !g.firstFrame) Command(LOWORD(wp));
@@ -1119,6 +1135,7 @@ done:
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     BenchInit();
+    CrashHandlerInstall();  // one call, no library behind it: a crash leaves a minidump instead of silence
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     g.inst = inst;
 
@@ -1133,6 +1150,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     for (size_t i = 1; i < args.size(); i++) {
         const std::wstring& a = args[i];
         if (a == L"--register") return RegisterAssociation(true) ? 0 : 1;
+        if (a == L"--register-quiet") return RegisterAssociation(false) ? 0 : 1;  // the installer, without dialogs
         if (a == L"--unregister") { UnregisterAssociation(); return 0; }
         if (a.rfind(L"--id=", 0) == 0) wcsncpy_s(g.cfg.id, a.c_str() + 5, _TRUNCATE);
         else if (a == L"--light") g.cfg.theme = TM_LIGHT;

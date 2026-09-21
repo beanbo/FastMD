@@ -131,6 +131,22 @@ struct StoreLock {  // positions.bin is shared by every FastMD window
 };
 }  // namespace
 
+// the newest crash dump the reader has already been offered (FILETIME ticks): so it is offered once, not every start
+uint64_t LastCrashSeen() {
+    HKEY k = OpenKey(false);
+    uint64_t lo = GetDword(k, L"CrashSeenLo", 0), hi = GetDword(k, L"CrashSeenHi", 0);
+    if (k) RegCloseKey(k);
+    return (hi << 32) | lo;
+}
+
+void SetLastCrashSeen(uint64_t t) {
+    HKEY k = OpenKey(true);
+    if (!k) return;
+    SetDword(k, L"CrashSeenLo", (DWORD)(t & 0xFFFFFFFF));
+    SetDword(k, L"CrashSeenHi", (DWORD)(t >> 32));
+    RegCloseKey(k);
+}
+
 // ------------------------------------------------------------------------------------------------ locations
 const wchar_t* RegKeyPath() {
     if (!g_regKey[0]) {

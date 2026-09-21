@@ -1,0 +1,12 @@
+[package]
+name = "fastmd-mermaid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "fastmd_mermaid"
+crate-type = ["cdylib"]
+
+[dependencies]
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false }

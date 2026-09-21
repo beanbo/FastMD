@@ -5,6 +5,7 @@
 //   after the first frame of a document: exact heights on worker threads, WIC image decoding, file watcher.
 #include "app.h"
 #include "net.h"
+#include "math.h"
 #include "svg.h"
 #include <shlobj.h>
 #include <wincodec.h>
@@ -283,8 +284,43 @@ static DWORD WINAPI ImageThread(void* p) {
     CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
     auto& imgs = g.doc.images;
     bool fetched = false;
+    const float mathFont = (float)g.cfg.fontSize;
+    const uint32_t mathColor = g_pal[P_TEXT];
+    const bool dark = PaletteIsDark();
     for (size_t i = 0; i < imgs.size() && !g.closing && g.docGen == myGen; i++) {
         Image& im = imgs[i];
+        // A formula or a diagram (plan 4.1, 4.2): its source becomes SVG, and from there it is a vector picture like
+        // any other. The same formula twice in a document is drawn once.
+        if (im.mathKind) {
+            size_t c = i;
+            for (size_t k = 0; k < i; k++)
+                if (imgs[k].mathKind == im.mathKind && imgs[k].math == im.math) { c = k; break; }
+            im.canon = (int)c;
+            if (c != i) continue;
+            std::vector<uint8_t> svg;
+            float mw = 0, mh = 0, asc = 0;
+            bool ok = im.mathKind == 3
+                          ? MermaidSvg(im.math, dark, svg)
+                          : TexSvg(im.math, im.mathKind == 2, mathFont, mathColor, svg, &mw, &mh, &asc);
+            if (ok && (mw <= 0 || mh <= 0)) ok = SvgMeasure(svg.data(), svg.size(), &mw, &mh);
+            if (ok && mw >= 1.f && mh >= 1.f) {
+                int w = std::clamp((int)std::lround(mw), 1, 4096), h = std::clamp((int)std::lround(mh), 1, 4096);
+                std::vector<uint32_t> px;
+                if (SvgRender(svg.data(), svg.size(), w, h, px)) {
+                    im.px.swap(px);
+                    im.pxW = w;
+                    im.pxH = h;
+                    im.w = w;
+                    im.h = h;
+                    im.ascent = asc > 0 ? asc : (float)h;
+                    im.svg.swap(svg);
+                    im.state = 2;
+                    continue;
+                }
+            }
+            im.state = 3;
+            continue;
+        }
         if (im.path.empty() && !im.url.empty() && RemoteImagesAllowed()) {
             // from the network, strictly after the first frame: the cache file is the picture's path from then on
             std::wstring cache = CacheFileFor(im.url);

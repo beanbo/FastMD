@@ -21,3 +21,6 @@ bench/protos/**
 !bench/protos/*/proto.json
 !bench/protos/baseline-win32/**
 bench/protos/baseline-win32/out/
+
+# Rust build output (formulas, diagrams)
+app/rust/target/

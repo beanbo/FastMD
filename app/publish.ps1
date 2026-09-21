@@ -24,17 +24,19 @@ try {
     Copy-Item $src $dst
     Write-Host "running copy renamed to $(Split-Path $old -Leaf); open windows keep working, new ones start the new build"
 }
-# fastmd-svg.dll (SVG rendering) sits next to the exe; it is loaded only when a document holds an SVG
-$dll = Join-Path $PSScriptRoot 'build\Release\fastmd-svg.dll'
-if (Test-Path $dll) {
-    $dllDst = Join-Path $dstDir 'fastmd-svg.dll'
+# The libraries beside the exe are loaded only when a document needs them: SVG pictures, formulas, diagrams.
+foreach ($name in 'fastmd-svg.dll', 'fastmd-tex.dll', 'fastmd-mermaid.dll') {
+    $dll = Join-Path $PSScriptRoot "build\Release\$name"
+    if (-not (Test-Path $dll)) { continue }
+    $dllDst = Join-Path $dstDir $name
     try {
         Copy-Item $dll $dllDst -Force -ErrorAction Stop
     } catch {
-        $oldDll = Join-Path $dstDir ("fastmd-svg.old-{0}.dll" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $oldDll = Join-Path $dstDir ($name -replace '\.dll$', ".old-$stamp.dll")
         Move-Item $dllDst $oldDll
         Copy-Item $dll $dllDst
     }
 }
-Get-ChildItem $dstDir -Filter 'fastmd-svg.old-*.dll' | ForEach-Object { Remove-Item $_.FullName -ErrorAction SilentlyContinue }
+Get-ChildItem $dstDir -Filter 'fastmd-*.old-*.dll' | ForEach-Object { Remove-Item $_.FullName -ErrorAction SilentlyContinue }
 Write-Host "published $dst ($((Get-Item $dst).Length) bytes)"

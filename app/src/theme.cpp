@@ -80,15 +80,58 @@ const uint32_t kDark[] = {
 };
 static_assert(std::size(kLight) == P_COUNT && std::size(kDark) == P_COUNT, "one colour per Pal");
 bool g_dark = false;
+uint32_t kHigh[P_COUNT];  // built from the system colours when Windows is in high contrast
+
+uint32_t Sys(int idx) {
+    DWORD c = GetSysColor(idx);
+    return ((c & 0xff) << 16) | (c & 0xff00) | ((c >> 16) & 0xff);  // COLORREF is BGR, our palette is RGB
+}
+
+// High contrast (plan 6.2): the reader's own colours are replaced by the ones Windows was told to use, and syntax
+// colouring goes away - in this mode the point is contrast, not prettiness.
+void BuildHighContrast() {
+    uint32_t bg = Sys(COLOR_WINDOW), text = Sys(COLOR_WINDOWTEXT), muted = Sys(COLOR_GRAYTEXT);
+    uint32_t link = Sys(COLOR_HOTLIGHT), sel = Sys(COLOR_HIGHLIGHT), selText = Sys(COLOR_HIGHLIGHTTEXT);
+    uint32_t panel = Sys(COLOR_BTNFACE), panelText = Sys(COLOR_BTNTEXT), border = Sys(COLOR_WINDOWFRAME);
+    for (int i = 0; i < P_COUNT; i++) kHigh[i] = text;  // everything that draws text, including syntax colours
+    kHigh[P_BG] = kHigh[P_CODEBG] = kHigh[P_INLINEBG] = kHigh[P_ZEBRA] = bg;
+    kHigh[P_MUTED] = kHigh[P_COMMENT] = muted;
+    kHigh[P_LINK] = link;
+    kHigh[P_BORDER] = kHigh[P_OVERLAY_BORDER] = border;
+    kHigh[P_ACCENT] = sel;
+    kHigh[P_ONACCENT] = selText;
+    kHigh[P_SCROLL] = muted;
+    kHigh[P_SCROLL_HOT] = text;
+    kHigh[P_PLACEHOLDER] = panel;
+    kHigh[P_SELECTION] = sel;
+    kHigh[P_FIND] = panel;
+    kHigh[P_FIND_CUR] = sel;
+    kHigh[P_MARK] = link;
+    kHigh[P_OVERLAY_BG] = kHigh[P_PANEL] = panel;
+    kHigh[P_OVERLAY_TEXT] = panelText;
+    kHigh[P_HOVER] = kHigh[P_CURRENT] = panel;
+}
 }  // namespace
 
 const uint32_t* g_pal = kLight;
 
+bool SystemHighContrast() {
+    HIGHCONTRASTW hc{sizeof(hc)};
+    return SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0) && (hc.dwFlags & HCF_HIGHCONTRASTON);
+}
+
 void SetDarkPalette(bool dark) {
     g_dark = dark;
+    if (SystemHighContrast()) {
+        BuildHighContrast();
+        g_pal = kHigh;
+        g_dark = (kHigh[P_BG] & 0xff) + ((kHigh[P_BG] >> 8) & 0xff) + ((kHigh[P_BG] >> 16) & 0xff) < 3 * 128;
+        return;
+    }
     g_pal = dark ? kDark : kLight;
 }
 
+bool PaletteIsHighContrast() { return g_pal == kHigh; }
 bool PaletteIsDark() { return g_dark; }
 
 bool SystemPrefersDark() {

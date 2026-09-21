@@ -1,0 +1,18 @@
+# Two small libraries in Rust: TeX formulas (RaTeX) and Mermaid diagrams. Both turn their source into SVG, which the
+# viewer already knows how to draw (lunasvg, see src/svg.cpp) - so nothing new touches the drawing code.
+# They are DLLs, loaded only when a document actually contains a formula or a diagram, and never on the start-up path.
+[workspace]
+members = ["fastmd-tex", "fastmd-mermaid"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "unwind"   # a panic in the parser must stay inside the library (catch_unwind), not kill the viewer

@@ -61,6 +61,8 @@ const Pair kStr[] = {
     {L"PDF сохранён", L"PDF saved"},
     {L"Не найден принтер «Microsoft Print to PDF»", L"The Microsoft Print to PDF printer was not found"},
     {L"%d из %d", L"%d of %d"},
+    {L"Прошлый запуск FastMD завершился ошибкой. Отчёт сохранён:\n\n%s\n\nОткрыть папку с отчётом?",
+     L"The last run of FastMD ended with an error. The report was saved:\n\n%s\n\nOpen the folder?"},
     // find bar
     {L"Найти в документе", L"Find in document"},
     {L"нет совпадений", L"no results"},

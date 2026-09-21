@@ -24,3 +24,5 @@ extern const uint32_t* g_pal;  // current palette, 0xRRGGBB per Pal
 void SetDarkPalette(bool dark);
 bool PaletteIsDark();
 bool SystemPrefersDark();      // HKCU ...\Themes\Personalize\AppsUseLightTheme == 0
+bool SystemHighContrast();     // Windows is in a high-contrast theme
+bool PaletteIsHighContrast();  // the palette in force is built from the system colours

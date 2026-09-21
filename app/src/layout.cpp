@@ -249,10 +249,13 @@ float BlockHeightEstimate(const Doc& d, const Typography& t, const Block& b, flo
 namespace {
 struct InlineImage final : IDWriteInlineObject {
     const Doc* doc;
+    IDWriteFactory3* factory;  // for a formula that could not be typeset: its source, set in the UI font
+    IDWriteTextFormat* fmt;
     uint32_t index;
-    float w, h;
+    float w, h, baseline;  // a formula sits on the text baseline; a picture stands on it
     ULONG refs = 1;
-    InlineImage(const Doc* d, uint32_t i, float ww, float hh) : doc(d), index(i), w(ww), h(hh) {}
+    InlineImage(const Doc* d, IDWriteFactory3* fac, IDWriteTextFormat* f, uint32_t i, float ww, float hh, float bl)
+        : doc(d), factory(fac), fmt(f), index(i), w(ww), h(hh), baseline(bl) {}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
         if (riid == __uuidof(IUnknown) || riid == __uuidof(IDWriteInlineObject)) {
             *ppv = static_cast<IDWriteInlineObject*>(this);
@@ -274,14 +277,25 @@ struct InlineImage final : IDWriteInlineObject {
         if (!c || index >= doc->images.size()) return S_OK;
         Image& im0 = const_cast<Doc*>(doc)->images[index];
         Image& im = im0.canon >= 0 ? const_cast<Doc*>(doc)->images[im0.canon] : im0;
-        if (im.state.load() == 2) c->DrawImage(im, x, y, x + w, y + h);
-        else c->FillRoundRect(x, y, x + w, y + h, 4.f, P_PLACEHOLDER);
+        if (im.state.load() == 2) {
+            c->DrawImage(im, x, y, x + w, y + h);
+        } else if (im.state.load() == 3 && im.mathKind && !im.alt.empty() && factory && fmt) {
+            // a formula the engine could not typeset: its source, as the author wrote it
+            IDWriteTextLayout* L = nullptr;
+            if (SUCCEEDED(factory->CreateTextLayout(im.alt.c_str(), (UINT32)im.alt.size(), fmt,
+                                                    std::max(w, 8.f) * 4.f, std::max(h, 8.f), &L))) {
+                c->Text(L, x, y, P_MUTED);
+                L->Release();
+            }
+        } else {
+            c->FillRoundRect(x, y, x + w, y + h, 4.f, P_PLACEHOLDER);
+        }
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetMetrics(DWRITE_INLINE_OBJECT_METRICS* m) override {
         m->width = w;
         m->height = h;
-        m->baseline = h;
+        m->baseline = baseline;
         m->supportsSideways = FALSE;
         return S_OK;
     }
@@ -322,7 +336,10 @@ static float ApplyRuns(const Doc& d, const Typography& t, IDWriteTextLayout* L, 
             bool unknown = im.attrW <= 0 && im.w <= 0;
             float boxW = unknown ? 96.f : ImageDisplayWidth(im, maxW);
             float boxH = unknown ? 20.f : ImageDisplayHeight(im, maxW);
-            auto* obj = new InlineImage(&d, r.image, boxW, boxH);
+            // a formula in the line stands on the text baseline, with its own descenders below it
+            float bl = boxH;
+            if (im.mathKind == 1 && im.ascent > 0 && im.h > 0) bl = boxH * im.ascent / (float)im.h;
+            auto* obj = new InlineImage(&d, t.factory, t.ui, r.image, boxW, boxH, bl);
             L->SetInlineObject(obj, rg);
             obj->Release();
             tallest = std::max(tallest, boxH);

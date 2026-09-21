@@ -44,7 +44,7 @@ Q = {"SCROLLY": 1, "DOCH": 2, "TOC_OPEN": 3, "TOC_DOCKED": 4, "TOC_COUNT": 5, "T
      "HSCROLL_BLOCK": 8, "HSCROLL_X": 9, "FOCUS_LINK": 10, "MATCHES": 11, "CUR_MATCH": 12, "TEXT_LEFT": 13,
      "TEXT_W": 14, "RECENT_COUNT": 15, "FIND_EDIT": 16, "SETTINGS_HWND": 17, "FIND_OPEN": 18, "COLUMN": 19,
      "FONT_SIZE": 20, "WRAP": 21, "LANG": 22, "FIND_PART_X": 23, "BLOCK_Y": 24, "RESTORED": 25, "THEME_DARK": 26,
-     "TARGETY": 27, "SETTINGS_HIT": 28, "SITKA": 29, "SETTINGS_BTN": 30, "IMG_SCALED": 31, "FULL_REDRAW": 32, "SEL_ANCHOR": 33, "SEL_FOCUS": 34, "CARET": 35, "DRAG": 36}
+     "TARGETY": 27, "SETTINGS_HIT": 28, "SITKA": 29, "SETTINGS_BTN": 30, "IMG_SCALED": 31, "FULL_REDRAW": 32, "SEL_ANCHOR": 33, "SEL_FOCUS": 34, "CARET": 35, "DRAG": 36, "MATH": 37}
 FP_NEXT, FP_CASE = 7, 3  # FindPart
 
 u32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
@@ -1001,6 +1001,57 @@ def test_pdf():
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ 4.1, 4.2 math
+MATH_DOC = r"""# Формулы
+
+В строке: $E = mc^2$ — и дальше текст.
+
+$$\sum_{i=1}^{n} \frac{x_i}{\sqrt{2\pi}}$$
+
+```mermaid
+graph TD;
+  A[Начало] --> B{Готово?};
+  B -->|да| C[Конец];
+```
+
+Сломанная: $\oops{\bad$ — остаётся исходником.
+
+Конец документа.
+"""
+
+
+def test_math():
+    """formulas and Mermaid diagrams are typeset into the page; what cannot be typeset stays as its source"""
+    ok = True
+    doc = OUT / "math.md"
+    doc.write_text(MATH_DOC, encoding="utf-8")
+    proc, hwnd = launch(doc, size="--size=900x900")
+    try:
+        for _ in range(40):  # they are drawn on a worker thread after the first frame
+            if q(hwnd, "MATH", 1) >= 3:
+                break
+            time.sleep(0.25)
+        ok &= check("4.1 the document has four formulas and diagrams", q(hwnd, "MATH", 0) == 4, f'{q(hwnd, "MATH", 0)}')
+        ok &= check("4.1 three of them are drawn", q(hwnd, "MATH", 1) == 3, f'{q(hwnd, "MATH", 1)}')
+        ok &= check("4.1 the broken one is not, and says so", q(hwnd, "MATH", 2) == 1, f'{q(hwnd, "MATH", 2)}')
+        q(hwnd, "FULL_REDRAW")
+        time.sleep(0.4)
+        img = shot(hwnd, "26-math")
+        left = q(hwnd, "TEXT_LEFT")
+        # the display formula stands on its own line under "В строке:", the diagram below it
+        y1, y2 = q(hwnd, "BLOCK_Y", 2), q(hwnd, "BLOCK_Y", 3)
+        ok &= check("4.1 the formula of its own is drawn", ink(img, (left, y1, left + 300, y2 - 8)) > 200,
+                    f"{ink(img, (left, y1, left + 300, y2 - 8))}")
+        ok &= check("4.2 the diagram is drawn", ink(img, (left, y2, left + 400, y2 + 300)) > 2000,
+                    f"{ink(img, (left, y2, left + 400, y2 + 300))}")
+        ok &= check("4.1 a formula in the line does not break the line",
+                    q(hwnd, "BLOCK_Y", 2) - q(hwnd, "BLOCK_Y", 1) < 80,
+                    f'{q(hwnd, "BLOCK_Y", 2) - q(hwnd, "BLOCK_Y", 1)}')
+    finally:
+        close_and_wait(proc, hwnd)
+    return ok
+
+
 # ------------------------------------------------------------------------------------------------ 3.5 drag out
 DF_TEXT, DF_HTML, DF_RTF, DF_URL, DF_DIB, DF_FILE = 1, 2, 4, 8, 16, 32
 
@@ -1219,7 +1270,7 @@ def main():
     ok = True
     for t in (lambda: test_basics(doc), lambda: test_hscroll(doc), test_outline, lambda: test_positions(doc), test_find,
               test_start_screen, lambda: test_links(doc), test_footnotes, test_html, test_remote_images, test_svg,
-              test_languages, lambda: test_clipboard(doc), test_key_selection, test_pdf, lambda: test_drag(doc), test_scroll_frames,
+              test_languages, lambda: test_clipboard(doc), test_key_selection, test_pdf, lambda: test_drag(doc), test_math, test_scroll_frames,
               lambda: test_image_scaling(doc),
               lambda: test_columns(doc),
               lambda: test_settings(doc),

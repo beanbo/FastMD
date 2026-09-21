@@ -27,11 +27,11 @@ endif()
 configure_file(src/version.h.in ${CMAKE_BINARY_DIR}/generated/version.h @ONLY)
 
 add_executable(FastMD WIN32
-    src/view.cpp src/window.cpp src/loader.cpp src/parse.cpp src/html.cpp src/net.cpp src/svg.cpp
+    src/view.cpp src/window.cpp src/loader.cpp src/parse.cpp src/html.cpp src/net.cpp src/svg.cpp src/math.cpp
     src/layout.cpp src/canvas_gdi.cpp src/canvas_print.cpp src/print.cpp
     src/highlight.cpp src/theme.cpp src/util.cpp
     src/find.cpp src/toc.cpp src/home.cpp src/store.cpp src/shell.cpp src/settings_ui.cpp src/strings.cpp
-    src/copy.cpp src/drag.cpp
+    src/copy.cpp src/drag.cpp src/crash.cpp
     third_party/md4c/md4c.c
     res/fastmd.rc)
 
@@ -70,3 +70,71 @@ target_compile_definitions(fastmd_svg PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_ME
 target_compile_options(fastmd_svg PRIVATE /utf-8 /W0 /EHsc $<$<CONFIG:Release>:/O2 /Oi /Gy /DNDEBUG> ${FASTMD_SEC_C})
 target_link_options(fastmd_svg PRIVATE /INCREMENTAL:NO $<$<CONFIG:Release>:/OPT:REF /OPT:ICF> ${FASTMD_SEC_L})
 target_link_libraries(fastmd_svg PRIVATE user32 gdi32)
+
+# ------------------------------------------------------------------------------- fastmd-tex.dll, fastmd-mermaid.dll
+# Formulas (RaTeX) and Mermaid diagrams are written in Rust and live in their own DLLs: they are mapped only when a
+# document actually holds a formula or a diagram, so neither the exe nor the start-up path pays for them.
+# Set FASTMD_RUST=OFF to build without them - the viewer then shows formulas and diagrams as their own source.
+option(FASTMD_RUST "Build the Rust libraries for formulas and Mermaid diagrams" ON)
+if(FASTMD_RUST)
+    find_program(CARGO_EXE cargo)
+    if(CARGO_EXE)
+        set(RUST_OUT ${CMAKE_BINARY_DIR}/rust/release)
+        add_custom_command(
+            OUTPUT ${RUST_OUT}/fastmd_tex.dll ${RUST_OUT}/fastmd_mermaid.dll
+            COMMAND ${CARGO_EXE} build --release --manifest-path ${CMAKE_SOURCE_DIR}/rust/Cargo.toml
+                    --target-dir ${CMAKE_BINARY_DIR}/rust
+            DEPENDS ${CMAKE_SOURCE_DIR}/rust/fastmd-tex/src/lib.rs ${CMAKE_SOURCE_DIR}/rust/fastmd-mermaid/src/lib.rs
+                    ${CMAKE_SOURCE_DIR}/rust/Cargo.toml
+            COMMENT "cargo build --release (formulas, diagrams)"
+            VERBATIM)
+        add_custom_target(fastmd_rust ALL
+            DEPENDS ${RUST_OUT}/fastmd_tex.dll ${RUST_OUT}/fastmd_mermaid.dll
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RUST_OUT}/fastmd_tex.dll
+                    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/fastmd-tex.dll
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RUST_OUT}/fastmd_mermaid.dll
+                    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/fastmd-mermaid.dll
+            VERBATIM)
+        add_dependencies(FastMD fastmd_rust)
+    else()
+        message(WARNING "cargo not found: building without formulas and Mermaid diagrams")
+    endif()
+endif()
+
+# ------------------------------------------------------------------------------------------ FastMD-Setup.exe
+# The per-user installer (plan 5.4) carries the program inside itself as resources: no MSI, no MSIX, no admin.
+# It is built last, because what it carries is what the other targets have just produced.
+option(FASTMD_SETUP "Build the per-user installer" ON)
+if(FASTMD_SETUP)
+    set(PAYLOAD_EXE ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/FastMD.exe)
+    set(PAYLOAD_SVG ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/fastmd-svg.dll)
+    set(PAYLOAD_TEX ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/fastmd-tex.dll)
+    set(PAYLOAD_MERMAID ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/fastmd-mermaid.dll)
+    set(PAYLOAD_LICENSE ${CMAKE_SOURCE_DIR}/../LICENSE)
+    set(PAYLOAD_MD4C ${CMAKE_SOURCE_DIR}/third_party/md4c/LICENSE.md)
+    set(PAYLOAD_LUNASVG ${CMAKE_SOURCE_DIR}/third_party/lunasvg/LICENSE)
+    set(PAYLOAD_PLUTOVG ${CMAKE_SOURCE_DIR}/third_party/plutovg/LICENSE)
+    set(PAYLOAD_RATEX ${CMAKE_SOURCE_DIR}/third_party/ratex/LICENSE-ratex.txt)
+    set(PAYLOAD_KATEX ${CMAKE_SOURCE_DIR}/third_party/ratex/OFL-katex-fonts.txt)
+    set(PAYLOAD_MERMAID_LICENSE ${CMAKE_SOURCE_DIR}/third_party/ratex/LICENSE-mermaid-rs-renderer.txt)
+    set(FASTMD_ICON ${CMAKE_SOURCE_DIR}/res/fastmd.ico)
+    set(SETUP_RC ${CMAKE_BINARY_DIR}/generated/setup_payload.rc)
+    configure_file(setup/setup_payload.rc.in ${SETUP_RC} @ONLY)
+    # the resource script embeds files the other targets write, so it must be recompiled when they change
+    set_source_files_properties(${SETUP_RC} PROPERTIES OBJECT_DEPENDS
+        "${PAYLOAD_EXE};${PAYLOAD_SVG};${PAYLOAD_TEX};${PAYLOAD_MERMAID}")
+    add_executable(FastMD_Setup WIN32 setup/setup.cpp ${SETUP_RC})
+    set_target_properties(FastMD_Setup PROPERTIES OUTPUT_NAME "FastMD-Setup")
+    target_include_directories(FastMD_Setup PRIVATE ${CMAKE_BINARY_DIR}/generated ${CMAKE_SOURCE_DIR}/setup)
+    target_compile_definitions(FastMD_Setup PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(FastMD_Setup PRIVATE /utf-8 /W3 /permissive- /EHsc
+        $<$<CONFIG:Release>:/O2 /Oi /Gy /DNDEBUG> ${FASTMD_SEC_C})
+    target_link_options(FastMD_Setup PRIVATE /MANIFEST:EMBED /MANIFESTINPUT:${FASTMD_MANIFEST} /INCREMENTAL:NO
+        $<$<CONFIG:Release>:/OPT:REF /OPT:ICF> ${FASTMD_SEC_L})
+    target_link_libraries(FastMD_Setup PRIVATE user32 shell32 shlwapi ole32 advapi32 comctl32)
+    add_dependencies(FastMD_Setup FastMD fastmd_svg)
+    if(TARGET fastmd_rust)
+        add_dependencies(FastMD_Setup fastmd_rust)
+    endif()
+endif()

@@ -52,6 +52,7 @@ enum Query : UINT {
     Q_SEL_ANCHOR, Q_SEL_FOCUS /* the two ends of the selection, in text offsets */,
     Q_CARET /* MAKELONG(x, y) of the caret in client pixels, or -1 when no caret is drawn */,
     Q_DRAG /* formats a drag would carry: lp = kind * 65536 + arg → DragFormat bits */,
+    Q_MATH /* formulas and diagrams: lp = 0 all, 1 drawn, 2 failed */,
 };
 
 // what can be dragged out of the window, and the formats it is offered in (drag.cpp)
@@ -389,6 +390,12 @@ void ShowInFolder();
 void OpenDialog();
 std::wstring PickExeDialog(HWND owner);
 std::wstring SavePdfDialog();        // where to write the exported PDF ("" = cancelled)
+
+// ------------------------------------------------------------------------------------------------ crash.cpp
+void CrashHandlerInstall();          // wWinMain: minidumps into %LOCALAPPDATA%\FastMD\crashes
+void CrashReportIfAny();             // after the first frame: offer the folder if the last run left a dump
+uint64_t LastCrashSeen();            // store.cpp
+void SetLastCrashSeen(uint64_t t);
 
 // ------------------------------------------------------------------------------------------------ drag.cpp
 void StartDrag(int kind, int arg);   // runs the shell's drag loop with the selection / link / picture

@@ -60,6 +60,11 @@ struct Image {
     std::vector<uint32_t> px;   // decoded premultiplied BGRA (canonical entry only), filled by the image thread
     std::vector<uint8_t> svg;   // the SVG source, kept so the picture can be redrawn crisply at any size
     std::wstring alt;           // alt text, shown in the placeholder of a picture that stands on its own line
+    // A formula or a diagram is a picture whose source is text: fastmd-tex.dll / fastmd-mermaid.dll turn it into SVG
+    // on a worker thread after the first frame, and from there it is an ordinary vector picture (plan 4.1, 4.2).
+    std::string math;           // the TeX or Mermaid source, UTF-8 (empty = an ordinary picture)
+    uint8_t mathKind = 0;       // 0 = picture, 1 = formula in the line, 2 = formula of its own, 3 = Mermaid diagram
+    float ascent = 0;           // formula in the line: how much of its height stands above the text baseline
     int pxW = 0, pxH = 0;       // size of px as decoded (a GIF frame can be smaller than its header's screen)
     std::atomic<int> state{0};  // 0 = not requested, 1 = loading, 2 = ready, 3 = failed
     // the same picture at its display size: drawn as a row copy, and scaled with a real filter instead of the
@@ -68,9 +73,12 @@ struct Image {
     std::atomic<int> scW{0}, scH{0};      // size of sc (0 = none yet)
     std::atomic<int> wantW{0}, wantH{0};  // display size the canvas last drew at (0 = the decoded size fits)
     Image() = default;
-    Image(const Image& o) : path(o.path), url(o.url), w(o.w), h(o.h), attrW(o.attrW), attrH(o.attrH) {}
+    Image(const Image& o)
+        : path(o.path), url(o.url), alt(o.alt), math(o.math), mathKind(o.mathKind), w(o.w), h(o.h), attrW(o.attrW),
+          attrH(o.attrH) {}
     Image& operator=(const Image& o) {
-        path = o.path; url = o.url; w = o.w; h = o.h; attrW = o.attrW; attrH = o.attrH; canon = -1;
+        path = o.path; url = o.url; alt = o.alt; math = o.math; mathKind = o.mathKind; ascent = 0;
+        w = o.w; h = o.h; attrW = o.attrW; attrH = o.attrH; canon = -1;
         px.clear(); pxW = pxH = 0; state = 0;
         sc.clear(); scW = 0; scH = 0; wantW = 0; wantH = 0;
         return *this;

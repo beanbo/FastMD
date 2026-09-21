@@ -45,7 +45,7 @@ void RtfText(std::string& out, const wchar_t* s, size_t n) {
 }
 
 // one inline run of a block, already cut down to the selection
-struct Piece { uint32_t start, len; uint16_t flags; uint32_t link; };
+struct Piece { uint32_t start, len; uint16_t flags; uint32_t link, image; };
 
 void PiecesOf(uint32_t textOff, uint32_t runOff, uint32_t runCount, uint32_t from, uint32_t to,
               std::vector<Piece>& out) {
@@ -54,11 +54,11 @@ void PiecesOf(uint32_t textOff, uint32_t runOff, uint32_t runCount, uint32_t fro
         const Run& r = g.doc.runs[runOff + k];
         uint32_t rs = std::max(r.start, from), re = std::min(r.start + r.len, to);
         if (re <= rs) continue;
-        if (rs > at) out.push_back(Piece{at, rs - at, 0, 0});
-        out.push_back(Piece{rs, re - rs, r.flags, r.link});
+        if (rs > at) out.push_back(Piece{at, rs - at, 0, 0, 0});
+        out.push_back(Piece{rs, re - rs, r.flags, r.link, r.image});
         at = re;
     }
-    if (at < to) out.push_back(Piece{at, to - at, 0, 0});
+    if (at < to) out.push_back(Piece{at, to - at, 0, 0, 0});
     (void)textOff;
 }
 
@@ -81,8 +81,18 @@ void EmitPieces(const std::vector<Piece>& pieces, std::string& html, std::string
         if (p.flags & F_SUP) html += "<sup>";
         if (p.flags & F_SUB) html += "<sub>";
         if (p.flags & (F_CODE | F_KBD)) { html += (p.flags & F_KBD) ? "<kbd>" : "<code>"; rtf += "\\f1 "; }
-        HtmlEscape(html, s, p.len);
-        RtfText(rtf, s, p.len);
+        // a formula is a picture on the page, but what belongs in another document is the source it was written from
+        const Image* math = nullptr;
+        if ((p.flags & F_IMAGE) && p.image < g.doc.images.size() && g.doc.images[p.image].mathKind &&
+            !g.doc.images[p.image].alt.empty())
+            math = &g.doc.images[p.image];
+        if (math) {
+            HtmlEscape(html, math->alt.data(), math->alt.size());
+            RtfText(rtf, math->alt.data(), math->alt.size());
+        } else {
+            HtmlEscape(html, s, p.len);
+            RtfText(rtf, s, p.len);
+        }
         if (p.flags & (F_CODE | F_KBD)) { html += (p.flags & F_KBD) ? "</kbd>" : "</code>"; rtf += "\\f0 "; }
         if (p.flags & F_SUB) html += "</sub>";
         if (p.flags & F_SUP) html += "</sup>";

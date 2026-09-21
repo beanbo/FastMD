@@ -10,6 +10,7 @@
 #include "../third_party/md4c/md4c.h"
 #include "emoji_table.h"
 #include "html.h"
+#include "math.h"
 #include <cwchar>
 #include <unordered_map>
 
@@ -136,6 +137,11 @@ struct Builder {
     std::wstring pictureSrc;
     // image-only paragraph detection
     int paraImages = 0;
+    // formulas and diagrams (plan 4.1, 4.2): their source is gathered here and becomes a picture the renderer fills in
+    int mathDepth = 0;
+    bool mathDisplay = false;
+    std::wstring mathSrc;
+    int texOk = -1, mermaidOk = -1;  // is the library beside the exe? asked once per document
     bool paraOther = false;
     int paraImage = -1;
     std::wstring imgAlt;  // alt text of the picture being read (kept out of the document text)
@@ -282,6 +288,16 @@ struct Builder {
         b.runCount = (uint32_t)d.runs.size() - rStart;
         if (leafKind == BK_CODE) {
             uint8_t lang = 0;
+            // a Mermaid fence is a diagram, not code: the source stays as the placeholder until it is drawn
+            if (MermaidOk() && codeLang && codeLangLen == 7 && _wcsnicmp(codeLang, L"mermaid", 7) == 0) {
+                int idx = AddMathImage(std::wstring(d.text.data() + tStart, tEnd - tStart), 3);
+                d.runs.resize(rStart);
+                b.kind = BK_IMAGE;
+                b.aux = (uint32_t)idx;
+                b.runOff = rStart;
+                b.runCount = 0;
+                return;
+            }
             Highlight(d, codeLang, codeLangLen, tStart, tEnd - tStart, lang);
             b.runCount = (uint32_t)d.runs.size() - rStart;
             b.lang = lang;
@@ -353,6 +369,60 @@ struct Builder {
     }
 
     // --------------------------------------------------------------------------------------- HTML (plan 2.2)
+    bool TexOk() {
+        if (texOk < 0) texOk = TexAvailable() ? 1 : 0;
+        return texOk == 1;
+    }
+    bool MermaidOk() {
+        if (mermaidOk < 0) mermaidOk = MermaidAvailable() ? 1 : 0;
+        return mermaidOk == 1;
+    }
+
+    // A formula or a diagram: a picture whose source is text. The size here is only a guess to leave room in the
+    // first frame - the real one arrives with the drawing (loader.cpp) and the document re-flows, as it does for a
+    // picture from the network. kind: 1 = formula in the line, 2 = formula of its own, 3 = Mermaid diagram.
+    int AddMathImage(const std::wstring& src, uint8_t kind) {
+        Image image;
+        int n = WideCharToMultiByte(CP_UTF8, 0, src.data(), (int)src.size(), nullptr, 0, nullptr, nullptr);
+        if (n > 0) {
+            image.math.resize(n);
+            WideCharToMultiByte(CP_UTF8, 0, src.data(), (int)src.size(), image.math.data(), n, nullptr, nullptr);
+        }
+        image.mathKind = kind;
+        image.alt = src;
+        const float fs = 16.f;  // the default text size: the parser knows nothing about settings, and this is a guess
+        if (kind == 3) {
+            size_t lines = 1 + (size_t)std::count(src.begin(), src.end(), (wchar_t)10);
+            image.w = 440;
+            image.h = (int)std::max(180.f, std::min(720.f, lines * fs * 1.5f + 32.f));
+        } else {
+            float chars = (float)std::min<size_t>(src.size(), 160);
+            image.w = (int)std::clamp(chars * fs * 0.42f, fs, 900.f);
+            image.h = (int)(kind == 2 ? fs * 2.4f : fs * 1.3f);
+        }
+        d.themed = true;  // the colour of a formula follows the theme, so a switch re-reads the document
+        d.images.push_back(std::move(image));
+        return (int)d.images.size() - 1;
+    }
+
+    // the gathered formula source becomes a picture in the line (or a block of its own, if it stands alone)
+    void EmitMath() {
+        if (mathSrc.empty()) return;
+        int idx = AddMathImage(mathSrc, mathDisplay ? 2 : 1);
+        mathSrc.clear();
+        if (!collecting && !inCell) return;
+        uint32_t start = (uint32_t)d.text.size();
+        d.text.push_back(L'\xFFFC');
+        uint16_t fl = (uint16_t)(F_IMAGE | (link ? F_LINK : 0));
+        d.runs.push_back(Run{start, 1, fl, P_DEFAULT, 0, link ? curLink : 0, (uint32_t)idx});
+        if (mathDisplay) {  // a formula on its own line: the paragraph around it becomes a picture block
+            paraImage = idx;
+            paraImages++;
+        } else {
+            paraOther = true;
+        }
+    }
+
     int AddImage(const std::wstring& src, int w, int h) {
         Image image;
         bool remote = src.find(L"://") != std::wstring::npos || src.rfind(L"data:", 0) == 0;
@@ -868,8 +938,16 @@ struct Builder {
         case MD_SPAN_STRONG: bold++; break;
         case MD_SPAN_CODE: code++; break;
         case MD_SPAN_DEL: strike++; break;
-        // formulas are shown as code until they are typeset for real (plan 4.1)
-        case MD_SPAN_LATEXMATH: case MD_SPAN_LATEXMATH_DISPLAY: code++; break;
+        // a formula is typeset by fastmd-tex.dll; without the library it stays as its own source, in code type
+        case MD_SPAN_LATEXMATH: case MD_SPAN_LATEXMATH_DISPLAY:
+            if (TexOk()) {
+                mathDepth++;
+                mathDisplay = t == MD_SPAN_LATEXMATH_DISPLAY;
+                mathSrc.clear();
+            } else {
+                code++;
+            }
+            break;
         case MD_SPAN_A: {
             auto* a = (MD_SPAN_A_DETAIL*)det;
             d.links.emplace_back(a->href.text, a->href.size);
@@ -916,7 +994,13 @@ struct Builder {
         case MD_SPAN_STRONG: bold--; break;
         case MD_SPAN_CODE: code--; break;
         case MD_SPAN_DEL: strike--; break;
-        case MD_SPAN_LATEXMATH: case MD_SPAN_LATEXMATH_DISPLAY: code--; break;
+        case MD_SPAN_LATEXMATH: case MD_SPAN_LATEXMATH_DISPLAY:
+            if (texOk == 1) {
+                if (mathDepth > 0 && --mathDepth == 0) EmitMath();
+            } else {
+                code--;
+            }
+            break;
         case MD_SPAN_A: link--; break;
         case MD_SPAN_IMG:
             img--;
@@ -929,6 +1013,10 @@ struct Builder {
     }
 
     int OnText(MD_TEXTTYPE t, const MD_CHAR* s, MD_SIZE n) {
+        if (mathDepth > 0) {  // inside a formula: every character belongs to its source, not to the document text
+            mathSrc.append(s, n);
+            return 0;
+        }
         switch (t) {
         case MD_TEXT_NORMAL: case MD_TEXT_CODE: case MD_TEXT_LATEXMATH: AppendText(s, n, false); break;
         case MD_TEXT_NULLCHAR: AppendText(L"\xFFFD", 1, false); break;
