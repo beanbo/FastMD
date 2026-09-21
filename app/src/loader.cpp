@@ -305,7 +305,9 @@ static DWORD WINAPI ImageThread(void* p) {
                           : TexSvg(im.math, im.mathKind == 2, mathFont, mathColor, svg, &mw, &mh, &asc);
             if (ok && (mw <= 0 || mh <= 0)) ok = SvgMeasure(svg.data(), svg.size(), &mw, &mh);
             if (ok && mw >= 1.f && mh >= 1.f) {
-                int w = std::clamp((int)std::lround(mw), 1, 4096), h = std::clamp((int)std::lround(mh), 1, 4096);
+                // Both sides clamped on their own would squash a big diagram; scale it down whole instead.
+                float k = std::min(1.f, 4096.f / std::max(mw, mh));
+                int w = std::max(1, (int)std::lround(mw * k)), h = std::max(1, (int)std::lround(mh * k));
                 std::vector<uint32_t> px;
                 if (SvgRender(svg.data(), svg.size(), w, h, px)) {
                     im.px.swap(px);

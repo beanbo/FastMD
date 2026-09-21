@@ -141,7 +141,8 @@ struct App {
     float textW = 0, wideW = 0;    // layout widths (DIP) the cache was built for
     uint32_t cachedCount = 0;
     std::unordered_map<uint32_t, IDWriteTextLayout*> numLayouts;
-    std::vector<float> hx;         // per block: horizontal scroll of a wide code block / table (DIP)
+    std::vector<float> hx;         // per block: horizontal scroll of a wide code block / table / diagram (DIP)
+    bool fitWide = false;          // nothing can be scrolled sideways here (printing, the Explorer pane): fit instead
 
     // ---- rendering
     Canvas* canvas = nullptr;

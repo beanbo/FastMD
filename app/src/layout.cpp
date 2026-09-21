@@ -199,7 +199,7 @@ int ImageSize(Doc& d, uint32_t idx, int* w, int* h) {
 
 float ImageDisplayWidth(const Image& im, float width) {
     if (im.attrW > 0) return std::min((float)im.attrW, width);  // width="…" from HTML wins, as in a browser
-    if (im.w > 0) return std::min((float)im.w, width);
+    if (im.w > 0) return ImageScrollsWide(im) ? (float)im.w : std::min((float)im.w, width);
     return std::min(width, 320.f);
 }
 

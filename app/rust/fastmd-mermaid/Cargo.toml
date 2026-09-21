@@ -10,3 +10,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
+# Already inside mermaid-rs-renderer; we use it directly to measure labels with the very font the viewer draws.
+ttf-parser = "0.25"

@@ -188,16 +188,23 @@ uint32_t BlockOfPos(uint32_t pos) {
 // ------------------------------------------------------------------------------------------------ horizontal scrolling
 static float TableMaxW(float x) { return g.wideW - (x - WideLeft()); }
 
+bool ImageScrollsWide(const Image& im) {
+    return im.mathKind == 3 && im.attrW <= 0 && im.w > 0 && !g.fitWide;
+}
+
 bool HScrollInfo(uint32_t i, float* visX, float* visW, float* contentW) {
     if (i >= g.doc.blocks.size() || i >= g.cache.size()) return false;
     const Block& b = g.doc.blocks[i];
     BlockLayout* L = g.cache[i];
-    if (!L || (b.kind != BK_CODE && b.kind != BK_TABLE)) return false;
+    if (!L || (b.kind != BK_CODE && b.kind != BK_TABLE && b.kind != BK_IMAGE)) return false;
     float x, w;
     BlockBox(i, &x, &w);
     float content, vis;
     if (b.kind == BK_CODE) {
         content = L->natural;
+        vis = w;
+    } else if (b.kind == BK_IMAGE) {
+        content = L->natural;   // a diagram at its own size; BlockBox has already clamped the box to the column
         vis = w;
     } else {
         if (!L->table) return false;
@@ -257,7 +264,7 @@ int HScrollBlockAt(float px, float py, bool* onBar) {
         if (k >= n) continue;
         float vx, vw, cw;
         if (!HScrollInfo(k, &vx, &vw, &cw)) continue;
-        float bottom = g.Y[k] + g.H[k] + (g.doc.blocks[k].kind == BK_TABLE ? 12.f : 0.f);
+        float bottom = g.Y[k] + g.H[k] + (g.doc.blocks[k].kind == BK_CODE ? 0.f : 12.f);
         if (docY < g.Y[k] || docY >= bottom || px < vx || px > vx + vw) continue;
         float l, t, r, b, tl, tr;
         if (HScrollBarRect(k, &l, &t, &r, &b, &tl, &tr)) *onBar = py >= t - 5.f && py <= b + 5.f;
@@ -602,10 +609,17 @@ static void DrawBlock(uint32_t i, float y) {
         Image& im0 = g.doc.images[b.aux];
         Image& im = im0.canon >= 0 ? g.doc.images[im0.canon] : im0;
         float iw = L->natural;  // BlockBox has already placed the box for <p align=…>
-        if (im.state.load() == 2) g.canvas->DrawImage(im, x, y, x + iw, y + L->height);
+        bool wide = iw > w + 0.5f;  // a diagram too wide for the column: draw it whole and let the block scroll
+        float ix = wide ? x - HScrollOf(i) : x;
+        if (wide) g.canvas->PushClip(x, y, right, y + L->height);
+        if (im.state.load() == 2) g.canvas->DrawImage(im, ix, y, ix + iw, y + L->height);
         else {
-            g.canvas->FillRoundRect(x, y, x + iw, y + L->height, 6.f, P_PLACEHOLDER);
-            if (L->text && im0.w <= 0) g.canvas->Text(L->text, x + 12.f, y + 9.f, P_MUTED);
+            g.canvas->FillRoundRect(ix, y, ix + iw, y + L->height, 6.f, P_PLACEHOLDER);
+            if (L->text && im0.w <= 0) g.canvas->Text(L->text, ix + 12.f, y + 9.f, P_MUTED);
+        }
+        if (wide) {
+            g.canvas->PopClip();
+            DrawHScrollBar(i);
         }
         break;
     }

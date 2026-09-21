@@ -180,11 +180,15 @@ def main():
     import shutil
     (OUT / "img").mkdir(exist_ok=True)
     shutil.copy(HERE.parents[1] / "bench" / "corpus" / "img" / "diagram0.png", OUT / "img" / "diagram0.png")
+    wide = ("# Схема\n\n```mermaid\ngraph LR\n"
+            + "\n".join(f"  N{i}[Очень длинный узел {i}] --> N{i + 1}" for i in range(6)) + "\n```\n")
     for name, text, probe in (
             ("preview-pic", "# Картинка\n\n![схема](img/diagram0.png)\n",
              "5.2 a picture in the pane is really drawn"),
             ("preview-math", "# Формула\n\n$$\\frac{a}{b} = \\sqrt{2\\pi}$$\n",
-             "5.2 a formula in the pane is really typeset")):
+             "5.2 a formula in the pane is really typeset"),
+            ("preview-wide", wide,
+             "5.2 a diagram in the pane is really drawn")):
         small = OUT / f"{name}.md"
         small.write_text(text, encoding="utf-8")
         call(prev, 6)  # Unload
@@ -202,6 +206,13 @@ def main():
         drawn = sum(1 for y in range(90, 260) for x in range(20, 360)  # the band under the heading, pixel by pixel
                     if sum(abs(p2[x, y][i] - bg[i]) for i in range(3)) > 90)
         check(probe, drawn > 150, f"{drawn} pixels differ from the background")
+        if name == "preview-wide":
+            # The pane cannot be scrolled sideways, so a diagram wider than it has to shrink to fit: nothing of it
+            # may be cut off at the right edge.
+            edge = sum(1 for y in range(90, 260) for x in range(W - 6, W - 1)
+                       if sum(abs(p2[x, y][i] - bg[i]) for i in range(3)) > 90)
+            check("5.2 a diagram too wide for the pane fits it instead of being cut off", edge == 0,
+                  f"{edge} pixels of the diagram touch the right edge")
 
     # ---- thumbnails (plan 5.3): the same DLL, its own class
     thumb = ctypes.c_void_p()

@@ -135,6 +135,7 @@ name = "fastmd-mermaid"
 version = "0.1.0"
 dependencies = [
  "mermaid-rs-renderer",
+ "ttf-parser",
 ]
 
 [[package]]

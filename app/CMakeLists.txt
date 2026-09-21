@@ -83,12 +83,15 @@ if(FASTMD_RUST)
     find_program(CARGO_EXE cargo)
     if(CARGO_EXE)
         set(RUST_OUT ${CMAKE_BINARY_DIR}/rust/release)
+        # Every source of both crates, not just the two lib.rs: the flowchart engine is a folder of its own.
+        file(GLOB_RECURSE RUST_SOURCES CONFIGURE_DEPENDS
+            ${CMAKE_SOURCE_DIR}/rust/fastmd-tex/src/*.rs ${CMAKE_SOURCE_DIR}/rust/fastmd-mermaid/src/*.rs)
         add_custom_command(
             OUTPUT ${RUST_OUT}/fastmd_tex.dll ${RUST_OUT}/fastmd_mermaid.dll
             COMMAND ${CARGO_EXE} build --release --manifest-path ${CMAKE_SOURCE_DIR}/rust/Cargo.toml
                     --target-dir ${CMAKE_BINARY_DIR}/rust
-            DEPENDS ${CMAKE_SOURCE_DIR}/rust/fastmd-tex/src/lib.rs ${CMAKE_SOURCE_DIR}/rust/fastmd-mermaid/src/lib.rs
-                    ${CMAKE_SOURCE_DIR}/rust/Cargo.toml
+            DEPENDS ${RUST_SOURCES} ${CMAKE_SOURCE_DIR}/rust/Cargo.toml
+                    ${CMAKE_SOURCE_DIR}/rust/fastmd-tex/Cargo.toml ${CMAKE_SOURCE_DIR}/rust/fastmd-mermaid/Cargo.toml
             COMMENT "cargo build --release (formulas, diagrams)"
             VERBATIM)
         add_custom_target(fastmd_rust ALL

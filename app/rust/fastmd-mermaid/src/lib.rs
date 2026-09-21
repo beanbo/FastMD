@@ -3,6 +3,8 @@
 //! A renderer in pure Rust: no browser, no WebView2, no process to start. The SVG it writes is drawn by the viewer's
 //! own SVG renderer, and the work happens on a background thread after the first frame.
 
+mod flow;
+
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// Renders a Mermaid diagram and hands back a UTF-8 SVG document. 1 = done, 0 = this diagram could not be drawn.
@@ -51,6 +53,16 @@ fn render(src: &str, dark: bool) -> Option<String> {
     let mut opts = mermaid_rs_renderer::RenderOptions::default();
     opts.theme = if dark { mermaid_rs_renderer::Theme::dark() } else { mermaid_rs_renderer::Theme::mermaid_default() };
     opts.theme.background = "none".to_string();  // the page behind the diagram is the viewer's, not the renderer's
+
+    // Flowcharts are laid out here (see flow/mod.rs); every other kind of diagram is the library's.
+    if let Ok(parsed) = mermaid_rs_renderer::parse_mermaid(src) {
+        if parsed.graph.kind == mermaid_rs_renderer::DiagramKind::Flowchart {
+            if let Some(svg) = flow::render(&parsed.graph, &opts.theme) {
+                return Some(svg);
+            }
+        }
+    }
+
     let svg = mermaid_rs_renderer::render_with_options(src, opts).ok()?;
     if svg.is_empty() {
         None

@@ -63,5 +63,8 @@ float BlockHeightEstimate(const Doc& d, const Typography& t, const Block& b, flo
 BlockLayout* LayoutBlock(const Doc& d, const Typography& t, uint32_t index, float width);
 int ImageSize(Doc& d, uint32_t imageIndex, int* w, int* h);  // reads PNG/JPEG/GIF/BMP header; thread-safe
 float ImageDisplayHeight(const Image& im, float width);
+// A Mermaid diagram is drawn at its own size and scrolled sideways when it does not fit: shrinking a diagram to the
+// text column is what makes its labels unreadable. Printing and the Explorer pane cannot scroll, so there it fits.
+bool ImageScrollsWide(const Image& im);
 float ImageDisplayWidth(const Image& im, float width);   // honours the HTML width attribute
 float HeadingRuleExtra(const Typography& t, int heading);    // padding + 1 px rule under h1/h2

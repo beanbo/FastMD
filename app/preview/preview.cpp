@@ -146,6 +146,7 @@ void LoadImagesSync() {
 }
 
 void LoadDocument(const std::wstring& path, int w, int h) {
+    g.fitWide = true;  // the pane has no scrolling of its own: a wide diagram shrinks to the pane instead
     g.path = path;
     g.doc = Doc();
     g.doc.baseDir = DirOf(path);

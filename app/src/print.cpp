@@ -45,6 +45,7 @@ void Save(ViewState& v) {
 void Restore(const ViewState& v) {
     delete g.canvas;  // the print canvas; the window's own is put back below
     g.canvas = v.canvas;
+    g.fitWide = false;
     g.pxW = v.pxW; g.pxH = v.pxH; g.dpi = v.dpi; g.cfg.zoom = v.zoom;
     g.scrollY = v.scrollY; g.targetY = v.targetY;
     g.selAnchor = v.selA; g.selFocus = v.selB; g.caretOn = v.caret;
@@ -143,6 +144,7 @@ bool PrintPages(HDC dc, const wchar_t* jobName, const wchar_t* outFile, int from
     g.caretOn = false;
     g.hoverLink = g.hoverCode = g.hoverHeading = g.focusLink = -1;
     SetDarkPalette(false);  // dark pages are for screens
+    g.fitWide = true;       // paper does not scroll: a wide diagram shrinks to the page instead
     pg.pageH = pg.areaH / s;
 
     ClearLayoutCache();

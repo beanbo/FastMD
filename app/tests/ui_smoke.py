@@ -1163,6 +1163,59 @@ def test_math():
 DF_TEXT, DF_HTML, DF_RTF, DF_URL, DF_DIB, DF_FILE = 1, 2, 4, 8, 16, 32
 
 
+
+WIDE_DIAGRAM_DOC = """# Широкая диаграмма
+
+```mermaid
+graph LR
+    A[Первый очень длинный узел] --> B[Второй очень длинный узел]
+    B --> C[Третий очень длинный узел]
+    C --> D[Четвёртый очень длинный узел]
+    D --> E[Пятый очень длинный узел]
+    E --> F[Шестой очень длинный узел]
+```
+
+Хвост документа.
+"""
+
+
+def test_wide_diagram():
+    """a diagram too wide for the column keeps its own size and scrolls sideways instead of shrinking (plan 4.2)"""
+    ok = True
+    doc = OUT / "wide-diagram.md"
+    doc.write_text(WIDE_DIAGRAM_DOC, encoding="utf-8")
+    proc, hwnd = launch(doc)
+    try:
+        blk = -1
+        for _ in range(40):  # drawn on a worker thread after the first frame
+            blk = q(hwnd, "HSCROLL_BLOCK")
+            if blk >= 0:
+                break
+            time.sleep(0.25)
+        ok &= check("4.2 a diagram wider than the column scrolls sideways", blk >= 0, str(blk))
+        if blk < 0:
+            return False
+        tall = q(hwnd, "BLOCK_Y", blk + 1) - q(hwnd, "BLOCK_Y", blk)
+        ok &= check("4.2 it keeps its own size, so the labels stay readable", tall > 60, f"{tall} DIP tall")
+        y = q(hwnd, "BLOCK_Y", blk) + 30
+        before = shot(hwnd, "27-wide-diagram")
+        wheel(hwnd, 500, y, -3, keys=MK_SHIFT)
+        x1 = q(hwnd, "HSCROLL_X", blk)
+        ok &= check("4.2 Shift+wheel moves the diagram", x1 > 0, str(x1))
+        wheel(hwnd, 500, y, 2, horizontal=True)
+        x2 = q(hwnd, "HSCROLL_X", blk)
+        ok &= check("4.2 the touchpad moves it further", x2 > x1, f"{x1} → {x2}")
+        after = shot(hwnd, "28-wide-diagram-scrolled")
+        box = (40, q(hwnd, "BLOCK_Y", blk), 980, q(hwnd, "BLOCK_Y", blk) + tall)
+        moved = sum(1 for p in ImageChops.difference(before.crop(box).convert("RGB"),
+                                                     after.crop(box).convert("RGB")).getdata() if sum(p) > 60)
+        ok &= check("4.2 what the pane shows really changes", moved > 500, f"{moved} pixels")
+        wheel(hwnd, 500, y, 30, keys=MK_SHIFT)
+        ok &= check("4.2 and back to the beginning", q(hwnd, "HSCROLL_X", blk) == 0)
+    finally:
+        close_and_wait(proc, hwnd)
+    return ok
+
 def test_drag(doc):
     """what a drag out of the window would carry: the shell runs the drag itself, the formats are ours"""
     ok = True
@@ -1377,7 +1430,7 @@ def main():
     ok = True
     for t in (lambda: test_basics(doc), lambda: test_hscroll(doc), test_outline, lambda: test_positions(doc), test_find,
               test_start_screen, lambda: test_links(doc), test_footnotes, test_html, test_remote_images, test_svg,
-              test_languages, lambda: test_clipboard(doc), test_key_selection, test_pdf, lambda: test_drag(doc), test_math, test_update, test_broken_html, test_scroll_frames,
+              test_languages, lambda: test_clipboard(doc), test_key_selection, test_pdf, lambda: test_drag(doc), test_math, test_wide_diagram, test_update, test_broken_html, test_scroll_frames,
               lambda: test_image_scaling(doc),
               lambda: test_columns(doc),
               lambda: test_settings(doc),
