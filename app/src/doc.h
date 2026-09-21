@@ -58,6 +58,7 @@ struct Image {
     int attrW = 0, attrH = 0;   // size asked for by HTML width / height attributes (0 = not given)
     int canon = -1;             // index of the first image with the same path (holds the pixels)
     std::vector<uint32_t> px;   // decoded premultiplied BGRA (canonical entry only), filled by the image thread
+    std::vector<uint8_t> svg;   // the SVG source, kept so the picture can be redrawn crisply at any size
     int pxW = 0, pxH = 0;       // size of px as decoded (a GIF frame can be smaller than its header's screen)
     std::atomic<int> state{0};  // 0 = not requested, 1 = loading, 2 = ready, 3 = failed
     // the same picture at its display size: drawn as a row copy, and scaled with a real filter instead of the
@@ -108,4 +109,5 @@ void Highlight(Doc& d, const wchar_t* lang, uint32_t langLen, uint32_t textOff, 
 
 // util.cpp
 bool ReadFileUtf16(const wchar_t* path, std::wstring& out, uint64_t* ticksRead, FILETIME* writeTime);
+bool ReadFileBytes(const wchar_t* path, std::vector<uint8_t>& out, size_t maxBytes);
 bool GetFileStamp(const wchar_t* path, FILETIME* writeTime, uint64_t* size);

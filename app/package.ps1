@@ -20,8 +20,11 @@ $zip = Join-Path $dist "FastMD-$ver-win-x64.zip"
 New-Item -ItemType Directory -Force $stage | Out-Null
 Get-ChildItem $stage -File | Remove-Item
 Copy-Item $exe $stage
+Copy-Item (Join-Path $PSScriptRoot 'build\Release\fastmd-svg.dll') $stage  # SVG rendering, loaded on demand
 Copy-Item (Join-Path $PSScriptRoot '..\LICENSE') (Join-Path $stage 'LICENSE.txt')
 Copy-Item (Join-Path $PSScriptRoot 'third_party\md4c\LICENSE.md') (Join-Path $stage 'THIRD-PARTY-md4c.txt')
+Copy-Item (Join-Path $PSScriptRoot 'third_party\lunasvg\LICENSE') (Join-Path $stage 'THIRD-PARTY-lunasvg.txt')
+Copy-Item (Join-Path $PSScriptRoot 'third_party\plutovg\LICENSE') (Join-Path $stage 'THIRD-PARTY-plutovg.txt')
 Copy-Item (Join-Path $PSScriptRoot '..\CHANGELOG.md') $stage
 $readme = @"
 FastMD $ver - lightning-fast Markdown reader for Windows

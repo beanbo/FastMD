@@ -5,6 +5,7 @@
 //   after the first frame of a document: exact heights on worker threads, WIC image decoding, file watcher.
 #include "app.h"
 #include "net.h"
+#include "svg.h"
 #include <shlobj.h>
 #include <wincodec.h>
 
@@ -310,6 +311,25 @@ static DWORD WINAPI ImageThread(void* p) {
         im.canon = (int)c;
         if (c != i) continue;
         bool ok = false;
+        std::vector<uint8_t> bytes;  // SVG is drawn by fastmd-svg.dll; everything else goes through WIC
+        if (ReadFileBytes(im.path.c_str(), bytes, 16u << 20) && IsSvgData(bytes.data(), bytes.size())) {
+            float sw = 0, sh = 0;
+            if (SvgMeasure(bytes.data(), bytes.size(), &sw, &sh) && sw >= 1.f && sh >= 1.f) {
+                int w = std::clamp((int)std::lround(sw), 1, 4096), h = std::clamp((int)std::lround(sh), 1, 4096);
+                std::vector<uint32_t> px;
+                if (SvgRender(bytes.data(), bytes.size(), w, h, px)) {
+                    im.px.swap(px);
+                    im.pxW = w;
+                    im.pxH = h;
+                    if (im.w <= 0) { im.w = w; im.h = h; }
+                    im.svg.swap(bytes);
+                    ok = true;
+                }
+            }
+            im.state = ok ? 2 : 3;
+            if (ok && !im.url.empty() && !g.closing && g.docGen == myGen) PostMessageW(g.hwnd, WM_APP_IMAGES, 0, 0);
+            continue;
+        }
         IWICBitmapDecoder* dec = nullptr;
         IWICBitmapFrameDecode* fr = nullptr;
         IWICFormatConverter* conv = nullptr;
@@ -383,6 +403,12 @@ static DWORD WINAPI ScaleThread(void* p) {
         int w = im.wantW.load(), h = im.wantH.load();
         if (w <= 0 || h <= 0 || (w == im.scW.load() && h == im.scH.load())) continue;
         if (w == im.pxW && h == im.pxH) continue;  // drawn 1:1: the decoded pixels are already the right size
+        if (!im.svg.empty()) {  // vector art: drawn again at the new size instead of scaling pixels
+            std::vector<uint32_t> px;
+            bool done = SvgRender(im.svg.data(), im.svg.size(), w, h, px);
+            out->push_back(ScaledImage{(uint32_t)i, w, h, done ? std::move(px) : std::vector<uint32_t>()});
+            continue;
+        }
         IWICBitmap* src = nullptr;
         IWICBitmapScaler* scaler = nullptr;
         std::vector<uint32_t> px((size_t)w * h);

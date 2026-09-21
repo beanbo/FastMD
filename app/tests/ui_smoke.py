@@ -661,14 +661,14 @@ def test_html():
         left, width = q(hwnd, "TEXT_LEFT"), q(hwnd, "TEXT_W")
         row = img.crop((0, 100, img.width, 200)).convert("RGB")
         px = row.load()
-        cols = [x for x in range(img.width) if sum(px[x, 50]) < 700]  # the picture is a saturated gradient
+        cols = [x for x in range(left + width) if sum(px[x, 50]) < 700]  # the picture is a saturated gradient
         centred = cols and abs((cols[0] + cols[-1]) // 2 - (left + width // 2)) <= 8
         ok &= check("2.2 <p align=center> centres the picture", centred, f"{cols[:1]}..{cols[-1:]} column {left}+{width}")
         ok &= check("2.2 a picture inside a line leaves no stray character in the text", "￼" not in text)
         # three 90 px badges in one line: their pixels span far more than one badge would
         band = img.crop((0, 240, img.width, 300)).convert("RGB")
         bp = band.load()
-        xs = [x for x in range(img.width) for y in range(0, 60, 6) if sum(bp[x, y]) < 700]
+        xs = [x for x in range(left + width) for y in range(0, 60, 6) if sum(bp[x, y]) < 700]
         ok &= check("2.2 badges sit side by side on one line", xs and max(xs) - min(xs) > 200,
                     f"{min(xs) if xs else '-'}..{max(xs) if xs else '-'}")
         ok &= check("2.2 an HTML table becomes a table", "Возможность\tFastMD" in text, repr(text[-120:]))
@@ -741,6 +741,61 @@ def test_remote_images():
     finally:
         srv.shutdown()
         del_reg("RemoteImages")
+    return ok
+
+
+# ------------------------------------------------------------------------------------------------ 2.4 SVG
+SVG_BADGE = ('<svg xmlns="http://www.w3.org/2000/svg" width="104" height="20">'
+             '<rect width="62" height="20" fill="#555555"/><rect x="62" width="42" height="20" fill="#44cc11"/>'
+             '<text x="8" y="14" fill="#ffffff" font-family="Verdana" font-size="11">build</text>'
+             '<text x="70" y="14" fill="#ffffff" font-family="Verdana" font-size="11">ok</text></svg>')
+
+
+def test_svg():
+    """SVG is drawn by fastmd-svg.dll: from a file, from the web, and crisply at any size"""
+    import http.server
+    import socketserver
+    import threading
+    ok = True
+    body = SVG_BADGE.encode()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "image/svg+xml")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    (OUT / "img").mkdir(exist_ok=True)
+    (OUT / "img" / "badge.svg").write_text(SVG_BADGE, encoding="utf-8")
+    doc = OUT / "svg.md"
+    doc.write_text(f'# SVG\n\nВ строке: <img src="img/badge.svg"> и дальше текст.\n\n'
+                   f'![из сети](http://127.0.0.1:{port}/b.svg)\n\n'
+                   f'<img src="img/badge.svg" width="312">\n', encoding="utf-8")
+    try:
+        proc, hwnd = launch(doc)
+        time.sleep(3.0)
+        img = shot(hwnd, "31-svg")
+        green = [(x, y) for x in range(100, 900, 3) for y in range(60, 500, 3)
+                 if abs(img.getpixel((x, y))[0] - 0x44) < 40 and img.getpixel((x, y))[1] > 0xA0
+                 and img.getpixel((x, y))[2] < 0x60]
+        rows = sorted({y for _, y in green})
+        ok &= check("2.4 SVG from a file and from the web is drawn", len(green) > 30 and len(rows) > 6,
+                    f"{len(green)} pixels on {len(rows)} rows")
+        # the third one asks for 312 px: three times the natural width, drawn again rather than blown up
+        wide = [x for x, y in green if y > max(rows) - 40]
+        ok &= check("2.4 a bigger SVG is redrawn at that size", wide and max(wide) - min(wide) > 100,
+                    f"{min(wide) if wide else '-'}..{max(wide) if wide else '-'}")
+    finally:
+        close_and_wait(proc, hwnd)
+        srv.shutdown()
     return ok
 
 
@@ -938,7 +993,7 @@ def main():
     shutil.copy(REPO / "bench" / "corpus" / "img" / "diagram0.png", OUT / "img" / "diagram0.png")
     ok = True
     for t in (lambda: test_basics(doc), lambda: test_hscroll(doc), test_outline, lambda: test_positions(doc), test_find,
-              test_start_screen, lambda: test_links(doc), test_footnotes, test_html, test_remote_images,
+              test_start_screen, lambda: test_links(doc), test_footnotes, test_html, test_remote_images, test_svg,
               test_scroll_frames,
               lambda: test_image_scaling(doc),
               lambda: test_columns(doc),

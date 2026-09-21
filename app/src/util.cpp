@@ -130,6 +130,22 @@ bool ReadFileUtf16(const wchar_t* path, std::wstring& out, uint64_t* ticksRead, 
     return true;
 }
 
+bool ReadFileBytes(const wchar_t* path, std::vector<uint8_t>& out, size_t maxBytes) {
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER sz{};
+    bool ok = GetFileSizeEx(f, &sz) && sz.QuadPart > 0 && (uint64_t)sz.QuadPart <= maxBytes;
+    if (ok) {
+        out.resize((size_t)sz.QuadPart);
+        DWORD got = 0;
+        ok = ReadFile(f, out.data(), (DWORD)out.size(), &got, nullptr) && got == out.size();
+        if (!ok) out.clear();
+    }
+    CloseHandle(f);
+    return ok;
+}
+
 bool GetFileStamp(const wchar_t* path, FILETIME* writeTime, uint64_t* size) {
     WIN32_FILE_ATTRIBUTE_DATA a{};
     if (!GetFileAttributesExW(path, GetFileExInfoStandard, &a)) return false;

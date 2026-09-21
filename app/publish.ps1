@@ -24,4 +24,17 @@ try {
     Copy-Item $src $dst
     Write-Host "running copy renamed to $(Split-Path $old -Leaf); open windows keep working, new ones start the new build"
 }
+# fastmd-svg.dll (SVG rendering) sits next to the exe; it is loaded only when a document holds an SVG
+$dll = Join-Path $PSScriptRoot 'build\Release\fastmd-svg.dll'
+if (Test-Path $dll) {
+    $dllDst = Join-Path $dstDir 'fastmd-svg.dll'
+    try {
+        Copy-Item $dll $dllDst -Force -ErrorAction Stop
+    } catch {
+        $oldDll = Join-Path $dstDir ("fastmd-svg.old-{0}.dll" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        Move-Item $dllDst $oldDll
+        Copy-Item $dll $dllDst
+    }
+}
+Get-ChildItem $dstDir -Filter 'fastmd-svg.old-*.dll' | ForEach-Object { Remove-Item $_.FullName -ErrorAction SilentlyContinue }
 Write-Host "published $dst ($((Get-Item $dst).Length) bytes)"

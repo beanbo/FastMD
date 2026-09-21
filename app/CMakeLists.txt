@@ -27,7 +27,8 @@ endif()
 configure_file(src/version.h.in ${CMAKE_BINARY_DIR}/generated/version.h @ONLY)
 
 add_executable(FastMD WIN32
-    src/view.cpp src/window.cpp src/loader.cpp src/parse.cpp src/html.cpp src/net.cpp src/layout.cpp src/canvas_gdi.cpp
+    src/view.cpp src/window.cpp src/loader.cpp src/parse.cpp src/html.cpp src/net.cpp src/svg.cpp
+    src/layout.cpp src/canvas_gdi.cpp
     src/highlight.cpp src/theme.cpp src/util.cpp
     src/find.cpp src/toc.cpp src/home.cpp src/store.cpp src/shell.cpp src/settings_ui.cpp src/strings.cpp
     third_party/md4c/md4c.c
@@ -51,3 +52,19 @@ target_link_options(FastMD PRIVATE
     $<$<CONFIG:Release>:/LTCG /OPT:REF /OPT:ICF> ${FASTMD_SEC_L})
 target_link_libraries(FastMD PRIVATE user32 gdi32 dwmapi dwrite ole32 shell32 imm32 windowscodecs comdlg32 advapi32
     winhttp delayimp)
+
+# ---------------------------------------------------------------------------------------------- fastmd-svg.dll
+# SVG (badges, diagrams) is drawn by lunasvg + plutovg. They live in a DLL, not in the exe: CreateProcess pays
+# ~1.2-1.9 ms per megabyte of the exe image on every launch, while a DLL is mapped only when it is first needed -
+# and SVG is never needed before the first frame.
+file(GLOB LUNASVG_SOURCES third_party/lunasvg/source/*.cpp)
+file(GLOB PLUTOVG_SOURCES third_party/plutovg/source/*.c)
+add_library(fastmd_svg SHARED src/svg_dll.cpp ${LUNASVG_SOURCES} ${PLUTOVG_SOURCES})
+set_target_properties(fastmd_svg PROPERTIES OUTPUT_NAME "fastmd-svg")
+target_include_directories(fastmd_svg PRIVATE third_party/lunasvg/include third_party/plutovg/include
+    third_party/plutovg/source)
+target_compile_definitions(fastmd_svg PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS
+    LUNASVG_BUILD_STATIC PLUTOVG_BUILD_STATIC)
+target_compile_options(fastmd_svg PRIVATE /utf-8 /W0 /EHsc $<$<CONFIG:Release>:/O2 /Oi /Gy /DNDEBUG> ${FASTMD_SEC_C})
+target_link_options(fastmd_svg PRIVATE /INCREMENTAL:NO $<$<CONFIG:Release>:/OPT:REF /OPT:ICF> ${FASTMD_SEC_L})
+target_link_libraries(fastmd_svg PRIVATE user32 gdi32)

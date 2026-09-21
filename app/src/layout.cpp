@@ -297,9 +297,11 @@ struct InlineImage final : IDWriteInlineObject {
 };
 }  // namespace
 
-static void ApplyRuns(const Doc& d, const Typography& t, IDWriteTextLayout* L, uint32_t textOff, uint32_t runOff,
-                      uint32_t runCount, int role, bool heading) {
+// returns the height of the tallest picture inside the line, so the caller can make room for it
+static float ApplyRuns(const Doc& d, const Typography& t, IDWriteTextLayout* L, uint32_t textOff, uint32_t runOff,
+                       uint32_t runCount, int role, bool heading) {
     IDWriteTextLayout1* L1 = nullptr;
+    float tallest = 0;
     for (uint32_t k = 0; k < runCount; k++) {
         const Run& r = d.runs[runOff + k];
         if (!r.flags) continue;
@@ -316,9 +318,14 @@ static void ApplyRuns(const Doc& d, const Typography& t, IDWriteTextLayout* L, u
             ImageSize(const_cast<Doc&>(d), r.image, &iw, &ih);  // header size, cached in the image
             float maxW = std::max(24.f, L->GetMaxWidth());
             const Image& im = d.images[r.image];
-            auto* obj = new InlineImage(&d, r.image, ImageDisplayWidth(im, maxW), ImageDisplayHeight(im, maxW));
+            // nothing known yet (a badge still being fetched): hold a badge-sized box so the line does not jump much
+            bool unknown = im.attrW <= 0 && im.w <= 0;
+            float boxW = unknown ? 96.f : ImageDisplayWidth(im, maxW);
+            float boxH = unknown ? 20.f : ImageDisplayHeight(im, maxW);
+            auto* obj = new InlineImage(&d, r.image, boxW, boxH);
             L->SetInlineObject(obj, rg);
             obj->Release();
+            tallest = std::max(tallest, boxH);
             continue;
         }
         if (r.flags & (F_SUP | F_SUB)) L->SetFontSize(std::round(t.size[role] * 0.72f), rg);  // lifted in the canvas
@@ -340,6 +347,12 @@ static void ApplyRuns(const Doc& d, const Typography& t, IDWriteTextLayout* L, u
         }
     }
     SafeRelease(L1);
+    // our lines have a fixed height; without this a picture taller than the line would hang above it
+    if (tallest > 0) {
+        float lh = std::max(t.lineH[role], tallest + 6.f);
+        L->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, lh, std::max(t.baseline[role], tallest + 3.f));
+    }
+    return tallest;
 }
 
 static TableLayout* LayoutTable(const Doc& d, const Typography& t, const Table& tb, float avail) {
