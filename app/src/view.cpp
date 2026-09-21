@@ -1028,20 +1028,116 @@ static void ContainerRange(uint32_t pos, uint32_t* s, uint32_t* e) {
     }
 }
 
-void SelectWordAt(uint32_t pos) {
+// the run of like characters around pos: a word, a run of spaces, or a run of punctuation
+bool WordRange(uint32_t pos, uint32_t* from, uint32_t* to) {
     uint32_t s, e;
+    if (g.doc.blocks.empty()) return false;
     ContainerRange(pos, &s, &e);
     const std::wstring& t = g.doc.text;
     if (pos >= e && pos > s) pos = e - 1;
-    if (pos >= t.size()) return;
+    if (pos >= t.size()) return false;
     bool word = IsWordChar(t[pos]);
     bool space = iswspace(t[pos]) != 0;
     uint32_t a = pos, b = pos;
     auto same = [&](wchar_t c) { return word ? IsWordChar(c) : space ? iswspace(c) != 0 : (!IsWordChar(c) && !iswspace(c)); };
     while (a > s && same(t[a - 1])) a--;
     while (b < e && same(t[b])) b++;
+    *from = a;
+    *to = b;
+    return true;
+}
+
+void SelectWordAt(uint32_t pos) {
+    uint32_t a = 0, b = 0;
+    if (!WordRange(pos, &a, &b)) return;
     g.selAnchor = a;
     g.selFocus = b;
+}
+
+// the block (paragraph, heading, list item, code block) that holds pos
+bool ParagraphRange(uint32_t pos, uint32_t* from, uint32_t* to) {
+    if (g.doc.blocks.empty()) return false;
+    ContainerRange(pos, from, to);
+    return true;
+}
+
+// the visual line that holds pos, as DirectWrite wrapped it
+bool LineRange(uint32_t pos, uint32_t* from, uint32_t* to) {
+    if (g.doc.blocks.empty()) return false;
+    uint32_t bi = BlockOfPos(pos);
+    const Block& b = g.doc.blocks[bi];
+    uint32_t s = b.textOff, e = BlockEnd(b);
+    *from = s;
+    *to = e;
+    if (b.kind != BK_TEXT && b.kind != BK_CODE) return true;
+    BlockLayout* L = EnsureLayout(bi);
+    if (!L || !L->text) return true;
+    UINT32 n = 0;
+    L->text->GetLineMetrics(nullptr, 0, &n);
+    if (!n) return true;
+    std::vector<DWRITE_LINE_METRICS> lm(n);
+    if (FAILED(L->text->GetLineMetrics(lm.data(), n, &n))) return true;
+    uint32_t at = s;
+    for (UINT32 k = 0; k < n; k++) {
+        uint32_t next = at + lm[k].length;
+        if (pos < next || k + 1 == n) {
+            *from = at;
+            *to = std::min(next, e);
+            return true;
+        }
+        at = next;
+    }
+    return true;
+}
+
+// one character forward or back, never stopping inside a surrogate pair; stays inside the document
+uint32_t TextStep(uint32_t pos, int dir) {
+    const std::wstring& t = g.doc.text;
+    if (dir > 0) {
+        uint32_t p = std::min<uint32_t>(pos + 1, (uint32_t)t.size());
+        while (p < t.size() && t[p] >= 0xDC00 && t[p] <= 0xDFFF) p++;
+        return p;
+    }
+    if (pos == 0) return 0;
+    uint32_t p = pos - 1;
+    while (p > 0 && t[p] >= 0xDC00 && t[p] <= 0xDFFF) p--;
+    return p;
+}
+
+// screen rectangles of a text range, for a screen reader's highlight (client DIP → screen pixels)
+void RangeScreenRects(uint32_t from, uint32_t to, std::vector<double>& out) {
+    out.clear();
+    if (g.doc.blocks.empty() || to <= from || !g.hwnd) return;
+    float s = Scale();
+    static std::vector<DWRITE_HIT_TEST_METRICS> hits;
+    for (uint32_t i = BlockOfPos(from); i < g.doc.blocks.size(); i++) {
+        const Block& b = g.doc.blocks[i];
+        if (b.textOff >= to) break;
+        if (BlockHidden(b) || b.kind == BK_HR || b.kind == BK_IMAGE) continue;
+        uint32_t bs = std::max(from, b.textOff), be = std::min(to, BlockEnd(b));
+        if (be <= bs) continue;
+        BlockLayout* L = EnsureLayout(i);
+        if (!L || !L->text) continue;
+        float bx, bw;
+        BlockBox(i, &bx, &bw);
+        float pad = b.kind == BK_CODE ? Metrics::kCodePad : 0.f;
+        RangeRects(L->text, b.textOff, bs, be, hits);
+        for (const auto& r : hits) {
+            POINT p{(LONG)std::lround((bx + pad + r.left) * s),
+                    (LONG)std::lround((g.Y[i] + pad + r.top - g.scrollY) * s)};
+            ClientToScreen(g.hwnd, &p);
+            out.push_back((double)p.x);
+            out.push_back((double)p.y);
+            out.push_back((double)std::lround(r.width * s));
+            out.push_back((double)std::lround(r.height * s));
+        }
+    }
+}
+
+// the heading level of the block holding pos (0 = not a heading): screen readers navigate by these
+int HeadingLevelAt(uint32_t pos) {
+    if (g.doc.blocks.empty()) return 0;
+    return g.doc.blocks[BlockOfPos(pos)].heading;
 }
 
 void SelectBlockAt(uint32_t pos) {

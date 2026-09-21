@@ -1,6 +1,6 @@
 // Loading fastmd-tex.dll and fastmd-mermaid.dll on demand, and the calls we need from them. Like the SVG library,
 // they are opened from worker threads only, after the first frame, and each is opened once.
-#include "math.h"
+#include "formulas.h"
 
 #include "app.h"
 

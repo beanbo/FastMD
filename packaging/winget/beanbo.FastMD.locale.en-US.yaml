@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: beanbo.FastMD
+PackageVersion: "VERSION"
+PackageLocale: en-US
+Publisher: beanbo
+PublisherUrl: https://github.com/beanbo
+PublisherSupportUrl: https://github.com/beanbo/FastMD/issues
+PackageName: FastMD
+PackageUrl: https://github.com/beanbo/FastMD
+License: GPL-3.0-or-later
+LicenseUrl: https://github.com/beanbo/FastMD/blob/main/LICENSE
+ShortDescription: Instant Markdown reader for Windows
+Description: |-
+  FastMD opens a Markdown document in about 66 ms - faster than an empty untuned Win32 window on the same machine.
+  C++20 on raw Win32 with DirectWrite; the first frame is drawn on the CPU, with no GPU device, no COM and no
+  runtime to load. It renders CommonMark and GFM, GitHub alerts, footnotes, a subset of HTML, SVG, pictures from the
+  web, TeX formulas and Mermaid diagrams; it prints and exports PDF, and it installs per user without administrator
+  rights.
+Moniker: fastmd
+Tags:
+  - markdown
+  - md
+  - reader
+  - viewer
+  - fast
+  - native
+ReleaseNotesUrl: https://github.com/beanbo/FastMD/blob/main/CHANGELOG.md
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

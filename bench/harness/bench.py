@@ -204,6 +204,10 @@ def env_block(extra: dict[str, str]):
     return (ctypes.c_wchar * len(s))(*s)
 
 
+# how many cores the measured process may use (0 = every one), see --cpus
+CPU_LIMIT = 0
+
+
 def launch(cmdline: list[str], env: dict[str, str], cwd: str, job):
     cmd = subprocess.list2cmdline(cmdline)
     cmdbuf = ctypes.create_unicode_buffer(cmd)
@@ -219,6 +223,8 @@ def launch(cmdline: list[str], env: dict[str, str], cwd: str, job):
         err = ctypes.get_last_error()
         k32.TerminateProcess(pi.hProcess, 1)
         raise ctypes.WinError(err)
+    if CPU_LIMIT:  # still suspended: the process starts already pinned to that many cores
+        k32.SetProcessAffinityMask(pi.hProcess, ctypes.c_size_t((1 << CPU_LIMIT) - 1))
     k32.ResumeThread(pi.hThread)
     t_resumed = now_ft()
     k32.CloseHandle(pi.hThread)
@@ -624,6 +630,8 @@ def cmd_shot(args, variants):
 
 
 def cmd_run(args, variants):
+    global CPU_LIMIT
+    CPU_LIMIT = max(0, getattr(args, "cpus", 0))  # --cpus: stand in for a machine with fewer cores
     ids = list(variants) if args.variant == "all" else args.variant.split(",")
     if args.skip:
         ids = [i for i in ids if i not in set(args.skip.split(","))]
@@ -690,6 +698,7 @@ def main() -> int:
     p.add_argument("variant", help="variant id, comma list, or 'all'")
     p.add_argument("--doc", default="small,medium,large")
     p.add_argument("--runs", type=int, default=15, help="measured runs after the first one")
+    p.add_argument("--cpus", type=int, default=0, help="run the measured process on this many cores (0 = all)")
     p.add_argument("--gap", type=int, default=400, help="pause between runs, ms")
     p.add_argument("--order", choices=["interleaved", "grouped"], default="interleaved")
     p.add_argument("--skip", help="comma list of variant ids to skip")

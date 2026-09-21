@@ -5,7 +5,7 @@
 //   after the first frame of a document: exact heights on worker threads, WIC image decoding, file watcher.
 #include "app.h"
 #include "net.h"
-#include "math.h"
+#include "formulas.h"
 #include "svg.h"
 #include <shlobj.h>
 #include <wincodec.h>
@@ -175,6 +175,7 @@ void OpenDocument(const std::wstring& path, bool pushHistory, float scrollY, boo
     Invalidate();
     StartBackgroundWork();
     SHAddToRecentDocs(SHARD_PATHW, g.path.c_str());
+    UiaDocumentChanged();  // a screen reader is reading this window: the document under it just changed
     if (other && track && !g.loadFailed) {
         PosEntry touch;
         touch.path = g.path;

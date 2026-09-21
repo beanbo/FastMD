@@ -131,6 +131,22 @@ struct StoreLock {  // positions.bin is shared by every FastMD window
 };
 }  // namespace
 
+// when the updater last asked GitHub (FILETIME ticks): once a day is enough
+uint64_t LastUpdateCheck() {
+    HKEY k = OpenKey(false);
+    uint64_t lo = GetDword(k, L"UpdateSeenLo", 0), hi = GetDword(k, L"UpdateSeenHi", 0);
+    if (k) RegCloseKey(k);
+    return (hi << 32) | lo;
+}
+
+void SetLastUpdateCheck(uint64_t t) {
+    HKEY k = OpenKey(true);
+    if (!k) return;
+    SetDword(k, L"UpdateSeenLo", (DWORD)(t & 0xFFFFFFFF));
+    SetDword(k, L"UpdateSeenHi", (DWORD)(t >> 32));
+    RegCloseKey(k);
+}
+
 // the newest crash dump the reader has already been offered (FILETIME ticks): so it is offered once, not every start
 uint64_t LastCrashSeen() {
     HKEY k = OpenKey(false);
@@ -182,6 +198,7 @@ void LoadConfig(Config& c, std::wstring* findQuery) {
     c.smoothScroll = GetDword(k, L"SmoothScroll", 1) != 0;
     c.language = (uint8_t)std::min<DWORD>(GetDword(k, L"Language", LANG_AUTO), LANG_EN);
     c.remoteImages = (uint8_t)std::min<DWORD>(GetDword(k, L"RemoteImages", 0), 2);
+    c.updateCheck = GetDword(k, L"UpdateCheck", 1) != 0;
     c.editor = GetString(k, L"Editor");
     c.findCase = GetDword(k, L"FindCase", 0) != 0;
     c.findWord = GetDword(k, L"FindWord", 0) != 0;
@@ -204,6 +221,7 @@ void SaveConfig(const Config& c, const std::wstring& findQuery) {
     SetDword(k, L"SmoothScroll", c.smoothScroll);
     SetDword(k, L"Language", c.language);
     SetDword(k, L"RemoteImages", c.remoteImages);
+    SetDword(k, L"UpdateCheck", c.updateCheck);
     SetString(k, L"Editor", c.editor);
     SetDword(k, L"FindCase", c.findCase);
     SetDword(k, L"FindWord", c.findWord);

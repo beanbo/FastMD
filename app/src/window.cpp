@@ -264,6 +264,7 @@ void Command(UINT id) {
     case CMD_COPY_MD: CopySelectionMarkdown(); break;
     case CMD_PRINT: PrintDocument(); break;
     case CMD_EXPORT_PDF: ExportPdf(); break;
+    case CMD_UPDATE: UpdateInstall(); break;
     case CMD_SELECT_ALL: SelectAll(); Invalidate(); break;
     case CMD_OPEN: OpenDialog(); break;
     case CMD_RELOAD: ReloadDocument(); ShowToast(Tr(S_RELOADED), 700); break;
@@ -375,6 +376,7 @@ static void ContextMenu(int sx, int sy, bool keyboard) {
     if (DocHasRemoteImages() && !RemoteImagesAllowed())  // the privacy setting says ask / never
         AppendMenuW(m, MF_STRING, CMD_LOAD_REMOTE, Tr(S_MENU_LOAD_REMOTE));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    if (UpdateAvailable()) AppendMenuW(m, MF_STRING, CMD_UPDATE, Tr(S_MENU_UPDATE));
     AppendMenuW(m, MF_STRING, CMD_SETTINGS, Tr(S_MENU_SETTINGS));
     AppendMenuW(m, MF_STRING, CMD_ASSOCIATE, Tr(S_MENU_ASSOCIATE));
     UINT id = (UINT)TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, sx, sy, 0, g.hwnd, nullptr);
@@ -462,6 +464,7 @@ static void AfterFirstFrame() {
     if (!g_msgSettings) g_msgSettings = RegisterWindowMessageW(L"FastMD.SettingsChanged");
     LoadPositionsAsync();  // reading position of this document; marks it as recently opened
     CrashReportIfAny();    // the previous run left a minidump: offer the folder, once
+    UpdateCheckAsync();    // once a day, one request, and only if it is switched on
     DebugFlush();
     if (g.cfg.scrollTest) ScrollTest();
 }
@@ -902,6 +905,9 @@ static LRESULT Query(WPARAM q, LPARAM lp) {
         }
         return n;
     }
+    case Q_UPDATE:
+        if (lp == 1) { UpdateFetchForTest(); return 1; }
+        return lp == 2 ? UpdateFetched() : UpdateAvailable();
     case Q_DRAG: {  // 0xFFFF as the picture's block means "the one on screen", as the image menu items do
         int kind = (int)(lp >> 16), arg = (int)(lp & 0xFFFF);
         if (kind == DRAG_IMAGE && arg == 0xFFFF) arg = g.ctxImage >= 0 ? g.ctxImage : FirstVisibleImage();
@@ -923,6 +929,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     switch (msg) {
+    case WM_GETOBJECT: {  // a screen reader asking for the document (plan 6.1)
+        LRESULT r = UiaHandleGetObject(wp, lp);
+        if (r) return r;
+        break;
+    }
     case WM_ERASEBKGND:
         if (!g.ready) { BenchWindowShown(); return DefWindowProcW(hwnd, msg, wp, lp); }  // theme-coloured class brush
         return 1;
@@ -1061,6 +1072,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP_MEASURED: OnMeasured((MeasureJob*)lp); return 0;
     case WM_APP_FULLDOC: if (!g.firstFrame) OnFullDoc(); return 0;
     case WM_APP_IMAGES: OnImagesLoaded(); return 0;
+    case WM_APP_UPDATE:
+        if (g.ready) OnUpdateMessage(wp);
+        return 0;
     case WM_APP_SCALED: OnScaledImages((std::vector<ScaledImage>*)lp, (uint32_t)wp); return 0;
     case WM_APP_FILECHANGED: SetTimer(hwnd, TIMER_RELOAD, 120, nullptr); return 0;  // debounce editor save bursts
     case WM_APP_POSITIONS: OnPositionsLoaded((std::vector<PosEntry>*)lp); return 0;
@@ -1074,7 +1088,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ENDSESSION:  // logoff / shutdown / restart: no WM_CLOSE is sent
         if (wp) SaveAll();
         return 0;
-    case WM_DESTROY: PostQuitMessage(0); return 0;
+    case WM_DESTROY:
+        UiaShutdown();  // let go of the screen-reader provider before the window is gone
+        PostQuitMessage(0);
+        return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
@@ -1133,6 +1150,23 @@ done:
     ExitProcess(0);  // workers may still run (measure / images): no orderly teardown needed for a viewer
 }
 
+// The preview handler registers itself: the exe only loads the DLL beside it and calls the entry point. Everything
+// it writes is under HKCU, so no administrator is involved (plan 5.2).
+static bool PreviewRegister(bool on) {
+    wchar_t path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (!n || n >= MAX_PATH) return false;
+    std::wstring dll(path, n);
+    size_t slash = dll.find_last_of(L'\\');
+    dll = (slash == std::wstring::npos ? L"" : dll.substr(0, slash + 1)) + L"fastmd-preview.dll";
+    HMODULE h = LoadLibraryExW(dll.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    if (!h) return false;
+    auto fn = (HRESULT(__stdcall*)())GetProcAddress(h, on ? "DllRegisterServer" : "DllUnregisterServer");
+    HRESULT hr = fn ? fn() : E_FAIL;
+    FreeLibrary(h);
+    return SUCCEEDED(hr);
+}
+
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     BenchInit();
     CrashHandlerInstall();  // one call, no library behind it: a crash leaves a minidump instead of silence
@@ -1150,6 +1184,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     for (size_t i = 1; i < args.size(); i++) {
         const std::wstring& a = args[i];
         if (a == L"--register") return RegisterAssociation(true) ? 0 : 1;
+        if (a == L"--register-preview" || a == L"--unregister-preview")  // Explorer's preview pane (plan 5.2)
+            return PreviewRegister(a == L"--register-preview") ? 0 : 1;
         if (a == L"--register-quiet") return RegisterAssociation(false) ? 0 : 1;  // the installer, without dialogs
         if (a == L"--unregister") { UnregisterAssociation(); return 0; }
         if (a.rfind(L"--id=", 0) == 0) wcsncpy_s(g.cfg.id, a.c_str() + 5, _TRUNCATE);

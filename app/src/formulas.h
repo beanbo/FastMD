@@ -1,6 +1,9 @@
 // Formulas and diagrams (plan 4.1, 4.2). Both are turned into SVG by small Rust libraries that live beside the exe:
 // fastmd-tex.dll (RaTeX, KaTeX-compatible) and fastmd-mermaid.dll. They are loaded the first time a document actually
 // contains a formula or a diagram - never on the start-up path - and the SVG is drawn by the renderer we already have.
+//
+// The file is deliberately not called math.h: a header of that name on an include path shadows the C <math.h> and
+// takes the standard library down with it, in error messages that point everywhere but here.
 #pragma once
 #include <string>
 #include <vector>

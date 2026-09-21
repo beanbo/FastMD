@@ -21,7 +21,7 @@ New-Item -ItemType Directory -Force $stage | Out-Null
 Get-ChildItem $stage -File | Remove-Item
 Copy-Item $exe $stage
 # loaded only when a document needs them: SVG pictures, TeX formulas, Mermaid diagrams
-foreach ($name in 'fastmd-svg.dll', 'fastmd-tex.dll', 'fastmd-mermaid.dll') {
+foreach ($name in 'fastmd-svg.dll', 'fastmd-tex.dll', 'fastmd-mermaid.dll', 'fastmd-preview.dll') {
     Copy-Item (Join-Path $PSScriptRoot "build\Release\$name") $stage
 }
 Copy-Item (Join-Path $PSScriptRoot '..\LICENSE') (Join-Path $stage 'LICENSE.txt')
@@ -55,5 +55,15 @@ Set-Content -Path (Join-Path $stage 'README.txt') -Value $readme -Encoding utf8
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
 $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
 Set-Content -Path "$zip.sha256" -Value "$hash  $(Split-Path $zip -Leaf)" -Encoding ascii
+# the installer goes into the release too, with its own hash: that is what the updater downloads and checks
+$setupSrc = Join-Path $PSScriptRoot 'build\Release\FastMD-Setup.exe'
+if (Test-Path $setupSrc) {
+    $setup = Join-Path $dist 'FastMD-Setup.exe'
+    Copy-Item $setupSrc $setup -Force
+    $setupHash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
+    Set-Content -Path "$setup.sha256" -Value "$setupHash  FastMD-Setup.exe" -Encoding ascii
+    Write-Host "packed $setup ($((Get-Item $setup).Length) bytes)"
+    Write-Host "sha256 $setupHash"
+}
 Write-Host "packed $zip ($((Get-Item $zip).Length) bytes)"
 Write-Host "sha256 $hash"

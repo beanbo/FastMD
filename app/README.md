@@ -122,7 +122,11 @@ FastMD.exe файл.md
 | `src/html.cpp` | разбор тегов и сущностей сырого HTML (мини-DOM живёт в `parse.cpp`) |
 | `src/net.cpp` | загрузка картинок из сети через WinHTTP и дисковый кэш |
 | `src/svg.cpp` | ленивая загрузка `fastmd-svg.dll` и вызовы к ней |
-| `src/math.cpp` | ленивая загрузка `fastmd-tex.dll` и `fastmd-mermaid.dll`: формулы и диаграммы → SVG |
+| `src/formulas.cpp` | ленивая загрузка `fastmd-tex.dll` и `fastmd-mermaid.dll`: формулы и диаграммы → SVG |
+| `src/update.cpp` | проверка обновлений раз в сутки, загрузка установщика и сверка его SHA-256 |
+| `src/crash.cpp` | minidump при сбое и предложение открыть папку при следующем запуске |
+| `preview/preview.cpp` | панель просмотра и эскизы в Проводнике: тот же движок в COM-DLL |
+| `setup/setup.cpp` | установщик: несёт программу в себе, ставит её для одного пользователя |
 | `rust/fastmd-tex` | набор формул (RaTeX), отдельная библиотека на Rust |
 | `rust/fastmd-mermaid` | диаграммы Mermaid, отдельная библиотека на Rust |
 | `src/svg_dll.cpp` | сама библиотека: lunasvg + plutovg, отдельный бинарник, чтобы exe оставался маленьким |

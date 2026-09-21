@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 # the one place the version lives: src/version.h (generated) feeds the exe resource and the settings window
-project(FastMD VERSION 0.2.0 LANGUAGES C CXX RC)
+project(FastMD VERSION 1.0.0 LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,11 +27,11 @@ endif()
 configure_file(src/version.h.in ${CMAKE_BINARY_DIR}/generated/version.h @ONLY)
 
 add_executable(FastMD WIN32
-    src/view.cpp src/window.cpp src/loader.cpp src/parse.cpp src/html.cpp src/net.cpp src/svg.cpp src/math.cpp
+    src/view.cpp src/window.cpp src/loader.cpp src/parse.cpp src/html.cpp src/net.cpp src/svg.cpp src/formulas.cpp
     src/layout.cpp src/canvas_gdi.cpp src/canvas_print.cpp src/print.cpp
     src/highlight.cpp src/theme.cpp src/util.cpp
     src/find.cpp src/toc.cpp src/home.cpp src/store.cpp src/shell.cpp src/settings_ui.cpp src/strings.cpp
-    src/copy.cpp src/drag.cpp src/crash.cpp
+    src/copy.cpp src/drag.cpp src/crash.cpp src/update.cpp src/uia.cpp
     third_party/md4c/md4c.c
     res/fastmd.rc)
 
@@ -48,12 +48,12 @@ target_link_options(FastMD PRIVATE
     /MANIFEST:EMBED /MANIFESTINPUT:${FASTMD_MANIFEST}
     /DELAYLOAD:dwrite.dll /DELAYLOAD:ole32.dll /DELAYLOAD:shell32.dll /DELAYLOAD:imm32.dll
     /DELAYLOAD:windowscodecs.dll /DELAYLOAD:comdlg32.dll /DELAYLOAD:winhttp.dll
-    /DELAYLOAD:winspool.drv
+    /DELAYLOAD:winspool.drv /DELAYLOAD:uiautomationcore.dll
     # /MANIFEST:EMBED with our own manifest: incremental linking would expect a separate .manifest file (Debug)
     /INCREMENTAL:NO
     $<$<CONFIG:Release>:/LTCG /OPT:REF /OPT:ICF> ${FASTMD_SEC_L})
 target_link_libraries(FastMD PRIVATE user32 gdi32 dwmapi dwrite ole32 shell32 imm32 windowscodecs comdlg32 advapi32
-    winhttp winspool delayimp)
+    winhttp winspool uiautomationcore delayimp)
 
 # ---------------------------------------------------------------------------------------------- fastmd-svg.dll
 # SVG (badges, diagrams) is drawn by lunasvg + plutovg. They live in a DLL, not in the exe: CreateProcess pays
@@ -110,6 +110,7 @@ if(FASTMD_SETUP)
     set(PAYLOAD_SVG ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/fastmd-svg.dll)
     set(PAYLOAD_TEX ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/fastmd-tex.dll)
     set(PAYLOAD_MERMAID ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/fastmd-mermaid.dll)
+    set(PAYLOAD_PREVIEW ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/fastmd-preview.dll)
     set(PAYLOAD_LICENSE ${CMAKE_SOURCE_DIR}/../LICENSE)
     set(PAYLOAD_MD4C ${CMAKE_SOURCE_DIR}/third_party/md4c/LICENSE.md)
     set(PAYLOAD_LUNASVG ${CMAKE_SOURCE_DIR}/third_party/lunasvg/LICENSE)
@@ -122,7 +123,7 @@ if(FASTMD_SETUP)
     configure_file(setup/setup_payload.rc.in ${SETUP_RC} @ONLY)
     # the resource script embeds files the other targets write, so it must be recompiled when they change
     set_source_files_properties(${SETUP_RC} PROPERTIES OBJECT_DEPENDS
-        "${PAYLOAD_EXE};${PAYLOAD_SVG};${PAYLOAD_TEX};${PAYLOAD_MERMAID}")
+        "${PAYLOAD_EXE};${PAYLOAD_SVG};${PAYLOAD_TEX};${PAYLOAD_MERMAID};${PAYLOAD_PREVIEW}")
     add_executable(FastMD_Setup WIN32 setup/setup.cpp ${SETUP_RC})
     set_target_properties(FastMD_Setup PROPERTIES OUTPUT_NAME "FastMD-Setup")
     target_include_directories(FastMD_Setup PRIVATE ${CMAKE_BINARY_DIR}/generated ${CMAKE_SOURCE_DIR}/setup)
@@ -134,7 +135,51 @@ if(FASTMD_SETUP)
         $<$<CONFIG:Release>:/OPT:REF /OPT:ICF> ${FASTMD_SEC_L})
     target_link_libraries(FastMD_Setup PRIVATE user32 shell32 shlwapi ole32 advapi32 comctl32)
     add_dependencies(FastMD_Setup FastMD fastmd_svg)
+    if(TARGET fastmd_preview)
+        add_dependencies(FastMD_Setup fastmd_preview)
+    endif()
     if(TARGET fastmd_rust)
         add_dependencies(FastMD_Setup fastmd_rust)
     endif()
+endif()
+
+# ---------------------------------------------------------------------------------------------- fuzz harness
+# Feeds mutated documents to the parser (plan 6.5). Built on request, usually with AddressSanitizer:
+#   pwsh -File tests/fuzz/run.ps1
+option(FASTMD_FUZZ "Build the fuzz harness" OFF)
+option(FASTMD_ASAN "Build it with AddressSanitizer" OFF)
+if(FASTMD_FUZZ)
+    add_executable(fastmd-fuzz tests/fuzz/fuzz.cpp src/parse.cpp src/html.cpp src/highlight.cpp src/util.cpp
+        src/theme.cpp third_party/md4c/md4c.c)
+    target_include_directories(fastmd-fuzz PRIVATE ${CMAKE_BINARY_DIR}/generated src)
+    target_compile_definitions(fastmd-fuzz PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        _CRT_SECURE_NO_WARNINGS MD4C_USE_UTF16 FASTMD_NO_APP)
+    target_compile_options(fastmd-fuzz PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus /EHsc /Zi
+        $<$<BOOL:${FASTMD_ASAN}>:/fsanitize=address>)
+    target_link_options(fastmd-fuzz PRIVATE /DEBUG /INCREMENTAL:NO)
+    target_link_libraries(fastmd-fuzz PRIVATE user32 advapi32 shlwapi)
+endif()
+
+# ------------------------------------------------------------------------------------------- fastmd-preview.dll
+# Explorer's preview pane on the same engine (plan 5.2). It is a COM in-proc server: the reader registers it per
+# user, Explorer loads it into prevhost.exe. Only the drawing half of the program is compiled in - no window, no
+# find bar, no outline, no settings, no threads, no network (preview/stubs.cpp stands in for all of that).
+option(FASTMD_PREVIEW "Build the Explorer preview handler" ON)
+if(FASTMD_PREVIEW)
+    add_library(fastmd_preview SHARED
+        preview/preview.cpp preview/stubs.cpp
+        src/view.cpp src/layout.cpp src/canvas_gdi.cpp src/parse.cpp src/html.cpp src/highlight.cpp src/theme.cpp
+        src/util.cpp src/strings.cpp src/svg.cpp src/formulas.cpp
+        third_party/md4c/md4c.c
+        preview/preview.def)
+    set_target_properties(fastmd_preview PROPERTIES OUTPUT_NAME "fastmd-preview")
+    target_include_directories(fastmd_preview PRIVATE ${CMAKE_BINARY_DIR}/generated ${CMAKE_SOURCE_DIR}/src)
+    target_compile_definitions(fastmd_preview PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        _CRT_SECURE_NO_WARNINGS MD4C_USE_UTF16 FASTMD_PREVIEW_DLL)
+    target_compile_options(fastmd_preview PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus /EHsc
+        $<$<CONFIG:Release>:/O2 /Oi /Gy /DNDEBUG> ${FASTMD_SEC_C})
+    target_link_options(fastmd_preview PRIVATE /INCREMENTAL:NO $<$<CONFIG:Release>:/OPT:REF /OPT:ICF> ${FASTMD_SEC_L})
+    target_link_libraries(fastmd_preview PRIVATE user32 gdi32 dwrite ole32 shell32 shlwapi windowscodecs advapi32
+        dwmapi)
+    set_source_files_properties(third_party/md4c/md4c.c PROPERTIES COMPILE_OPTIONS "/wd4244;/wd4267")
 endif()

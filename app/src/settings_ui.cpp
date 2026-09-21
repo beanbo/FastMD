@@ -13,8 +13,8 @@ const wchar_t kRepoUrl[] = L"https://github.com/beanbo/FastMD";
 const float kW = 680.f, kLabelX = 28.f, kCtlX = 236.f, kRowH = 48.f, kTop = 20.f, kCtlH = 32.f;
 const int kSizes[] = {14, 15, 16, 17, 18, 20};
 
-enum Row { ROW_THEME, ROW_FONT, ROW_SIZE, ROW_COLUMN, ROW_WRAP, ROW_SMOOTH, ROW_REMOTE, ROW_LANG, ROW_EDITOR,
-           ROW_ASSOC, ROW_COUNT };
+enum Row { ROW_THEME, ROW_FONT, ROW_SIZE, ROW_COLUMN, ROW_WRAP, ROW_SMOOTH, ROW_REMOTE, ROW_UPDATE, ROW_LANG,
+           ROW_EDITOR, ROW_ASSOC, ROW_COUNT };
 const int kLinkId = 9000;
 
 HWND g_wnd = nullptr;
@@ -44,7 +44,7 @@ std::vector<std::wstring> Options(int row) {
         return v;
     }
     case ROW_COLUMN: return {Tr(S_COL_NARROW), Tr(S_COL_NORMAL), Tr(S_COL_WIDE), Tr(S_COL_FULL)};
-    case ROW_WRAP: case ROW_SMOOTH: return {Tr(S_OFF), Tr(S_ON)};
+    case ROW_WRAP: case ROW_SMOOTH: case ROW_UPDATE: return {Tr(S_OFF), Tr(S_ON)};
     case ROW_REMOTE: return {Tr(S_REMOTE_ALWAYS), Tr(S_REMOTE_ASK), Tr(S_REMOTE_NEVER)};
     case ROW_LANG: return {Tr(S_LANG_SYSTEM), L"Русский", L"English"};
     default: return {};
@@ -62,14 +62,16 @@ int Selected(int row) {
     case ROW_WRAP: return g.cfg.wrapCode;
     case ROW_SMOOTH: return g.cfg.smoothScroll;
     case ROW_REMOTE: return g.cfg.remoteImages;
+    case ROW_UPDATE: return g.cfg.updateCheck;
     case ROW_LANG: return g.cfg.language;
     default: return -1;
     }
 }
 
 const wchar_t* Label(int row) {
-    static const StrId ids[ROW_COUNT] = {S_SET_THEME, S_SET_FONT,   S_SET_SIZE,   S_SET_COLUMN, S_SET_WRAP,
-                                         S_SET_SMOOTH, S_SET_REMOTE, S_SET_LANGUAGE, S_SET_EDITOR, S_SET_ASSOC};
+    static const StrId ids[ROW_COUNT] = {S_SET_THEME,  S_SET_FONT,   S_SET_SIZE,     S_SET_COLUMN, S_SET_WRAP,
+                                         S_SET_SMOOTH, S_SET_REMOTE, S_SET_UPDATE,   S_SET_LANGUAGE,
+                                         S_SET_EDITOR, S_SET_ASSOC};
     return Tr(ids[row]);
 }
 
@@ -226,6 +228,7 @@ void Pick(int id) {
         if (opt == 0) LoadRemoteImages();  // switched to "always": fetch what this document is still missing
         changed = SC_OTHER;
         break;
+    case ROW_UPDATE: g.cfg.updateCheck = opt == 1; changed = SC_OTHER; break;
     case ROW_LANG: g.cfg.language = (uint8_t)opt; changed = SC_LANGUAGE; break;
     case ROW_EDITOR: {
         for (const Hit& h : g_hits)

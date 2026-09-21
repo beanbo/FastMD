@@ -10,7 +10,7 @@
 #include "../third_party/md4c/md4c.h"
 #include "emoji_table.h"
 #include "html.h"
-#include "math.h"
+#include "formulas.h"
 #include <cwchar>
 #include <unordered_map>
 

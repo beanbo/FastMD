@@ -44,7 +44,7 @@ Q = {"SCROLLY": 1, "DOCH": 2, "TOC_OPEN": 3, "TOC_DOCKED": 4, "TOC_COUNT": 5, "T
      "HSCROLL_BLOCK": 8, "HSCROLL_X": 9, "FOCUS_LINK": 10, "MATCHES": 11, "CUR_MATCH": 12, "TEXT_LEFT": 13,
      "TEXT_W": 14, "RECENT_COUNT": 15, "FIND_EDIT": 16, "SETTINGS_HWND": 17, "FIND_OPEN": 18, "COLUMN": 19,
      "FONT_SIZE": 20, "WRAP": 21, "LANG": 22, "FIND_PART_X": 23, "BLOCK_Y": 24, "RESTORED": 25, "THEME_DARK": 26,
-     "TARGETY": 27, "SETTINGS_HIT": 28, "SITKA": 29, "SETTINGS_BTN": 30, "IMG_SCALED": 31, "FULL_REDRAW": 32, "SEL_ANCHOR": 33, "SEL_FOCUS": 34, "CARET": 35, "DRAG": 36, "MATH": 37}
+     "TARGETY": 27, "SETTINGS_HIT": 28, "SITKA": 29, "SETTINGS_BTN": 30, "IMG_SCALED": 31, "FULL_REDRAW": 32, "SEL_ANCHOR": 33, "SEL_FOCUS": 34, "CARET": 35, "DRAG": 36, "MATH": 37, "UPDATE": 38}
 FP_NEXT, FP_CASE = 7, 3  # FindPart
 
 u32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
@@ -1001,6 +1001,87 @@ def test_pdf():
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ 5.6 updates
+def test_update():
+    """the update check: one request, a newer version noticed, the installer downloaded and checked by its hash"""
+    import hashlib
+    import http.server
+    import socketserver
+    import threading
+    ok = True
+    payload = b"MZ" + b"fake installer, only here to be hashed" * 256  # over the updater's 4 KB floor
+    digest = hashlib.sha256(payload).hexdigest()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        hits = 0
+
+        def do_GET(self):
+            Handler.hits += 1
+            host = f"http://127.0.0.1:{self.server.server_address[1]}"
+            if self.path.endswith("/latest"):
+                body = ('{"tag_name": "v99.9.9", "name": "FastMD 99.9.9", "assets": ['
+                        '{"name": "FastMD-99.9.9-win-x64.zip", "browser_download_url": "' + host + '/FastMD.zip"},'
+                        '{"name": "FastMD-Setup.exe", "browser_download_url": "' + host + '/FastMD-Setup.exe"},'
+                        '{"name": "FastMD-Setup.exe.sha256", "browser_download_url": "' + host + '/FastMD-Setup.exe.sha256"}]}'
+                        ).encode()
+            elif self.path.endswith("Setup.exe"):
+                body = payload
+            elif self.path.endswith(".sha256"):
+                body = (digest + "  FastMD-Setup.exe\n").encode()
+            else:
+                body = b"{}"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    doc = OUT / "other.md"
+    ENV["FASTMD_UPDATE_URL"] = f"http://127.0.0.1:{port}/releases/latest"
+    try:
+        set_reg("UpdateSeenLo", 0)  # "checked today" is remembered in the profile: forget it
+        set_reg("UpdateSeenHi", 0)
+        proc, hwnd = launch(doc)
+        try:
+            for _ in range(40):
+                if q(hwnd, "UPDATE", 0):
+                    break
+                time.sleep(0.25)
+            ok &= check("5.6 a newer release is noticed", q(hwnd, "UPDATE", 0) == 1)
+            q(hwnd, "UPDATE", 1)  # download and verify, without running anything
+            for _ in range(40):
+                if q(hwnd, "UPDATE", 2):
+                    break
+                time.sleep(0.25)
+            ok &= check("5.6 the installer is downloaded and its hash matches", q(hwnd, "UPDATE", 2) == 1)
+            got = DATA / "update" / "FastMD-Setup.exe"
+            ok &= check("5.6 it lands in the profile, byte for byte",
+                        got.exists() and got.read_bytes() == payload, str(got))
+            ok &= check("5.6 one check, one installer, one hash", Handler.hits == 3, f"{Handler.hits}")
+        finally:
+            close_and_wait(proc, hwnd)
+        # switched off in the settings: no request at all
+        Handler.hits = 0
+        set_reg("UpdateCheck", 0)
+        set_reg("UpdateSeenLo", 0)
+        set_reg("UpdateSeenHi", 0)
+        proc, hwnd = launch(doc)
+        time.sleep(2.0)
+        ok &= check("5.6 switched off, nothing is asked", Handler.hits == 0 and q(hwnd, "UPDATE", 0) == 0)
+        close_and_wait(proc, hwnd)
+        set_reg("UpdateCheck", 1)
+    finally:
+        ENV.pop("FASTMD_UPDATE_URL", None)
+        srv.shutdown()
+    return ok
+
+
 # ------------------------------------------------------------------------------------------------ 4.1, 4.2 math
 MATH_DOC = r"""# Формулы
 
@@ -1181,7 +1262,7 @@ def test_settings(doc):
         click_setting(hwnd, sh, 2)      # theme: dark
         click_setting(hwnd, sh, 101)    # font: Sitka
         click_setting(hwnd, sh, 205)    # text size 20
-        click_setting(hwnd, sh, 702)    # English
+        click_setting(hwnd, sh, 802)    # English (row 8: theme, font, size, column, wrap, smooth, remote, update, language)
         shot(sh, "20-settings")
         shot(hwnd, "21-settings-applied")
         ok &= check("1.9 theme applies at once", q(hwnd, "THEME_DARK") == 1)
@@ -1196,7 +1277,7 @@ def test_settings(doc):
         ok &= check("1.9 settings persist", q(hwnd, "FONT_SIZE") == 20 and q(hwnd, "LANG") == 1 and q(hwnd, "SITKA") == 1)
         cmd(hwnd, "SETTINGS", 0.8)
         sh = q(hwnd, "SETTINGS_HWND")
-        for id_ in (0, 100, 202, 700):  # back to the defaults
+        for id_ in (0, 100, 202, 800):  # back to the defaults
             click_setting(hwnd, sh, id_)
         post(sh, WM_KEYDOWN, 0x1B, 0, 0.3)
     finally:
@@ -1270,7 +1351,7 @@ def main():
     ok = True
     for t in (lambda: test_basics(doc), lambda: test_hscroll(doc), test_outline, lambda: test_positions(doc), test_find,
               test_start_screen, lambda: test_links(doc), test_footnotes, test_html, test_remote_images, test_svg,
-              test_languages, lambda: test_clipboard(doc), test_key_selection, test_pdf, lambda: test_drag(doc), test_math, test_scroll_frames,
+              test_languages, lambda: test_clipboard(doc), test_key_selection, test_pdf, lambda: test_drag(doc), test_math, test_update, test_scroll_frames,
               lambda: test_image_scaling(doc),
               lambda: test_columns(doc),
               lambda: test_settings(doc),

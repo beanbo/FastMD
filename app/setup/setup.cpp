@@ -185,7 +185,10 @@ int Install() {
         RegSetValueExW(k, L"EstimatedSize", 0, REG_DWORD, (const BYTE*)&size, sizeof(size));
         RegCloseKey(k);
     }
-    if (associate) RunAndWait(exe, L"--register-quiet", true);  // .md handler in HKCU, no dialog
+    if (associate) {
+        RunAndWait(exe, L"--register-quiet", true);     // .md handler in HKCU, no dialog
+        RunAndWait(exe, L"--register-preview", true);   // and the preview pane in Explorer
+    }
     if (!g_silent) {
         Say(L"FastMD", (L"FastMD " FASTMD_VERSION_WSTR L" установлен.\n\n" + dir +
                         L"\n\nЯрлык добавлен в меню «Пуск». Удалить можно в «Параметры → Приложения».")
@@ -238,6 +241,7 @@ int Uninstall() {
                              RRF_RT_REG_SZ, nullptr, cmd, &n) == ERROR_SUCCESS &&
                 StrStrIW(cmd, dir.c_str()) != nullptr;
     if (ours && GetFileAttributesW(exe.c_str()) != INVALID_FILE_ATTRIBUTES) RunAndWait(exe, L"--unregister", true);
+    if (GetFileAttributesW(exe.c_str()) != INVALID_FILE_ATTRIBUTES) RunAndWait(exe, L"--unregister-preview", true);
     DeleteFileW(ShortcutPath().c_str());
     RegDeleteKeyW(HKEY_CURRENT_USER, kUninstallKey);
     DeleteDirRecursive(dir);                                   // the whole install folder, setup exe included

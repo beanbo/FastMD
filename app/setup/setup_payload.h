@@ -12,6 +12,7 @@ static const PayloadItem kPayload[] = {
     {102, L"fastmd-svg.dll"},
     {103, L"fastmd-tex.dll"},
     {104, L"fastmd-mermaid.dll"},
+    {112, L"fastmd-preview.dll"},
     {105, L"LICENSE.txt"},
     {106, L"THIRD-PARTY-md4c.txt"},
     {107, L"THIRD-PARTY-lunasvg.txt"},

@@ -25,7 +25,7 @@ try {
     Write-Host "running copy renamed to $(Split-Path $old -Leaf); open windows keep working, new ones start the new build"
 }
 # The libraries beside the exe are loaded only when a document needs them: SVG pictures, formulas, diagrams.
-foreach ($name in 'fastmd-svg.dll', 'fastmd-tex.dll', 'fastmd-mermaid.dll') {
+foreach ($name in 'fastmd-svg.dll', 'fastmd-tex.dll', 'fastmd-mermaid.dll', 'fastmd-preview.dll') {
     $dll = Join-Path $PSScriptRoot "build\Release\$name"
     if (-not (Test-Path $dll)) { continue }
     $dllDst = Join-Path $dstDir $name

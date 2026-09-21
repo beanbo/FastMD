@@ -1,0 +1,7 @@
+; What a COM in-proc server has to export. Nothing else leaves the DLL.
+LIBRARY fastmd-preview
+EXPORTS
+    DllGetClassObject   PRIVATE
+    DllCanUnloadNow     PRIVATE
+    DllRegisterServer   PRIVATE
+    DllUnregisterServer PRIVATE

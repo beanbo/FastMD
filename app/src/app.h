@@ -24,6 +24,7 @@ enum : UINT {
     WM_APP_POSITIONS,              // positions.bin read after the first frame (lParam = std::vector<PosEntry>*)
     WM_APP_FINDINPUT,              // find input box → UI thread: wParam = FI_*, lParam = event data
     WM_APP_SCALED,                 // images re-scaled to display size (wParam = docGen, lParam = std::vector<ScaledImage>*)
+    WM_APP_UPDATE,                 // update check: wParam 0 = newer version found, 1 = installer ready, 2 = failed
     WM_APP_QUERY = WM_APP + 64,    // automation / UI tests: wParam = Query → LRESULT (read-only state)
 };
 enum : UINT_PTR { TIMER_TOAST = 1, TIMER_RELOAD = 2, TIMER_AUTOSCROLL = 3, TIMER_HBAR = 4 };
@@ -36,7 +37,7 @@ enum Cmd : UINT {
     CMD_TOC, CMD_COL_NARROW, CMD_COL_NORMAL, CMD_COL_WIDE, CMD_COL_FULL, CMD_COL_NARROWER, CMD_COL_WIDER,
     CMD_WRAP, CMD_SETTINGS, CMD_LINK_OPEN, CMD_IMG_COPY, CMD_IMG_OPEN,
     CMD_FIND_CASE, CMD_FIND_WORD, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_FIND_CLOSE, CMD_LINK_NEXT, CMD_LINK_PREV,
-    CMD_LOAD_REMOTE, CMD_COPY_MD, CMD_PRINT, CMD_EXPORT_PDF,
+    CMD_LOAD_REMOTE, CMD_COPY_MD, CMD_PRINT, CMD_EXPORT_PDF, CMD_UPDATE,
 };
 
 // WM_APP_QUERY ids (tests): pixel values are client pixels
@@ -53,6 +54,7 @@ enum Query : UINT {
     Q_CARET /* MAKELONG(x, y) of the caret in client pixels, or -1 when no caret is drawn */,
     Q_DRAG /* formats a drag would carry: lp = kind * 65536 + arg → DragFormat bits */,
     Q_MATH /* formulas and diagrams: lp = 0 all, 1 drawn, 2 failed */,
+    Q_UPDATE /* lp = 0 newer version found, 1 start a test download, 2 installer downloaded and checked */,
 };
 
 // what can be dragged out of the window, and the formats it is offered in (drag.cpp)
@@ -79,6 +81,7 @@ struct Config {
     bool smoothScroll = true;
     uint8_t language = LANG_AUTO;
     uint8_t remoteImages = 0;   // pictures from the network: 0 = always (as on GitHub), 1 = ask, 2 = never
+    bool updateCheck = true;    // once a day, ask GitHub whether a newer release exists (plan 5.6)
     std::wstring editor;        // exe for Ctrl+E; "" = the system "edit" verb
     bool findCase = false, findWord = false;
 };
@@ -271,6 +274,13 @@ bool KeySelect(unsigned vk, bool ctrl, bool shift);  // Shift+arrows / Home / En
 bool CaretPoint(uint32_t pos, float* x, float* y, float* h);  // caret in client DIP
 bool HasSelection();
 bool PosInSelection(uint32_t pos);
+// text ranges over the document, shared by the keyboard, the clipboard and the screen-reader provider (uia.cpp)
+bool WordRange(uint32_t pos, uint32_t* from, uint32_t* to);
+bool LineRange(uint32_t pos, uint32_t* from, uint32_t* to);
+bool ParagraphRange(uint32_t pos, uint32_t* from, uint32_t* to);
+uint32_t TextStep(uint32_t pos, int dir);
+void RangeScreenRects(uint32_t from, uint32_t to, std::vector<double>& out);
+int HeadingLevelAt(uint32_t pos);
 std::wstring SelectionText();
 std::wstring BlockPlainText(uint32_t i);
 int HeadingBlockBySlug(const std::wstring& slug);
@@ -364,6 +374,7 @@ void ResolveRestore();               // re-aim a pending position restore after 
 // ------------------------------------------------------------------------------------------------ store.cpp
 const wchar_t* RegKeyPath();         // HKCU\Software\FastMD (FASTMD_REGKEY overrides: tests)
 std::wstring DataDir();              // %LOCALAPPDATA%\FastMD\ (FASTMD_DATA overrides: tests), with trailing backslash
+std::string Sha256Hex(const uint8_t* data, size_t n);  // what the updater checks a download against
 void LoadConfig(Config& c, std::wstring* findQuery);  // everything but the window placement
 void SaveConfig(const Config& c, const std::wstring& findQuery);
 bool RegReadBinary(const wchar_t* name, void* data, DWORD size);
@@ -390,6 +401,23 @@ void ShowInFolder();
 void OpenDialog();
 std::wstring PickExeDialog(HWND owner);
 std::wstring SavePdfDialog();        // where to write the exported PDF ("" = cancelled)
+
+// ------------------------------------------------------------------------------------------------ update.cpp
+void UpdateCheckAsync();             // after the first frame: at most one request a day
+bool UpdateAvailable();
+std::wstring UpdateVersion();
+void UpdateInstall();                // ask, download, check the hash, run the installer
+void OnUpdateMessage(WPARAM what);
+void UpdateFetchForTest();           // automation: download + verify, without running anything
+bool UpdateFetched();
+uint64_t LastUpdateCheck();          // store.cpp
+void SetLastUpdateCheck(uint64_t t);
+
+// ------------------------------------------------------------------------------------------------ uia.cpp
+LRESULT UiaHandleGetObject(WPARAM wp, LPARAM lp);  // WM_GETOBJECT: hand a screen reader the document
+void UiaDocumentChanged();                         // another document was opened
+void UiaSelectionChanged();                        // the selection moved
+void UiaShutdown();                                // on close
 
 // ------------------------------------------------------------------------------------------------ crash.cpp
 void CrashHandlerInstall();          // wWinMain: minidumps into %LOCALAPPDATA%\FastMD\crashes
