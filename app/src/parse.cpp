@@ -698,7 +698,10 @@ struct Builder {
                     continue;
                 }
             }
-            size_t j = i;
+            // A '<' that is not the start of a tag (an unfinished one at the end of the block, say) is text like any
+            // other character - and stepping over it is what keeps this loop moving. Found by fuzzing: without the
+            // step, "<p align=center>\n<i>text<" spun forever.
+            size_t j = i + (h[i] == L'<' ? 1 : 0);
             while (j < h.size() && h[j] != L'<') j++;
             std::wstring txt;
             AppendHtmlText(txt, h.data() + i, j - i);

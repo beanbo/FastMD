@@ -36,18 +36,35 @@ $readme = @"
 FastMD $ver - lightning-fast Markdown reader for Windows
 https://github.com/beanbo/FastMD
 
-Run FastMD.exe: no installation, no admin rights. To open .md files with a double click,
-right-click inside the window -> "Open .md files with FastMD..." and confirm in Settings -> Default apps.
-Keys: Ctrl+F find, Ctrl+Shift+O outline, Ctrl+, settings, Ctrl+E open in editor, Ctrl+Alt+Left/Right column width.
+Run FastMD.exe: no installation, no admin rights. FastMD-Setup.exe from the same release installs it per user,
+adds a Start menu shortcut, the .md association and the Explorer preview pane; it uninstalls from Settings -> Apps.
+To associate .md without the installer: right-click inside the window -> "Open .md files with FastMD..." and
+confirm in Settings -> Default apps.
+
+Keys: Ctrl+F find, Ctrl+Shift+O outline, Ctrl+P print, Ctrl+Shift+P export to PDF, Ctrl+C / Ctrl+Shift+C copy as
+text or as Markdown, Shift+arrows select, Ctrl+, settings, Ctrl+E open in editor, Ctrl+Alt+Left/Right column width.
+
+The files beside the exe are loaded only when a document needs them: fastmd-svg.dll for SVG, fastmd-tex.dll for
+formulas, fastmd-mermaid.dll for diagrams, fastmd-preview.dll for the Explorer preview pane and thumbnails.
+
 The exe is not code-signed yet: Windows SmartScreen may warn on the first run (More info -> Run anyway).
 License: GNU GPL v3.0 (LICENSE.txt). Source code: https://github.com/beanbo/FastMD/tree/v$ver
 md4c (Markdown parser): MIT (THIRD-PARTY-md4c.txt). Formulas: RaTeX, MIT, with KaTeX fonts under the
 SIL Open Font License. Diagrams: mermaid-rs-renderer, MIT. Pictures: lunasvg and plutovg, MIT.
 
 FastMD $ver - молниеносный просмотрщик Markdown для Windows
-Запустите FastMD.exe: установка и права администратора не нужны. Чтобы .md открывались двойным кликом,
-щёлкните правой кнопкой в окне -> «Открывать .md в FastMD…» и подтвердите выбор в «Параметрах».
-Клавиши: Ctrl+F поиск, Ctrl+Shift+O оглавление, Ctrl+, настройки, Ctrl+E открыть в редакторе, Ctrl+Alt+←/→ ширина колонки.
+Запустите FastMD.exe: установка и права администратора не нужны. FastMD-Setup.exe из этого же выпуска ставит
+программу для одного пользователя: ярлык в «Пуске», ассоциация .md и панель просмотра в Проводнике; удаляется
+через «Параметры -> Приложения». Ассоциировать .md без установщика: правый клик в окне -> «Открывать .md в
+FastMD…» и подтвердить выбор в «Параметрах».
+
+Клавиши: Ctrl+F поиск, Ctrl+Shift+O оглавление, Ctrl+P печать, Ctrl+Shift+P экспорт в PDF, Ctrl+C / Ctrl+Shift+C
+копировать текстом или как Markdown, Shift+стрелки выделение, Ctrl+, настройки, Ctrl+E редактор,
+Ctrl+Alt+←/→ ширина колонки.
+
+Библиотеки рядом с exe подгружаются только когда нужны: fastmd-svg.dll для SVG, fastmd-tex.dll для формул,
+fastmd-mermaid.dll для диаграмм, fastmd-preview.dll для панели просмотра и эскизов в Проводнике.
+
 Exe пока не подписан: при первом запуске SmartScreen может предупредить («Подробнее» -> «Выполнить в любом случае»).
 Лицензия: GNU GPL v3.0 (LICENSE.txt). Исходный код: https://github.com/beanbo/FastMD/tree/v$ver
 "@

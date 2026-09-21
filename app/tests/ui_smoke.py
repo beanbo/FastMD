@@ -1001,6 +1001,29 @@ def test_pdf():
     return ok
 
 
+# --------------------------------------------------------------------------------------- 6.5 what fuzzing found
+def test_broken_html():
+    """a document that used to spin the parser forever still opens (the fuzz finding of 21.09.2026)"""
+    ok = True
+    doc = OUT / "broken-html.md"
+    # an HTML block whose last tag never ends: the walker used to sit on that '<' and never move on
+    doc.write_text('<p align="center">\n ; <i>красиво<\n\nОбычный текст после него.\n', encoding="utf-8")
+    try:
+        proc, hwnd = launch(doc)
+    except RuntimeError:
+        return check("6.5 a document with an unfinished tag opens at all", False, "no window: the parser hung")
+    try:
+        ok &= check("6.5 a document with an unfinished tag opens at all", title_of(hwnd).startswith("broken-html.md"),
+                    title_of(hwnd))
+        cmd(hwnd, "SELECT_ALL", 0.3)
+        cmd(hwnd, "COPY", 0.4)
+        ok &= check("6.5 and the text after it is still there", "Обычный текст после него." in clipboard(),
+                    repr(clipboard()[:60]))
+    finally:
+        close_and_wait(proc, hwnd)
+    return ok
+
+
 # ------------------------------------------------------------------------------------------------ 5.6 updates
 def test_update():
     """the update check: one request, a newer version noticed, the installer downloaded and checked by its hash"""
@@ -1351,7 +1374,7 @@ def main():
     ok = True
     for t in (lambda: test_basics(doc), lambda: test_hscroll(doc), test_outline, lambda: test_positions(doc), test_find,
               test_start_screen, lambda: test_links(doc), test_footnotes, test_html, test_remote_images, test_svg,
-              test_languages, lambda: test_clipboard(doc), test_key_selection, test_pdf, lambda: test_drag(doc), test_math, test_update, test_scroll_frames,
+              test_languages, lambda: test_clipboard(doc), test_key_selection, test_pdf, lambda: test_drag(doc), test_math, test_update, test_broken_html, test_scroll_frames,
               lambda: test_image_scaling(doc),
               lambda: test_columns(doc),
               lambda: test_settings(doc),

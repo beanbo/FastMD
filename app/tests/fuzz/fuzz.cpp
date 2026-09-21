@@ -103,19 +103,25 @@ std::wstring Mutate(std::mt19937& rng, const std::wstring& src) {
     return s;
 }
 
+bool g_trace = false;  // --file: say which stage is running, so a hang can be placed
+
 // one round: the Markdown model, then the HTML tag reader over the same bytes
 void ParseOnce(const std::wstring& text) {
+    if (g_trace) { wprintf(L"  markdown...\n"); fflush(stdout); }
     Doc d;
     d.baseDir = L"C:\\fuzz\\";
     ParseMarkdown(d, text.data(), text.size());
+    if (g_trace) { wprintf(L"  tags...\n"); fflush(stdout); }
     // the tag reader is normally fed by md4c; here it is fed the raw text, which is harsher
     for (size_t i = 0; i + 1 < text.size(); i++) {
         if (text[i] != L'<') continue;
         HtmlTag tag;
         ParseHtmlTag(text.data() + i, text.size() - i, tag);
     }
+    if (g_trace) { wprintf(L"  entities...\n"); fflush(stdout); }
     std::wstring out;
     AppendHtmlText(out, text.data(), text.size());
+    if (g_trace) { wprintf(L"  done\n"); fflush(stdout); }
 }
 }  // namespace
 
@@ -131,6 +137,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--corpus" && i + 1 < argc) corpus = argv[++i];
     }
     if (!single.empty()) {
+        g_trace = true;
         char narrow[MAX_PATH * 2];
         WideCharToMultiByte(CP_UTF8, 0, single.c_str(), -1, narrow, (int)std::size(narrow), nullptr, nullptr);
         ParseOnce(ReadUtf8File(narrow));
