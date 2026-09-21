@@ -147,7 +147,6 @@ pub fn run(nodes: &[SNode], edges: &[SEdge], cfg: &Cfg) -> SOut {
         paths[i] = Vec::new();
     }
     let pos: Vec<(f32, f32)> = (0..n).map(|v| (g.x[v], g.y[v])).collect();
-    spread_parallel_edges(edges, &mut paths, &pos);
     SOut { pos, paths, label_at, width, height }
 }
 
@@ -528,39 +527,6 @@ fn shift_layer(
                     break;
                 }
             }
-        }
-    }
-}
-
-/// Two edges between the same pair of nodes would be drawn one on top of the other; bow them apart.
-fn spread_parallel_edges(edges: &[SEdge], paths: &mut [Vec<(f32, f32)>], pos: &[(f32, f32)]) {
-    let mut groups: std::collections::HashMap<(usize, usize), Vec<usize>> = std::collections::HashMap::new();
-    for (i, e) in edges.iter().enumerate() {
-        if e.from == e.to || paths[i].len() != 2 {
-            continue;
-        }
-        groups.entry((e.from.min(e.to), e.from.max(e.to))).or_default().push(i);
-    }
-    for (_, group) in groups {
-        if group.len() < 2 {
-            continue;
-        }
-        let n = group.len() as f32;
-        for (k, &i) in group.iter().enumerate() {
-            let offset = (k as f32 - (n - 1.0) / 2.0) * 20.0;
-            if offset.abs() < 0.01 {
-                continue;
-            }
-            let (x0, y0) = pos[edges[i].from];
-            let (x1, y1) = pos[edges[i].to];
-            let (dx, dy) = (x1 - x0, y1 - y0);
-            let len = (dx * dx + dy * dy).sqrt().max(1.0);
-            let (nx, ny) = (-dy / len, dx / len);
-            paths[i] = vec![
-                (x0, y0),
-                ((x0 + x1) / 2.0 + nx * offset, (y0 + y1) / 2.0 + ny * offset),
-                (x1, y1),
-            ];
         }
     }
 }

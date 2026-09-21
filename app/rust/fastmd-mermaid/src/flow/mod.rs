@@ -508,6 +508,35 @@ impl Model<'_> {
             pts[last] = end;
             self.edges[i].points = pts;
         }
+        self.spread_overlapping();
+    }
+
+    /// Two edges left lying exactly on top of each other - the same pair of nodes, joined by a straight line - are
+    /// bowed apart so both can be seen. Anything that already bends somewhere is left alone.
+    fn spread_overlapping(&mut self) {
+        let mut groups: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        for (i, e) in self.edges.iter().enumerate() {
+            if e.points.len() == 2 {
+                groups.entry((e.from.min(e.to), e.from.max(e.to))).or_default().push(i);
+            }
+        }
+        for (_, group) in groups {
+            if group.len() < 2 {
+                continue;
+            }
+            let n = group.len() as f32;
+            for (k, &i) in group.iter().enumerate() {
+                let offset = (k as f32 - (n - 1.0) / 2.0) * 20.0;
+                if offset.abs() < 0.01 {
+                    continue;
+                }
+                let (a, b) = (self.edges[i].points[0], self.edges[i].points[1]);
+                let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                let len = (dx * dx + dy * dy).sqrt().max(1.0);
+                let mid = ((a.0 + b.0) / 2.0 - dy / len * offset, (a.1 + b.1) / 2.0 + dx / len * offset);
+                self.edges[i].points.insert(1, mid);
+            }
+        }
     }
 
     /// Where a line leaves a box on its way out. Straight out of the middle would be right for the box but wrong for
@@ -527,15 +556,31 @@ impl Model<'_> {
         };
         let aligned = (if horizontal { nx } else { ny }).clamp(lo, hi);
         let at = |v: f32| if horizontal { (v, plain.1) } else { (plain.0, v) };
-        // Straight at the node is the first choice; if that line would run over the neighbours, slide along the side
-        // of the box until it does not.
+        // Straight out at the node is the first choice. If that line would run over the node's neighbours, slide
+        // along the side of the box - but only as far as it takes, so the edge does not set off for a far corner.
         let mut best = (usize::MAX, 0.0f32, at(aligned));
-        for k in 0..=8 {
-            let v = if k == 0 { aligned } else { lo + (hi - lo) * (k - 1) as f32 / 7.0 };
+        let try_at = |v: f32, best: &mut (usize, f32, (f32, f32))| {
+            let v = v.clamp(lo, hi);
             let score = (self.crossed_siblings(node, at(v)), (v - aligned).abs());
             if score.0 < best.0 || (score.0 == best.0 && score.1 < best.1) {
-                best = (score.0, score.1, at(v));
+                *best = (score.0, score.1, at(v));
             }
+        };
+        try_at(aligned, &mut best);
+        // When it has to move, move towards where the edge is going: stepping the other way makes it set off
+        // backwards before turning round.
+        let onward = if horizontal { towards.0 } else { towards.1 };
+        let sign = if onward >= aligned { 1.0f32 } else { -1.0 };
+        for step in [30.0f32, 60.0, 110.0, 180.0, 300.0, 600.0] {
+            if best.0 == 0 {
+                break;
+            }
+            try_at(aligned + step * sign, &mut best);
+            try_at(aligned - step * sign, &mut best);
+        }
+        if best.0 > 0 {
+            try_at(lo, &mut best);
+            try_at(hi, &mut best);
         }
         best.2
     }

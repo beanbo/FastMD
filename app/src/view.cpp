@@ -25,11 +25,13 @@ static float TextMaxFor(uint8_t preset) {
 void UpdateColumns() {
     float avail = std::max(160.f, DocW() - 2 * Metrics::kPadX);
     float tmax = TextMaxFor(g.cfg.column);
+    g.availW = avail;
     g.textW = std::min(avail, tmax);
     g.wideW = g.cfg.column == COL_FULL ? avail : std::min(avail, tmax + Metrics::kBreakout);
 }
 float TextLeft() { return DocLeft() + std::floor((DocW() - g.textW) * 0.5f); }
 float WideLeft() { return DocLeft() + std::floor((DocW() - g.wideW) * 0.5f); }
+float AvailLeft() { return DocLeft() + std::floor((DocW() - g.availW) * 0.5f); }
 static bool IsWide(const Block& b) {
     return b.indent == 0 && (b.kind == BK_CODE || b.kind == BK_TABLE || b.kind == BK_IMAGE);
 }
@@ -49,8 +51,11 @@ void BlockBox(uint32_t i, float* x, float* w) {
         else if (b.align == 2) *x = tl + std::max(0.f, g.textW - *w);
         return;
     }
-    *w = std::min(nat, g.wideW);
-    *x = std::max(WideLeft(), std::floor(tl - (*w - g.textW) * 0.5f));
+    // A diagram gets the whole width between the margins, not just the breakout other wide blocks may use: it is
+    // drawn at its own size, and every pixel of window saved is a pixel of it the reader does not have to scroll to.
+    bool full = b.kind == BK_IMAGE && b.aux < g.doc.images.size() && ImageScrollsWide(g.doc.images[b.aux]);
+    *w = std::min(nat, full ? g.availW : g.wideW);
+    *x = std::max(full ? AvailLeft() : WideLeft(), std::floor(tl - (*w - g.textW) * 0.5f));
 }
 
 // ------------------------------------------------------------------------------------------------ geometry

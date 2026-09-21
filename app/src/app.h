@@ -139,6 +139,7 @@ struct App {
     std::vector<uint8_t> known;    // height is exact (measured / computed)
     float docH = 0, scrollY = 0, targetY = 0;
     float textW = 0, wideW = 0;    // layout widths (DIP) the cache was built for
+    float availW = 0;              // everything between the page margins: what a diagram may use
     uint32_t cachedCount = 0;
     std::unordered_map<uint32_t, IDWriteTextLayout*> numLayouts;
     std::vector<float> hx;         // per block: horizontal scroll of a wide code block / table / diagram (DIP)
@@ -238,6 +239,7 @@ float TextLeft();
 float WideLeft();
 void UpdateColumns();                // textW / wideW for the current window width and column preset
 float LayoutWidthFor(const Block& b, float textW, float wideW);
+float AvailLeft();   // left edge of everything between the page margins
 void BlockBox(uint32_t i, float* x, float* w);  // drawn box of a block (DIP, document x)
 uint32_t FirstVisible(float y);
 uint32_t BlockOfPos(uint32_t pos);   // last block whose textOff <= pos
