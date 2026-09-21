@@ -261,6 +261,8 @@ void Command(UINT id) {
     switch (id) {
     case CMD_COPY: CopySelection(); break;
     case CMD_COPY_MD: CopySelectionMarkdown(); break;
+    case CMD_PRINT: PrintDocument(); break;
+    case CMD_EXPORT_PDF: ExportPdf(); break;
     case CMD_SELECT_ALL: SelectAll(); Invalidate(); break;
     case CMD_OPEN: OpenDialog(); break;
     case CMD_RELOAD: ReloadDocument(); ShowToast(Tr(S_RELOADED), 700); break;
@@ -351,6 +353,8 @@ static void ContextMenu(int sx, int sy, bool keyboard) {
     AppendMenuW(m, MF_STRING | hasDoc, CMD_RELOAD, Tr(S_MENU_RELOAD));
     AppendMenuW(m, MF_STRING | hasDoc, CMD_EDIT, Tr(S_MENU_EDIT));
     AppendMenuW(m, MF_STRING | hasDoc, CMD_FOLDER, Tr(S_MENU_FOLDER));
+    AppendMenuW(m, MF_STRING | hasDoc, CMD_PRINT, Tr(S_MENU_PRINT));
+    AppendMenuW(m, MF_STRING | hasDoc, CMD_EXPORT_PDF, Tr(S_MENU_PDF));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(theme, MF_STRING | (g.cfg.theme == TM_SYSTEM ? MF_CHECKED : 0), CMD_THEME_SYSTEM, Tr(S_THEME_SYSTEM));
     AppendMenuW(theme, MF_STRING | (g.cfg.theme == TM_LIGHT ? MF_CHECKED : 0), CMD_THEME_LIGHT, Tr(S_THEME_LIGHT));
@@ -515,6 +519,19 @@ static const wchar_t* FindTip(int part) {
 
 static void OnMouseMove(int mx, int my) {
     float x = mx / Scale(), y = my / Scale();
+    if (g.dragKind >= 0 && GetKeyState(VK_LBUTTON) < 0) {  // the press under the mouse starts moving: drag it out
+        int dx = std::abs(mx - g.downX), dy = std::abs(my - g.downY);
+        if (dx > GetSystemMetrics(SM_CXDRAG) || dy > GetSystemMetrics(SM_CYDRAG)) {
+            int kind = g.dragKind, arg = g.dragArg;
+            g.dragKind = -1;
+            g.selecting = false;
+            g.downOnLink = false;
+            ReleaseCapture();
+            KillTimer(g.hwnd, TIMER_AUTOSCROLL);
+            StartDrag(kind, arg);
+            return;
+        }
+    }
     if (g.draggingThumb) {
         float th;
         ThumbTop(&th);
@@ -597,6 +614,7 @@ static void OnLButtonDown(int mx, int my, WPARAM keys) {
     float x = mx / Scale(), y = my / Scale();
     g.downX = mx;
     g.downY = my;
+    g.dragKind = -1;  // set below if this press could drag something out of the window
     int fpart = FindPartAt(x, y);
     if (fpart != FP_NONE) { FindClick(fpart); return; }
     int item;
@@ -665,14 +683,22 @@ static void OnLButtonDown(int mx, int my, WPARAM keys) {
     if (!HitTestDoc(x, y, &pos, nullptr)) return;
     g.caretOn = false;  // the mouse takes the selection over: no caret until the keyboard asks for one again
     g.caretWantX = -1.f;
+    // What this press could drag out of the window if it starts moving (plan 3.5): a link, a picture, or the
+    // selection it landed inside. Until it moves, nothing happens - and inside a selection the selection stays,
+    // because a click that does not move collapses it only on the way up.
+    g.dragPos = pos;
+    int img = ImageAt(x, y);
+    if (g.clickCount == 1 && g.downOnLink) { g.dragKind = DRAG_LINK; g.dragArg = LinkAt(x, y); }
+    else if (img >= 0) { g.dragKind = DRAG_IMAGE; g.dragArg = img; }
     if (g.clickCount == 2) SelectWordAt(pos);
     else if (g.clickCount == 3) SelectBlockAt(pos);
-    else {
+    else if (g.dragKind == -1 && !(keys & MK_SHIFT) && PosInSelection(pos)) {
+        g.dragKind = DRAG_TEXT;
+    } else {
         if (!(keys & MK_SHIFT)) g.selAnchor = pos;
         g.selFocus = pos;
         g.selecting = !g.downOnLink || (keys & MK_SHIFT);
     }
-    if (g.clickCount == 1 && g.downOnLink) g.selecting = true;  // a drag from a link selects; a click opens it
     Invalidate();
 }
 
@@ -683,6 +709,8 @@ static void OnLButtonUp(int mx, int my) {
     if (g.dragHBlock >= 0) { g.dragHBlock = -1; Invalidate(); return; }
     g.selecting = false;
     int dx = mx - g.downX, dy = my - g.downY;
+    if (g.dragKind == DRAG_TEXT) g.selAnchor = g.selFocus = g.dragPos;  // a press inside a selection that never
+    g.dragKind = -1;                                                    // moved was a click after all
     if (g.downOnLink && dx * dx + dy * dy < 16 && g.clickCount == 1) {
         int li = LinkAt(mx / Scale(), my / Scale());
         g.selAnchor = g.selFocus;  // a click is not a selection
@@ -745,6 +773,7 @@ bool KeyCommand(WPARAM vk, bool ctrl, bool shift, bool alt) {
         case 'O': Command(shift ? CMD_TOC : CMD_OPEN); return true;
         case 'E': OpenInEditor(); return true;
         case 'R': Command(CMD_RELOAD); return true;
+        case 'P': Command(shift ? CMD_EXPORT_PDF : CMD_PRINT); return true;
         case 'W': PostMessageW(g.hwnd, WM_CLOSE, 0, 0); return true;
         case VK_OEM_PLUS: case VK_ADD: ZoomStep(1); return true;
         case VK_OEM_MINUS: case VK_SUBTRACT: ZoomStep(-1); return true;
@@ -862,6 +891,11 @@ static LRESULT Query(WPARAM q, LPARAM lp) {
         return 1;
     case Q_SEL_ANCHOR: return g.selAnchor;
     case Q_SEL_FOCUS: return g.selFocus;
+    case Q_DRAG: {  // 0xFFFF as the picture's block means "the one on screen", as the image menu items do
+        int kind = (int)(lp >> 16), arg = (int)(lp & 0xFFFF);
+        if (kind == DRAG_IMAGE && arg == 0xFFFF) arg = g.ctxImage >= 0 ? g.ctxImage : FirstVisibleImage();
+        return (LRESULT)DragFormats(kind, arg);
+    }
     case Q_CARET: {
         float cx, cy, ch;
         if (!g.caretOn || !CaretPoint(g.selFocus, &cx, &cy, &ch)) return -1;

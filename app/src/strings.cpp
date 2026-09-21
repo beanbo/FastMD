@@ -35,6 +35,8 @@ const Pair kStr[] = {
     {L"Копировать адрес ссылки", L"Copy link address"},
     {L"Копировать картинку", L"Copy image"},
     {L"Открыть файл картинки", L"Open image file"},
+    {L"Печать…	Ctrl+P", L"Print…	Ctrl+P"},
+    {L"Экспорт в PDF…", L"Export to PDF…"},
     // toasts / messages
     {L"Скопировано", L"Copied"},
     {L"Скопировано как Markdown", L"Copied as Markdown"},
@@ -54,6 +56,11 @@ const Pair kStr[] = {
     {L"Не удалось открыть файл", L"Could not open the file"},
     {L"Строки в коде переносятся", L"Code lines wrap"},
     {L"Строки в коде не переносятся", L"Code lines scroll"},
+    {L"Отправлено на печать", L"Sent to the printer"},
+    {L"Не удалось напечатать", L"Could not print"},
+    {L"PDF сохранён", L"PDF saved"},
+    {L"Не найден принтер «Microsoft Print to PDF»", L"The Microsoft Print to PDF printer was not found"},
+    {L"%d из %d", L"%d of %d"},
     // find bar
     {L"Найти в документе", L"Find in document"},
     {L"нет совпадений", L"no results"},
@@ -104,6 +111,7 @@ const Pair kStr[] = {
     {L"Markdown (*.md; *.markdown; *.mdx; *.txt)", L"Markdown (*.md; *.markdown; *.mdx; *.txt)"},
     {L"Все файлы", L"All files"},
     {L"Программы (*.exe)", L"Programs (*.exe)"},
+    {L"Документ PDF (*.pdf)", L"PDF document (*.pdf)"},
     {L"Markdown-документ", L"Markdown document"},
     {L"Мгновенный просмотр Markdown", L"Instant Markdown reader"},
 };

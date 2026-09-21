@@ -6,18 +6,6 @@
 #include <cmath>
 
 namespace {
-struct ColorEffect final : IUnknown {  // drawing effect = palette index + baseline shift (<sup> / <sub>)
-    uint8_t pal = 0;
-    int8_t shift = 0;
-    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
-        if (riid == __uuidof(IUnknown)) { *ppv = this; return S_OK; }
-        *ppv = nullptr;
-        return E_NOINTERFACE;
-    }
-    ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
-    ULONG STDMETHODCALLTYPE Release() override { return 1; }
-};
-
 inline uint32_t Blend(uint32_t dst, uint32_t src, float a) {
     if (a >= 0.999f) return src;
     int ia = (int)(a * 256.f + 0.5f);
@@ -26,7 +14,7 @@ inline uint32_t Blend(uint32_t dst, uint32_t src, float a) {
     return rb | g;
 }
 
-struct GdiCanvas final : Canvas, IDWriteTextRenderer {
+struct GdiCanvas final : RendererCanvas {
     IDWriteFactory3* f;
     IDWriteGdiInterop* interop = nullptr;
     IDWriteBitmapRenderTarget* brt = nullptr;
@@ -420,4 +408,4 @@ struct GdiCanvas final : Canvas, IDWriteTextRenderer {
 
 Canvas* CreateGdiCanvas(IDWriteFactory3* f, int w, int h, float pixelsPerDip) { return new GdiCanvas(f, w, h, pixelsPerDip); }
 
-Canvas* CanvasOfRenderer(IDWriteTextRenderer* r) { return static_cast<GdiCanvas*>(r); }
+Canvas* CanvasOfRenderer(IDWriteTextRenderer* r) { return static_cast<RendererCanvas*>(r); }

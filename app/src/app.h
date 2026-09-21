@@ -36,7 +36,7 @@ enum Cmd : UINT {
     CMD_TOC, CMD_COL_NARROW, CMD_COL_NORMAL, CMD_COL_WIDE, CMD_COL_FULL, CMD_COL_NARROWER, CMD_COL_WIDER,
     CMD_WRAP, CMD_SETTINGS, CMD_LINK_OPEN, CMD_IMG_COPY, CMD_IMG_OPEN,
     CMD_FIND_CASE, CMD_FIND_WORD, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_FIND_CLOSE, CMD_LINK_NEXT, CMD_LINK_PREV,
-    CMD_LOAD_REMOTE, CMD_COPY_MD,
+    CMD_LOAD_REMOTE, CMD_COPY_MD, CMD_PRINT, CMD_EXPORT_PDF,
 };
 
 // WM_APP_QUERY ids (tests): pixel values are client pixels
@@ -51,7 +51,12 @@ enum Query : UINT {
     Q_FULL_REDRAW /* forget the last frame and repaint everything (tests compare it with a scrolled frame) */,
     Q_SEL_ANCHOR, Q_SEL_FOCUS /* the two ends of the selection, in text offsets */,
     Q_CARET /* MAKELONG(x, y) of the caret in client pixels, or -1 when no caret is drawn */,
+    Q_DRAG /* formats a drag would carry: lp = kind * 65536 + arg → DragFormat bits */,
 };
+
+// what can be dragged out of the window, and the formats it is offered in (drag.cpp)
+enum DragKind : int { DRAG_TEXT = 0, DRAG_LINK = 1, DRAG_IMAGE = 2 };
+enum DragFormat : uint32_t { DF_TEXT = 1, DF_HTML = 2, DF_RTF = 4, DF_URL = 8, DF_DIB = 16, DF_FILE = 32 };
 
 enum ColumnPreset : uint8_t { COL_NARROW = 0, COL_NORMAL, COL_WIDE, COL_FULL };
 enum LangSetting : uint8_t { LANG_AUTO = 0, LANG_RU, LANG_EN };
@@ -196,6 +201,8 @@ struct App {
 
     // ---- mouse / overlays
     bool draggingThumb = false, hotScroll = false, downOnLink = false;
+    int dragKind = -1, dragArg = 0;  // what the press under the mouse could start dragging (DragKind, -1 = nothing)
+    uint32_t dragPos = 0;            // text position of that press: where the selection collapses if it never moved
     float dragGrab = 0;
     int downX = 0, downY = 0;
     int hoverLink = -1;             // link index under the mouse
@@ -262,6 +269,7 @@ void SelectBlockAt(uint32_t pos);
 bool KeySelect(unsigned vk, bool ctrl, bool shift);  // Shift+arrows / Home / End: move the caret, extend the selection
 bool CaretPoint(uint32_t pos, float* x, float* y, float* h);  // caret in client DIP
 bool HasSelection();
+bool PosInSelection(uint32_t pos);
 std::wstring SelectionText();
 std::wstring BlockPlainText(uint32_t i);
 int HeadingBlockBySlug(const std::wstring& slug);
@@ -271,6 +279,8 @@ void ToggleDetails(uint32_t block);             // fold the block's <details> op
 bool BlockHidden(const Block& b);               // inside a folded <details>
 std::wstring SlugOfBlock(uint32_t block);       // "" if the block is not a heading
 void ScrollToBlock(uint32_t i, bool animate);
+void DrawDocumentPage(float docTop, float docBottom);   // one printed page, drawn on the print canvas
+float BlockSplitY(uint32_t i, float limit);             // where a page may end inside a tall block
 void RevealTextPos(uint32_t pos, bool center);  // scroll (and h-scroll a wide block) so a text position is visible
 bool LinkRange(int li, uint32_t* start, uint32_t* end);  // text range of a link (first run … last run)
 void FocusLinkStep(int dir);         // Tab / Shift+Tab
@@ -369,13 +379,24 @@ void OpenLink(int linkIndex);
 void CopyToClipboard(const std::wstring& text);
 // copy.cpp: the selection with its formatting (CF_HTML + RTF + text), and as the Markdown source it came from
 void CopySelectionRich();
+void SelectionRichFormats(std::wstring& text, std::string& cfHtml, std::string& rtf);  // clipboard and drag
 std::wstring SelectionMarkdown();
 bool CopyImageToClipboard(uint32_t imageBlock);
+HGLOBAL ImageAsDib(uint32_t imageBlock);  // the picture as a 32-bit DIB (clipboard and drag)
 void OpenImageFile(uint32_t imageBlock);
 void OpenInEditor();
 void ShowInFolder();
 void OpenDialog();
 std::wstring PickExeDialog(HWND owner);
+std::wstring SavePdfDialog();        // where to write the exported PDF ("" = cancelled)
+
+// ------------------------------------------------------------------------------------------------ drag.cpp
+void StartDrag(int kind, int arg);   // runs the shell's drag loop with the selection / link / picture
+uint32_t DragFormats(int kind, int arg);  // which formats that drag would carry (automation)
+
+// ------------------------------------------------------------------------------------------------ print.cpp
+void PrintDocument();                // Ctrl+P: the system print dialog, then the job
+void ExportPdf();                    // the same job through "Microsoft Print to PDF" into a chosen file
 bool RegisterAssociation(bool openSettings);
 void UnregisterAssociation();
 std::wstring UrlDecode(const std::wstring& s);

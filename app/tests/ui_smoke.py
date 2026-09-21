@@ -39,12 +39,12 @@ CMD = {"COPY": 100, "SELECT_ALL": 101, "OPEN": 102, "RELOAD": 103, "EDIT": 104, 
        "COL_NARROW": 118, "COL_NORMAL": 119, "COL_WIDE": 120, "COL_FULL": 121, "COL_NARROWER": 122, "COL_WIDER": 123,
        "WRAP": 124, "SETTINGS": 125, "LINK_OPEN": 126, "IMG_COPY": 127, "IMG_OPEN": 128, "FIND_CASE": 129,
        "FIND_WORD": 130, "FIND_NEXT": 131, "FIND_PREV": 132, "FIND_CLOSE": 133, "LINK_NEXT": 134, "LINK_PREV": 135,
-       "LOAD_REMOTE": 136, "COPY_MD": 137}
+       "LOAD_REMOTE": 136, "COPY_MD": 137, "PRINT": 138, "EXPORT_PDF": 139}
 Q = {"SCROLLY": 1, "DOCH": 2, "TOC_OPEN": 3, "TOC_DOCKED": 4, "TOC_COUNT": 5, "TOC_CURRENT": 6, "TOC_ITEM_Y": 7,
      "HSCROLL_BLOCK": 8, "HSCROLL_X": 9, "FOCUS_LINK": 10, "MATCHES": 11, "CUR_MATCH": 12, "TEXT_LEFT": 13,
      "TEXT_W": 14, "RECENT_COUNT": 15, "FIND_EDIT": 16, "SETTINGS_HWND": 17, "FIND_OPEN": 18, "COLUMN": 19,
      "FONT_SIZE": 20, "WRAP": 21, "LANG": 22, "FIND_PART_X": 23, "BLOCK_Y": 24, "RESTORED": 25, "THEME_DARK": 26,
-     "TARGETY": 27, "SETTINGS_HIT": 28, "SITKA": 29, "SETTINGS_BTN": 30, "IMG_SCALED": 31, "FULL_REDRAW": 32, "SEL_ANCHOR": 33, "SEL_FOCUS": 34, "CARET": 35}
+     "TARGETY": 27, "SETTINGS_HIT": 28, "SITKA": 29, "SETTINGS_BTN": 30, "IMG_SCALED": 31, "FULL_REDRAW": 32, "SEL_ANCHOR": 33, "SEL_FOCUS": 34, "CARET": 35, "DRAG": 36}
 FP_NEXT, FP_CASE = 7, 3  # FindPart
 
 u32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
@@ -950,6 +950,80 @@ def test_key_selection():
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ 3.4 print / PDF
+def test_pdf():
+    """exporting to PDF goes through the printer driver: several pages, with real text on them"""
+    ok = True
+    doc = OUT / "print.md"
+    body = "".join(f"Абзац {i}: печать раскладывает документ заново под ширину бумаги и режет его по блокам.\n\n"
+                   for i in range(1, 61))
+    doc.write_text("# Печатный документ\n\n" + body + "| Колонка | Значение |\n|---|---|\n| Строка | Да |\n\n"
+                   "```python\nprint('на бумаге тоже код')\n```\n\n![Схема](img/diagram0.png)\n\n"
+                   "Конец документа.\n", encoding="utf-8")
+    out = OUT / "print.pdf"
+    out.unlink(missing_ok=True)
+    ENV["FASTMD_PDF_OUT"] = str(out)
+    try:
+        proc, hwnd = launch(doc)
+        try:
+            wheel(hwnd, 500, 400, -3, wait=0.6)
+            before = q(hwnd, "TEXT_W"), q(hwnd, "SCROLLY")
+            cmd(hwnd, "EXPORT_PDF", 0.5)
+            for _ in range(60):  # the spooler writes the file after the job ends
+                if out.exists() and out.stat().st_size > 1000:
+                    break
+                time.sleep(0.5)
+            time.sleep(0.5)
+            ok &= check("3.4 the window gets its own layout back", (q(hwnd, "TEXT_W"), q(hwnd, "SCROLLY")) == before,
+                        f'{before} → {(q(hwnd, "TEXT_W"), q(hwnd, "SCROLLY"))}')
+        finally:
+            close_and_wait(proc, hwnd)
+    finally:
+        ENV.pop("FASTMD_PDF_OUT", None)
+    ok &= check("3.4 the PDF is written", out.exists() and out.stat().st_size > 1000,
+                f"{out.stat().st_size if out.exists() else 'missing'}")
+    if not out.exists():
+        return False
+    from pypdf import PdfReader
+    r = PdfReader(str(out))
+    pages = [p.extract_text() or "" for p in r.pages]
+    ok &= check("3.4 it runs to several pages", len(pages) >= 2, f"{len(pages)}")
+    ok &= check("3.4 the text is text, not a picture of one",
+                "Печатный документ" in pages[0] and "Абзац 1:" in pages[0], repr(pages[0][:60]))
+    ok &= check("3.4 the document ends on the last page", "Конец документа." in pages[-1], repr(pages[-1][-60:]))
+    ok &= check("3.4 every page is signed with the file name and its number",
+                all("print.md" in p for p in pages) and f"2 из {len(pages)}" in pages[1],
+                repr(pages[1][:40]))
+    ok &= check("3.4 the table and the code came through",
+                any("Колонка" in p and "Значение" in p for p in pages) and any("на бумаге тоже код" in p for p in pages))
+    ok &= check("3.4 the picture is on the page too",
+                any("/XObject" in str(p["/Resources"]) for p in r.pages))
+    return ok
+
+
+# ------------------------------------------------------------------------------------------------ 3.5 drag out
+DF_TEXT, DF_HTML, DF_RTF, DF_URL, DF_DIB, DF_FILE = 1, 2, 4, 8, 16, 32
+
+
+def test_drag(doc):
+    """what a drag out of the window would carry: the shell runs the drag itself, the formats are ours"""
+    ok = True
+    proc, hwnd = launch(doc)
+    try:
+        ok &= check("3.5 nothing is dragged out of an empty selection", q(hwnd, "DRAG", 0) == 0)
+        cmd(hwnd, "SELECT_ALL", 0.4)
+        ok &= check("3.5 the selection goes out as text, HTML and RTF",
+                    q(hwnd, "DRAG", 0) == DF_TEXT | DF_HTML | DF_RTF, f'{q(hwnd, "DRAG", 0)}')
+        ok &= check("3.5 a link goes out as its address", q(hwnd, "DRAG", 1 << 16) == DF_TEXT | DF_URL,
+                    f'{q(hwnd, "DRAG", 1 << 16)}')
+        post(hwnd, WM_KEYDOWN, 0x23, 0, 0.8)  # End: the picture at the bottom of the document
+        ok &= check("3.5 a picture goes out as a bitmap and as the file it came from",
+                    q(hwnd, "DRAG", (2 << 16) | 0xFFFF) == DF_DIB | DF_FILE, f'{q(hwnd, "DRAG", (2 << 16) | 0xFFFF)}')
+    finally:
+        close_and_wait(proc, hwnd)
+    return ok
+
+
 # ------------------------------------------------------------------------------------------------ partial frames
 def same_pixels(a, b):
     return ImageChops.difference(a.convert("RGB"), b.convert("RGB")).getbbox() is None
@@ -1145,7 +1219,7 @@ def main():
     ok = True
     for t in (lambda: test_basics(doc), lambda: test_hscroll(doc), test_outline, lambda: test_positions(doc), test_find,
               test_start_screen, lambda: test_links(doc), test_footnotes, test_html, test_remote_images, test_svg,
-              test_languages, lambda: test_clipboard(doc), test_key_selection, test_scroll_frames,
+              test_languages, lambda: test_clipboard(doc), test_key_selection, test_pdf, lambda: test_drag(doc), test_scroll_frames,
               lambda: test_image_scaling(doc),
               lambda: test_columns(doc),
               lambda: test_settings(doc),

@@ -27,15 +27,14 @@ static Image* DecodedImage(uint32_t bi, Image** entry) {
     return ok ? &im : nullptr;
 }
 
-// CF_DIB (opaque, composited over white: every app can paste it) + "PNG" with the original file bytes when the image
-// is a PNG (Office, browsers and editors paste that one with its transparency)
-bool CopyImageToClipboard(uint32_t bi) {
+// 32-bit DIB of a picture block, composed over white: what both the clipboard and a drag hand out
+HGLOBAL ImageAsDib(uint32_t bi) {
     Image* entry = nullptr;
     Image* im = DecodedImage(bi, &entry);
-    if (!im) return false;
+    if (!im) return nullptr;
     size_t w = (size_t)im->pxW, h = (size_t)im->pxH;  // the decoded buffer, not the header size
     HGLOBAL dib = GlobalAlloc(GMEM_MOVEABLE, sizeof(BITMAPINFOHEADER) + w * h * 4);
-    if (!dib) return false;
+    if (!dib) return nullptr;
     auto* bih = (BITMAPINFOHEADER*)GlobalLock(dib);
     *bih = BITMAPINFOHEADER{sizeof(BITMAPINFOHEADER), (LONG)w, (LONG)h, 1, 32, BI_RGB, (DWORD)(w * h * 4), 0, 0, 0, 0};
     uint32_t* dst = (uint32_t*)(bih + 1);
@@ -49,6 +48,16 @@ bool CopyImageToClipboard(uint32_t bi) {
         }
     }
     GlobalUnlock(dib);
+    return dib;
+}
+
+// CF_DIB (opaque, composited over white: every app can paste it) + "PNG" with the original file bytes when the image
+// is a PNG (Office, browsers and editors paste that one with its transparency)
+bool CopyImageToClipboard(uint32_t bi) {
+    HGLOBAL dib = ImageAsDib(bi);
+    if (!dib) return false;
+    Image* entry = nullptr;
+    if (!DecodedImage(bi, &entry) || !entry) { GlobalFree(dib); return false; }
     HGLOBAL png = nullptr;
     if (EndsWithI(entry->path, L".png")) {
         HANDLE f = CreateFileW(entry->path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -216,6 +225,30 @@ void OpenDialog() {
     of.lpstrInitialDir = dir.empty() ? nullptr : dir.c_str();
     of.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
     if (GetOpenFileNameW(&of)) OpenDocument(file, true, 0, true);
+}
+
+// where to write the exported PDF: beside the document, named after it
+std::wstring SavePdfDialog() {
+    wchar_t preset[MAX_PATH * 4];
+    if (GetEnvironmentVariableW(L"FASTMD_PDF_OUT", preset, (DWORD)std::size(preset)))
+        return preset;  // UI tests (and scripts) say where the file goes instead of answering a dialog
+    std::wstring name = FileNameOf(g.path);
+    size_t dot = name.find_last_of(L'.');
+    if (dot != std::wstring::npos) name.resize(dot);
+    name += L".pdf";
+    wchar_t file[MAX_PATH * 4] = L"";
+    wcsncpy_s(file, name.c_str(), _TRUNCATE);
+    std::wstring dir = DirOf(g.path);
+    std::wstring filter = Filter({Tr(S_FILTER_PDF), L"*.pdf", Tr(S_FILTER_ALL), L"*.*"});
+    OPENFILENAMEW of{sizeof(of)};
+    of.hwndOwner = g.hwnd;
+    of.lpstrFilter = filter.c_str();
+    of.lpstrFile = file;
+    of.nMaxFile = (DWORD)std::size(file);
+    of.lpstrDefExt = L"pdf";
+    of.lpstrInitialDir = dir.empty() ? nullptr : dir.c_str();
+    of.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOREADONLYRETURN;
+    return GetSaveFileNameW(&of) ? std::wstring(file) : std::wstring();
 }
 
 std::wstring PickExeDialog(HWND owner) {

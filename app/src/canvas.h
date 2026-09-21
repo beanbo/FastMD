@@ -31,6 +31,26 @@ struct Canvas {
     float scale = 1.f;  // pixels per DIP (DPI / 96 × zoom)
 };
 
+// A canvas that is its own DirectWrite renderer. Both back-ends are one, and an inline object inside a layout is
+// handed the renderer, so this is how it finds the canvas again.
+struct RendererCanvas : Canvas, IDWriteTextRenderer {};
+
+// drawing effect for IDWriteTextLayout::SetDrawingEffect; both canvases own an array of them and read them back
+struct ColorEffect final : IUnknown {
+    uint8_t pal = 0;
+    int8_t shift = 0;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+        if (riid == __uuidof(IUnknown)) { *ppv = this; return S_OK; }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+};
+
 Canvas* CreateGdiCanvas(IDWriteFactory3* f, int w, int h, float pixelsPerDip);
+// Printer canvas: the page is drawn straight onto the printer's DC, text as text (print.cpp). w / h are the page in
+// device pixels; the caller owns the DC.
+Canvas* CreatePrintCanvas(IDWriteFactory3* f, HDC printerDC, int w, int h, float pixelsPerDip);
 // the canvas behind the renderer DirectWrite hands to an inline object (the canvas is the renderer)
 Canvas* CanvasOfRenderer(IDWriteTextRenderer* renderer);

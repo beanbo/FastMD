@@ -279,6 +279,7 @@ static void DrawHScrollBar(uint32_t i) {
 static uint32_t SelMin() { return std::min(g.selAnchor, g.selFocus); }
 static uint32_t SelMax() { return std::max(g.selAnchor, g.selFocus); }
 bool HasSelection() { return g.selAnchor != g.selFocus; }
+bool PosInSelection(uint32_t pos) { return HasSelection() && pos >= SelMin() && pos < SelMax(); }
 
 // hit-test rectangles of [s, e) inside a layout that starts at text offset textOff
 static void RangeRects(IDWriteTextLayout* tl, uint32_t textOff, uint32_t s, uint32_t e, std::vector<DWRITE_HIT_TEST_METRICS>& out) {
@@ -681,6 +682,63 @@ static void DrawDocumentBand(float top, float bottom) {
             if (cb > top && ct < bottom) g.canvas->FillRect(cx, ct, cx + w, cb, P_TEXT);
         }
     }
+}
+
+// One page of the printed document (print.cpp): the same blocks, moved so that docTop lands at the top of the page.
+// The canvas is the printer's and the caller has clipped the page area.
+void DrawDocumentPage(float docTop, float docBottom) {
+    size_t n = g.doc.blocks.size();
+    float saved = g.scrollY;
+    g.scrollY = docTop;
+    for (uint32_t i = FirstVisible(docTop); i < n; i++) {
+        if (g.Y[i] >= docBottom) break;
+        if (BlockHidden(g.doc.blocks[i])) continue;
+        DrawBlock(i, g.Y[i] - docTop);
+    }
+    float tl = TextLeft();
+    for (const QuoteSpan& q : g.doc.quotes) {
+        if (q.first == UINT32_MAX) continue;
+        float t = g.Y[q.first] - docTop, b = g.Y[q.last] + g.H[q.last] - docTop;
+        if (b < 0 || t > docBottom - docTop) continue;
+        uint8_t pal = q.alert ? (uint8_t)(P_ALERT_NOTE + q.alert - 1) : P_BORDER;
+        g.canvas->FillRect(tl + q.x, t, tl + q.x + Metrics::kQuoteBar, b, pal);
+    }
+    g.scrollY = saved;
+}
+
+// Where a page may end inside a block taller than the page: after the last line of text (or the last table row) that
+// still fits in `limit`. 0 = nowhere, the caller cuts at the page edge.
+float BlockSplitY(uint32_t i, float limit) {
+    if (i >= g.doc.blocks.size() || limit <= 0) return 0.f;
+    const Block& b = g.doc.blocks[i];
+    BlockLayout* L = EnsureLayout(i);
+    if (!L) return 0.f;
+    if ((b.kind == BK_TEXT || b.kind == BK_CODE) && L->text) {
+        float pad = b.kind == BK_CODE ? Metrics::kCodePad : 0.f;
+        UINT32 n = 0;
+        L->text->GetLineMetrics(nullptr, 0, &n);
+        if (!n) return 0.f;
+        std::vector<DWRITE_LINE_METRICS> lm(n);
+        if (FAILED(L->text->GetLineMetrics(lm.data(), n, &n))) return 0.f;
+        float y = pad, best = 0;
+        for (UINT32 k = 0; k + 1 < n; k++) {  // never leave the last line alone on the next page
+            if (y + lm[k].height > limit) break;
+            y += lm[k].height;
+            best = y;
+        }
+        return best > 0 && best < g.H[i] ? best : 0.f;
+    }
+    if (b.kind == BK_TABLE && L->table) {
+        const Table& t = g.doc.tables[b.aux];
+        float y = 0, best = 0;
+        for (uint32_t r = 0; r + 1 < t.rows; r++) {
+            if (y + L->table->rowH[r] > limit) break;
+            y += L->table->rowH[r];
+            best = y;
+        }
+        return best > 0 && best < g.H[i] ? best : 0.f;
+    }
+    return 0.f;
 }
 
 // a rectangle of the document redrawn from scratch (background included), for a strip that scrolled into view or a

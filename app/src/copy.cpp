@@ -201,12 +201,16 @@ std::wstring SelectionMarkdown() {
     return out;
 }
 
-// text + CF_HTML + RTF in one go
-void CopySelectionRich() {
+// The three formats of a selection: plain text, CF_HTML (with its header of byte offsets) and RTF. The clipboard and
+// a drag out of the window both hand over exactly these.
+void SelectionRichFormats(std::wstring& text, std::string& cfHtml, std::string& rtf) {
+    text.clear();
+    cfHtml.clear();
+    rtf.clear();
     if (!HasSelection()) return;
-    std::wstring text = SelectionText();
+    text = SelectionText();
     if (text.empty()) return;
-    std::string html, rtf;
+    std::string html;
     BuildRich(html, rtf);
     std::string head = "Version:0.9\r\nStartHTML:0000000000\r\nEndHTML:0000000000\r\n"
                        "StartFragment:0000000000\r\nEndFragment:0000000000\r\n";
@@ -225,8 +229,15 @@ void CopySelectionRich() {
     put("EndHTML:", endHtml);
     put("StartFragment:", startFrag);
     put("EndFragment:", endFrag);
-    std::string cfHtml = head + open + html + close;
+    cfHtml = head + open + html + close;
+}
 
+// text + CF_HTML + RTF in one go
+void CopySelectionRich() {
+    std::wstring text;
+    std::string cfHtml, rtf;
+    SelectionRichFormats(text, cfHtml, rtf);
+    if (text.empty()) return;
     if (!OpenClipboard(g.hwnd)) return;
     EmptyClipboard();
     auto set = [](UINT fmt, const void* data, size_t bytes) {
