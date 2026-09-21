@@ -59,6 +59,7 @@ struct Image {
     int canon = -1;             // index of the first image with the same path (holds the pixels)
     std::vector<uint32_t> px;   // decoded premultiplied BGRA (canonical entry only), filled by the image thread
     std::vector<uint8_t> svg;   // the SVG source, kept so the picture can be redrawn crisply at any size
+    std::wstring alt;           // alt text, shown in the placeholder of a picture that stands on its own line
     int pxW = 0, pxH = 0;       // size of px as decoded (a GIF frame can be smaller than its header's screen)
     std::atomic<int> state{0};  // 0 = not requested, 1 = loading, 2 = ready, 3 = failed
     // the same picture at its display size: drawn as a row copy, and scaled with a real filter instead of the

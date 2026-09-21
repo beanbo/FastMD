@@ -136,6 +136,7 @@ struct Builder {
     int paraImages = 0;
     bool paraOther = false;
     int paraImage = -1;
+    std::wstring imgAlt;  // alt text of the picture being read (kept out of the document text)
     // pending list marker (attached to the next leaf)
     uint8_t pendMarker = MK_NONE, pendLevel = 0;
     uint32_t pendNumber = 0;
@@ -251,12 +252,15 @@ struct Builder {
             d.text.resize(tEnd);
         }
         if (leafKind == BK_TEXT && !leafHeading && paraImages == 1 && !paraOther && paraImage >= 0) {
-            // paragraph that is just an image → image block (alt text kept for the placeholder)
+            // paragraph that is just a picture → picture block, with the alt text for its placeholder
             d.runs.resize(rStart);
+            d.text.resize(tStart);
+            const std::wstring& alt = d.images[paraImage].alt;
+            d.text += alt;
             Block& b = Emit(BK_IMAGE, 0, 16);
             b.aux = (uint32_t)paraImage;
             b.textOff = tStart;
-            b.textLen = tEnd - tStart;
+            b.textLen = (uint32_t)alt.size();
             return;
         }
         if (TryAlert(tEnd) && tEnd == tStart) {  // alert whose content starts in the next paragraph
@@ -311,6 +315,11 @@ struct Builder {
     void AppendText(const MD_CHAR* s, MD_SIZE n, bool isEntity) {
         EnsureLeaf();
         if (!collecting && !inCell) return;
+        if (img) {  // alt text belongs to the picture, not to the line it stands in
+            if (isEntity) AppendEntity(imgAlt, s, n);
+            else imgAlt.append(s, n);
+            return;
+        }
         uint32_t start = (uint32_t)d.text.size();
         bool raw = code || (leafKind == BK_CODE && collecting);  // code keeps :colons: and every character as typed
         if (isEntity) AppendEntity(d.text, s, n);
@@ -881,6 +890,15 @@ struct Builder {
             paraImage = AddImage(std::wstring(im->src.text, im->src.size), 0, 0);
             paraImages++;
             img++;
+            imgAlt.clear();
+            // a picture inside the line (badges: [![alt](badge)](link)); a paragraph holding nothing else still
+            // becomes a picture block, and then this run is dropped
+            if (collecting || inCell) {
+                uint32_t start = (uint32_t)d.text.size();
+                d.text.push_back(L'\xFFFC');
+                uint16_t fl = (uint16_t)(F_IMAGE | (link ? F_LINK : 0));
+                d.runs.push_back(Run{start, 1, fl, P_DEFAULT, 0, link ? curLink : 0, (uint32_t)paraImage});
+            }
             break;
         }
         default: break;
@@ -896,7 +914,11 @@ struct Builder {
         case MD_SPAN_DEL: strike--; break;
         case MD_SPAN_LATEXMATH: case MD_SPAN_LATEXMATH_DISPLAY: code--; break;
         case MD_SPAN_A: link--; break;
-        case MD_SPAN_IMG: img--; break;
+        case MD_SPAN_IMG:
+            img--;
+            if (paraImage >= 0 && (size_t)paraImage < d.images.size()) d.images[paraImage].alt = imgAlt;
+            imgAlt.clear();
+            break;
         default: break;
         }
         return 0;
