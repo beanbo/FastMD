@@ -1,156 +1,160 @@
-# FastMD — мгновенный просмотр Markdown для Windows
+# FastMD — instant Markdown viewing for Windows
 
-**~66 мс** от запуска до отрисованного документа (medium.md, 53 КБ). Это быстрее пустого Win32-окна без оптимизаций (≈79–87 мс в тех же условиях; в прогоне релиза 0.2.0 — 66 против 81 мс).
-Для сравнения: Void открывает окно за 1,4 с, VS Code за 1,1 с, Typora за 1,7 с (подробности в [../REPORT.md](../REPORT.md)).
+English · [Русский](README.ru.md)
 
-Стек: **C++20, Win32, DirectWrite, md4c**.
-- Первый кадр рисуется на CPU (DirectWrite → GDI DIB), без GPU-устройства.
-- Сначала верстается только первый экран.
-- Всё остальное после первого кадра делается в фоновых потоках.
-- Один маленький exe (≈0,7 МБ), статический CRT, никаких рантаймов.
+**~66 ms** from launch to a rendered document (medium.md, 53 KB). That is faster than an empty, untuned Win32 window: in the 1.0.0 control run — 66.7 ms against 80.1 ms; in the run after the Mermaid work (21.09.2026) — 76–79 ms against the baseline's 95–102 ms. The absolute number depends on what the machine is busy with that day, which is why runs are always interleaved and it is the gap that carries the meaning.
+For comparison: Void opens its window in 1.4 s, VS Code in 1.1 s, Typora in 1.7 s (the details are in [../REPORT.md](../REPORT.md)).
 
-## Сборка
+The stack: **C++20, Win32, DirectWrite, md4c**.
+- The first frame is drawn on the CPU (DirectWrite → GDI DIB), with no GPU device.
+- Only the first screen is laid out at first.
+- Everything else is done on background threads after the first frame.
+- One small exe (≈0.7 MB), static CRT, no runtimes.
 
-Нужна Visual Studio 2022 или новее (любая редакция или Build Tools) с workload «Desktop development with C++»: MSVC, Windows SDK, CMake и Ninja входят в неё. `tools/msvc.cmd` находит установку через vswhere.
+## Building
+
+You need Visual Studio 2022 or newer (any edition, or the Build Tools) with the "Desktop development with C++" workload: MSVC, the Windows SDK, CMake and Ninja all come with it. `tools/msvc.cmd` finds the installation through vswhere.
 
 ```
-pwsh -File app/build.ps1            # dev-сборка → app/build/Release/FastMD.exe (тесты, замеры)
+pwsh -File app/build.ps1            # dev build → app/build/Release/FastMD.exe (tests, measurements)
 pwsh -File app/build.ps1 -Config Debug
-pwsh -File app/publish.ps1          # обновить рабочую копию app/out/Release/FastMD.exe (на неё указывает ассоциация .md)
+pwsh -File app/publish.ps1          # refresh the working copy app/out/Release/FastMD.exe (the .md association points at it)
 ```
 
-Версия задаётся в одном месте — `project(FastMD VERSION …)` в `CMakeLists.txt`. Из неё генерируется `version.h` для ресурса exe и окна настроек.
+The version is set in one place — `project(FastMD VERSION …)` in `CMakeLists.txt`. From it `version.h` is generated for the exe resource and the settings window.
 
-## Использование
+## Usage
 
 ```
-FastMD.exe файл.md
+FastMD.exe file.md
 ```
 
-- **Без файла** открывается стартовый экран с последними документами. Печатайте, чтобы найти нужный по названию, Enter открывает.
-- **Ассоциация с `.md`.** Выберите пункт контекстного меню «Открывать .md в FastMD…» или выполните `FastMD.exe --register`. Программа регистрируется в HKCU, права администратора не нужны, и откроются «Параметры → Приложения по умолчанию → FastMD». Назначить приложение программно Windows не даёт, поэтому подтверждаете вы. Отменить регистрацию: `FastMD.exe --unregister`. После регистрации недавние документы появляются и в Jump List на панели задач.
-- **Позиция чтения.** Для последних 200 документов запоминается место. Повторно открытый документ плавно доезжает до него. Если файл изменился, место ищется по ближайшему заголовку.
-- **Настройки** (значок-шестерёнка справа вверху, Ctrl+, или контекстное меню) применяются сразу и доходят до других открытых окон:
-  - тема, шрифт текста (Segoe UI или книжный Sitka с оптическими размерами), размер текста;
-  - ширина колонки, перенос строк в коде, плавная прокрутка;
-  - редактор для Ctrl+E (автопоиск VS Code, Cursor, Void, Notepad++, Sublime Text, Блокнота или свой exe);
-  - язык интерфейса (русский или английский).
+- **With no file** it opens a start screen with the recent documents. Type to find one by name, Enter opens it.
+- **The `.md` association.** Pick the "Open .md files with FastMD…" context menu item, or run `FastMD.exe --register`. The program registers itself in HKCU, no administrator rights are needed, and Settings → Default apps → FastMD opens. Windows does not let a program assign itself, so the confirmation is yours to give. To undo the registration: `FastMD.exe --unregister`. Once registered, recent documents also appear in the taskbar Jump List.
+- **Reading position.** The place is remembered for the last 200 documents. A document opened again glides back to it. If the file has changed, the place is found by the nearest heading.
+- **Settings** (the gear icon at the top right, Ctrl+, or the context menu) apply at once and reach the other open windows:
+  - theme, text font (Segoe UI, or the Sitka book font with optical sizes), text size;
+  - column width, line wrapping in code, smooth scrolling;
+  - the editor for Ctrl+E (VS Code, Cursor, Void, Notepad++, Sublime Text and Notepad are found automatically, or point it at your own exe);
+  - interface language (Russian or English).
 
-  Настройки и положение окна хранятся в `HKCU\Software\FastMD`, позиции чтения и список недавних — в `%LOCALAPPDATA%\FastMD\positions.bin`.
-- `publish.ps1` можно запускать при открытых документах: работающий exe переименовывается (`FastMD.old-*.exe`, удаляется при следующей публикации), новые окна запускают новую версию.
+  Settings and the window position live in `HKCU\Software\FastMD`, reading positions and the recent list in `%LOCALAPPDATA%\FastMD\positions.bin`.
+- `publish.ps1` can be run with documents open: the running exe is renamed (`FastMD.old-*.exe`, removed on the next publish), and new windows start the new version.
 
-### Клавиши и мышь
+### Keys and mouse
 
-| Действие | Клавиши |
+| Action | Keys |
 |---|---|
-| Прокрутка | колесо, ↑ ↓, PgUp / PgDn, Пробел / Shift+Пробел, Home / End |
-| Широкий код и таблицы вбок | Shift+колесо, тачпад, наклон колеса или ползунок внизу блока |
-| Выделение | мышь; двойной клик выделяет слово, тройной — абзац или ячейку; Shift+клик расширяет выделение |
-| Выделение с клавиатуры | Shift+стрелки (по символам), Ctrl+Shift+стрелки (по словам), Shift+Home / End (до края строки), Ctrl+Shift+Home / End (до концов документа), Shift+PgUp / PgDn |
-| Копировать / выделить всё | Ctrl+C / Ctrl+A |
-| Копировать как Markdown | Ctrl+Shift+C — в буфер попадает исходник, как его написал автор |
-| Перетаскивание наружу | выделённый текст, ссылку или картинку тащите мышью в другое приложение |
-| Печать / PDF | Ctrl+P — системный диалог печати; Ctrl+Shift+P — сохранить PDF |
-| Копировать блок кода | кнопка в правом верхнем углу блока (появляется при наведении) |
-| Поиск | Ctrl+F; Enter / F3 — следующее, Shift+Enter / Shift+F3 — предыдущее; Alt+C — учитывать регистр, Alt+W — слово целиком; Esc — закрыть |
-| Оглавление | Ctrl+Shift+O или кнопка слева вверху |
-| Ссылки с клавиатуры | Tab / Shift+Tab — следующая и предыдущая, Enter — открыть |
-| Адрес заголовка | наведите на заголовок: слева появится значок ссылки, клик копирует `файл.md#якорь` |
-| Ссылки мышью | клик: `#якорь` прокручивает к заголовку, `.md` открывается здесь же, `http(s)` и `mailto` — в браузере, прочее — после подтверждения; правый клик — «Открыть», «Копировать адрес ссылки» |
-| Картинки | правый клик — «Копировать картинку», «Открыть файл картинки» |
-| Ширина колонки | Ctrl+Alt+← / → (узкая, обычная, широкая, во всю ширину) |
-| Масштаб | Ctrl+колесо, Ctrl + / Ctrl −, Ctrl+0 |
-| Назад / вперёд | Alt+← / Alt+→, Backspace, боковые кнопки мыши |
-| Открыть / обновить | Ctrl+O, перетаскивание файла в окно / F5 или Ctrl+R (при изменении на диске обновляется само) |
-| Открыть в редакторе | Ctrl+E |
-| Настройки | Ctrl+, или значок-шестерёнка справа вверху |
-| Закрыть | Esc (если нет выделения, поиска и фокуса на ссылке), Ctrl+W |
-| Меню | правый клик: тема, масштаб, ширина колонки, перенос кода, «Показать в папке», настройки, ассоциация |
+| Scrolling | wheel, ↑ ↓, PgUp / PgDn, Space / Shift+Space, Home / End |
+| Wide code and tables sideways | Shift+wheel, touchpad, wheel tilt, or the slider at the bottom of the block |
+| Selection | mouse; a double click selects a word, a triple click a paragraph or a cell; Shift+click extends the selection |
+| Selection from the keyboard | Shift+arrows (by character), Ctrl+Shift+arrows (by word), Shift+Home / End (to the end of the line), Ctrl+Shift+Home / End (to the ends of the document), Shift+PgUp / PgDn |
+| Copy / select all | Ctrl+C / Ctrl+A |
+| Copy as Markdown | Ctrl+Shift+C — the clipboard gets the source as the author wrote it |
+| Drag out | drag the selected text, a link or an image into another application |
+| Print / PDF | Ctrl+P — the system print dialog; Ctrl+Shift+P — save a PDF |
+| Copy a code block | the button in the block's top right corner (it appears on hover) |
+| Search | Ctrl+F; Enter / F3 — next, Shift+Enter / Shift+F3 — previous; Alt+C — case sensitive, Alt+W — whole word; Esc — close |
+| Table of contents | Ctrl+Shift+O or the button at the top left |
+| Links from the keyboard | Tab / Shift+Tab — next and previous, Enter — open |
+| A heading's address | hover over a heading: a link icon appears to its left, and a click copies `file.md#anchor` |
+| Links with the mouse | click: `#anchor` scrolls to the heading, `.md` opens right here, `http(s)` and `mailto` go to the browser, anything else after a confirmation; right click — "Open", "Copy link address" |
+| Images | right click — "Copy image", "Open image file" |
+| Column width | Ctrl+Alt+← / → (narrow, normal, wide, full width) |
+| Zoom | Ctrl+wheel, Ctrl + / Ctrl −, Ctrl+0 |
+| Back / forward | Alt+← / Alt+→, Backspace, the side mouse buttons |
+| Open / refresh | Ctrl+O, dragging a file into the window / F5 or Ctrl+R (a change on disk refreshes by itself) |
+| Open in editor | Ctrl+E |
+| Settings | Ctrl+, or the gear icon at the top right |
+| Close | Esc (when there is no selection, no search and no focused link), Ctrl+W |
+| Menu | right click: theme, zoom, column width, code wrapping, "Show in folder", settings, the association |
 
-## Что поддерживается
+## What is supported
 
-- **Разметка:**
-  - CommonMark + GFM: таблицы с выравниванием, списки задач, зачёркивание, автоссылки;
-  - сноски: `[^1]` в тексте — ссылка на определение, определения собираются внизу документа и ссылаются обратно;
-  - эмодзи-шорткоды `:rocket:` (база gemoji, 1913 имён);
-  - формулы `$…$` и `$$…$$` — настоящий набор (RaTeX, совместим с KaTeX): дроби, корни, суммы, матрицы, системы;
-  - диаграммы Mermaid: блок ```` ```mermaid ```` рисуется схемой;
-  - заголовки с якорями по правилам GitHub;
-  - вложенные списки и цитаты;
+- **Markup:**
+  - CommonMark + GFM: tables with alignment, task lists, strikethrough, autolinks;
+  - footnotes: `[^1]` in the text links to the definition, the definitions are gathered at the bottom of the document and link back;
+  - emoji shortcodes `:rocket:` (the gemoji base, 1913 names);
+  - formulas `$…$` and `$$…$$` — genuine typesetting (RaTeX, KaTeX-compatible): fractions, roots, sums, matrices, cases;
+  - Mermaid diagrams: a ```` ```mermaid ```` block is drawn as a diagram;
+  - headings with anchors by GitHub's rules;
+  - nested lists and quotes;
   - GitHub Alerts `> [!NOTE]` / `[!TIP]` / `[!IMPORTANT]` / `[!WARNING]` / `[!CAUTION]`;
-  - YAML front matter: простой `ключ: значение` показывается таблицей свойств, вложенный — блоком YAML;
-  - подмножество HTML: выравнивание, картинки в строке (ряды бейджей) и блоком, `<details>`, `<picture>` под тему, таблицы, `<kbd>`, `<sub>`/`<sup>`, ссылки и якоря, заголовки.
-- **Код:** подсветка синтаксиса для 55 языков (163 написания имени: c, cpp, cs, js, ts, rust, python, go, java, kotlin, swift, php, ruby, perl, lua, r, haskell, elixir, erlang, clojure, julia, nim, zig, dart, scala, solidity, objective-c, fortran, pascal, ocaml, f#, vb, asm, sql, css, html, yaml, toml, dockerfile, makefile, cmake, terraform, nix, graphql, protobuf, glsl, nginx, bash, powershell, batch, vim, tex, matlab, prolog, ada и их синонимы). Название языка написано в углу блока. Широкие блоки кода и таблицы выходят за колонку текста, а то, что не влезло, прокручивается вбок.
-- **Картинки и шрифты:**
-  - SVG (бейджи, схемы): рисуется библиотекой lunasvg из `fastmd-svg.dll`, которая подгружается только при встрече SVG. Картинка перерисовывается под нужный размер, а не растягивается;
-  - картинки из сети: скачиваются после первого кадра (только https, кроме localhost), кладутся в кэш `%LOCALAPPDATA%\FastMD\cache` (200 МБ, вытесняется по давности) и появляются по мере готовности. В настройках — «Картинки из сети: всегда / спрашивать / никогда»;
-  - локальные картинки (PNG/JPEG/GIF/BMP/WebP через WIC, место резервируется заранее). Картинка, размер которой на экране не совпадает с файлом, уменьшается фильтром: копия нужного размера готовится в фоне и переделывается при смене масштаба или ширины колонки;
-  - цветные эмодзи, CJK, кириллица.
-- **Оформление:**
-  - светлая и тёмная темы GitHub, по системе или вручную, без белой вспышки при запуске;
-  - тёмный заголовок и Mica в заголовке окна.
-- **Большие файлы:** документ 3,7 МБ показывает первый экран за те же ~66 мс. Для него разбирается только начало файла, остальное дочитывается в фоне.
+  - YAML front matter: a plain `key: value` is shown as a property table, a nested one as a YAML block;
+  - a subset of HTML: alignment, images inline (rows of badges) and as blocks, `<details>`, `<picture>` following the theme, tables, `<kbd>`, `<sub>`/`<sup>`, links and anchors, headings.
+- **Code:** syntax highlighting for 55 languages (163 spellings of the name: c, cpp, cs, js, ts, rust, python, go, java, kotlin, swift, php, ruby, perl, lua, r, haskell, elixir, erlang, clojure, julia, nim, zig, dart, scala, solidity, objective-c, fortran, pascal, ocaml, f#, vb, asm, sql, css, html, yaml, toml, dockerfile, makefile, cmake, terraform, nix, graphql, protobuf, glsl, nginx, bash, powershell, batch, vim, tex, matlab, prolog, ada and their synonyms). The language name is written in the corner of the block. Wide code blocks and tables reach past the text column, and whatever still does not fit scrolls sideways.
+- **Images and fonts:**
+  - SVG (badges, diagrams): drawn by the lunasvg library out of `fastmd-svg.dll`, which is loaded only when an SVG is met. The picture is redrawn at the size it needs rather than stretched;
+  - images from the network: downloaded after the first frame (https only, except localhost), put into the `%LOCALAPPDATA%\FastMD\cache` cache (200 MB, evicted by age) and appearing as they become ready. In the settings — "Pictures from the web: Always / Ask / Never";
+  - local images (PNG/JPEG/GIF/BMP/WebP through WIC, with room reserved for them in advance). An image whose size on screen does not match the file is downscaled with a filter: a copy at the right size is prepared in the background and redone when the zoom or the column width changes;
+  - color emoji, CJK, Cyrillic.
+- **Appearance:**
+  - GitHub light and dark themes, following the system or set by hand, with no white flash at startup;
+  - a dark title bar and Mica in the window title.
+- **Large files:** a 3.7 MB document shows its first screen in the same ~66 ms. For it only the beginning of the file is parsed, and the rest is read in the background.
 
-## Известные ограничения v0.2
+## Known limitations
 
-- HTML: поддержано подмножество (выравнивание, картинки в строке и блоком, `<details>`, `<picture>`, таблицы, `<kbd>`, `<sub>`/`<sup>`, ссылки, заголовки). Неизвестные теги убираются, текст остаётся; `colspan`/`rowspan` и CSS не поддерживаются.
-- Анимированные GIF показываются первым кадром.
-- Нет доступности для экранных дикторов (UIA) и своего окна предпросмотра печати.
-- Диаграмма `sequenceDiagram` с активацией (`A->>+B`) пока не рисуется — показывается её исходник.
+- HTML: a subset is supported (alignment, images inline and as blocks, `<details>`, `<picture>`, tables, `<kbd>`, `<sub>`/`<sup>`, links, headings). Unknown tags are dropped and their text kept; `colspan`/`rowspan` and CSS are not supported.
+- Animated GIFs are shown as their first frame.
+- There is no print preview window of our own.
+- A `sequenceDiagram` with activation (`A->>+B`) is not drawn yet — its source is shown instead.
 
-Подробный план всех оставшихся шагов — [../docs/PLAN.md](../docs/PLAN.md), история изменений — [../CHANGELOG.md](../CHANGELOG.md).
+The detailed plan of every remaining step is in [../docs/PLAN.md](../docs/PLAN.md), the history of changes in [../CHANGELOG.md](../CHANGELOG.md).
 
-## Устройство
+## How it is put together
 
-| Модуль | Что делает |
+| Module | What it does |
 |---|---|
-| `src/window.cpp` | окно, маршрутизация ввода, горячие клавиши, команды, контекстное меню, применение настроек, положение окна, тестовые запросы, `wWinMain` |
-| `src/view.cpp` | колонки и их пресеты, вынос широких блоков и их прокрутка вбок, виртуализированная вёрстка, отрисовка (при прокрутке — только новая полоса), hit-testing, выделение, фокус ссылок |
-| `src/find.cpp` | поиск (регистр, целые слова), панель поиска, метки на полосе прокрутки, поле ввода с IME в отдельном потоке |
-| `src/toc.cpp` | оглавление: рядом с текстом или поверх него |
-| `src/home.cpp` | стартовый экран с недавними документами |
-| `src/loader.cpp` | загрузка документа (стартовый поток параллельно с созданием окна; открытие, перезагрузка, история), фоновые замеры высот, WIC и копии картинок в экранном размере, наблюдение за файлом, позиции чтения |
-| `src/store.cpp` | настройки в реестре, `positions.bin` (позиции и недавние, общий для всех окон), поиск редакторов |
-| `src/shell.cpp` | ссылки, буфер обмена (текст, картинки), редактор, Проводник, диалоги, ассоциация .md |
-| `src/copy.cpp` | копирование выделенного: HTML и RTF с оформлением, исходник в Markdown по карте `Doc::srcMap` |
-| `src/drag.cpp` | перетаскивание наружу: объект данных с текстом, ссылкой или картинкой (COM только на время перетаскивания) |
-| `src/print.cpp` | печать и экспорт в PDF: вёрстка под бумагу, разбиение на страницы, колонтитулы |
-| `src/canvas_print.cpp` | холст поверх DC принтера: глифы уходят в GDI, поэтому в PDF текст остаётся текстом |
-| `src/settings_ui.cpp` | окно настроек, нарисованное тем же движком, и значок-шестерёнка, который его открывает |
-| `src/strings.cpp` | строки интерфейса на русском и английском |
-| `src/parse.cpp` | md4c (master, закреплённый коммит) → плоская модель блоков; сноски со ссылками в обе стороны, alerts, front matter, slug-и заголовков, эмодзи-шорткоды |
-| `src/html.cpp` | разбор тегов и сущностей сырого HTML (мини-DOM живёт в `parse.cpp`) |
-| `src/net.cpp` | загрузка картинок из сети через WinHTTP и дисковый кэш |
-| `src/svg.cpp` | ленивая загрузка `fastmd-svg.dll` и вызовы к ней |
-| `src/formulas.cpp` | ленивая загрузка `fastmd-tex.dll` и `fastmd-mermaid.dll`: формулы и диаграммы → SVG |
-| `src/update.cpp` | проверка обновлений раз в сутки, загрузка установщика и сверка его SHA-256 |
-| `src/crash.cpp` | minidump при сбое и предложение открыть папку при следующем запуске |
-| `preview/preview.cpp` | панель просмотра и эскизы в Проводнике: тот же движок в COM-DLL |
-| `setup/setup.cpp` | установщик: несёт программу в себе, ставит её для одного пользователя |
-| `rust/fastmd-tex` | набор формул (RaTeX), отдельная библиотека на Rust |
-| `rust/fastmd-mermaid` | диаграммы Mermaid, отдельная библиотека на Rust |
-| `src/svg_dll.cpp` | сама библиотека: lunasvg + plutovg, отдельный бинарник, чтобы exe оставался маленьким |
-| `src/layout.cpp` | типографика (Segoe UI Variable Text/Display или Sitka Small…Banner по оптическому размеру, Cascadia Mono) и вёрстка блоков |
-| `src/canvas_gdi.cpp` | CPU-рендер: DirectWrite → DIB (буфер выше окна, чтобы прокрутка не копировала пиксели), SDF-растеризатор фигур, послойные COLR-эмодзи, попиксельное отсечение текста |
-| `src/theme.cpp` | палитры GitHub light/dark |
-| `src/util.cpp` | хуки бенч-протокола, трассировка (`FASTMD_TRACE=1` → `%TEMP%\fastmd-trace.txt`), файлы |
+| `src/window.cpp` | the window, input routing, hotkeys, commands, the context menu, applying settings, the window position, test queries, `wWinMain` |
+| `src/view.cpp` | columns and their presets, moving wide blocks out and scrolling them sideways, virtualized layout, drawing (on a scroll — only the new strip), hit-testing, selection, link focus |
+| `src/find.cpp` | search (case, whole words), the search panel, the marks on the scrollbar, an input box with IME on a thread of its own |
+| `src/toc.cpp` | the table of contents: beside the text or over it |
+| `src/home.cpp` | the start screen with the recent documents |
+| `src/uia.cpp` | a UI Automation provider over the document: Narrator and NVDA see the window as a Document with a Text pattern, move by characters, words, lines and paragraphs and jump between headings. Answered straight from the model, so there is no second copy of the document; `uiautomationcore.dll` is delay-loaded and only a reader who actually runs one pays for it |
+| `src/loader.cpp` | loading a document (a starting thread in parallel with creating the window; opening, reloading, history), measuring heights in the background, WIC and screen-size copies of images, watching the file, reading positions |
+| `src/store.cpp` | settings in the registry, `positions.bin` (positions and the recent list, shared by all windows), finding editors |
+| `src/shell.cpp` | links, the clipboard (text, images), the editor, Explorer, dialogs, the .md association |
+| `src/copy.cpp` | copying the selection: HTML and RTF with formatting, the Markdown source through the `Doc::srcMap` map |
+| `src/drag.cpp` | dragging out: a data object with text, a link or an image (COM only for the duration of the drag) |
+| `src/print.cpp` | printing and PDF export: layout for paper, splitting into pages, headers and footers |
+| `src/canvas_print.cpp` | a canvas over the printer DC: glyphs go to GDI, so text stays text in the PDF |
+| `src/settings_ui.cpp` | the settings window, drawn by the same engine, and the gear icon that opens it |
+| `src/strings.cpp` | the interface strings in Russian and English |
+| `src/parse.cpp` | md4c (master, at a pinned commit) → a flat block model; footnotes linked both ways, alerts, front matter, heading slugs, emoji shortcodes |
+| `src/html.cpp` | parsing the tags and entities of raw HTML (the mini-DOM lives in `parse.cpp`) |
+| `src/highlight.cpp` | highlighting inside fenced code blocks: a single-pass highlighter with no grammar (comments, strings, numbers, keywords, capitalized types, calls, `$vars`) in GitHub's light colours |
+| `src/net.cpp` | downloading images from the network through WinHTTP, and the disk cache |
+| `src/svg.cpp` | the lazy load of `fastmd-svg.dll` and the calls into it |
+| `src/formulas.cpp` | the lazy load of `fastmd-tex.dll` and `fastmd-mermaid.dll`: formulas and diagrams → SVG |
+| `src/update.cpp` | the once-a-day update check, downloading the installer and verifying its SHA-256 |
+| `src/crash.cpp` | a minidump on a crash, and an offer to open the folder on the next launch |
+| `preview/preview.cpp` | the preview pane and thumbnails in Explorer: the same engine in a COM DLL |
+| `setup/setup.cpp` | the installer: it carries the program inside itself and installs it for one user |
+| `rust/fastmd-tex` | formula typesetting (RaTeX), a separate library in Rust |
+| `rust/fastmd-mermaid` | Mermaid diagrams, a separate library in Rust |
+| `src/svg_dll.cpp` | the library itself: lunasvg + plutovg, a separate binary so that the exe stays small |
+| `src/layout.cpp` | typography (Segoe UI Variable Text/Display or Sitka Small…Banner by optical size, Cascadia Mono) and block layout |
+| `src/canvas_gdi.cpp` | the CPU renderer: DirectWrite → DIB (a buffer taller than the window, so that scrolling does not copy pixels), an SDF rasterizer for shapes, layered COLR emoji, per-pixel clipping of text |
+| `src/theme.cpp` | the GitHub light/dark palettes |
+| `src/util.cpp` | the bench protocol hooks, tracing (`FASTMD_TRACE=1` → `%TEMP%\fastmd-trace.txt`), files |
 
-Модель документа — один UTF-16 буфер текста. У каждого блока и ячейки таблицы свой диапазон в этом буфере. Поэтому позиция в тексте — это одно число, а выделение и поиск работают единообразно через блоки и ячейки.
+The document model is a single UTF-16 text buffer. Every block and every table cell owns a range in that buffer. A position in the text is therefore a single number, and selection and search work the same way through blocks and cells.
 
-Всё новое этапа 1 стоит вне критического пути первого кадра. Поле поиска, чтение `positions.bin`, окно настроек и поиск редакторов создаются после первого кадра или по действию. Кнопки-значки (оглавление, настройки) появляются со второго кадра: шрифт иконок загружается уже после первого. Исключение — стартовый экран без документа: его список читается вместе с запуском.
+Everything added since stage 1 stands off the critical path of the first frame. The search box, reading `positions.bin`, the settings window and finding editors are all created after the first frame or on demand. The icon buttons (table of contents, settings) appear from the second frame on: the icon font is loaded after the first one. The SVG, formula and diagram libraries are mapped on a worker thread, and only for a document that actually needs them; `uiautomationcore.dll` only when a screen reader is running. The exception is the start screen with no document: its list is read as part of the launch.
 
-## Тесты
+## Tests
 
-- **Скорость** проверяется тем же харнессом, что и при выборе стека. Вариант `fastmd-app` зарегистрирован в `bench/protos/fastmd-app`:
+- **Speed** is checked by the same harness that was used to choose the stack. The `fastmd-app` variant is registered in `bench/protos/fastmd-app`:
   ```
   python bench/harness/bench.py run fastmd-app,baseline-win32 --doc small,medium,large --runs 12
   ```
-  Правило: FastMD не медленнее `baseline-win32` на medium и не больше чем на +15 мс на large.
-- **UI-тест** запускает настоящие окна и проверяет 95 вещей (включая локальный http-сервер для картинок из сети и SVG): выделение, копирование, поиск, ссылки, зум, тему, историю, живую перезагрузку, положение окна, значок настроек, копии картинок в экранном размере, совпадение частичного кадра прокрутки с полной перерисовкой, сноски и выноски, и каждую задачу этапа 1 по её критерию готовности из плана. Состояние читается через `WM_APP_QUERY`. Тест работает в своём профиле (`FASTMD_REGKEY`, `FASTMD_DATA`) и не трогает ваши настройки. Скриншоты сохраняются в `app/tests/out/`.
+  The rule: FastMD is no slower than `baseline-win32` on medium, and no more than +15 ms behind on large.
+- **The UI test** starts real windows and checks 95 things (including a local http server for images from the network and SVG): selection, copying, search, links, zoom, the theme, history, live reload, the window position, the settings icon, screen-size copies of images, the partial scroll frame matching a full redraw, footnotes and callouts, and every stage 1 task against its readiness criterion from the plan. State is read through `WM_APP_QUERY`. The test works in a profile of its own (`FASTMD_REGKEY`, `FASTMD_DATA`) and does not touch your settings. Screenshots are saved to `app/tests/out/`.
   ```
   python app/tests/ui_smoke.py
   ```
-- **Настоящие README.** Корпус из 15 популярных репозиториев (список — `app/tests/readmes.txt`) скачивается, открывается по очереди и сравнивается с принятой картинкой: видно, если правка неожиданно изменила вид реальных документов. `--update` принимает текущий вид за эталон.
+- **Real READMEs.** A corpus of 15 popular repositories (the list is in `app/tests/readmes.txt`) is downloaded, opened one by one and compared against an accepted picture: it shows when an edit has unexpectedly changed how real documents look. `--update` accepts the current look as the reference.
   ```
   python app/tests/readme_check.py
   ```

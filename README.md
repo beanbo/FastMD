@@ -1,116 +1,130 @@
 # FastMD
 
-**Молниеносный просмотрщик Markdown для Windows.** От запуска до отрисованного документа проходит около 65 мс. Пустое окно Win32 без настройки открывается дольше.
+English · [Русский](README.ru.md)
 
-*Lightning-fast Markdown reader for Windows (C++20, Win32, DirectWrite, md4c): the first screen of a document is on the display ~65 ms after process start. The interface speaks English and Russian; the documentation is in Russian.*
+**A lightning-fast Markdown reader for Windows.** About 65 ms pass between launching it and a rendered document on screen. An untuned empty Win32 window takes longer than that to open.
 
-![FastMD 0.2: оглавление, код, списки](docs/img/fastmd-0.2-light.png)
+*C++20, Win32, DirectWrite, md4c. The interface speaks English and Russian; the rest of the documentation is in Russian.*
 
-## Скачать
+![FastMD 0.2: table of contents, code, lists](docs/img/fastmd-0.2-light.png)
 
-**[FastMD 1.1.0 — последний релиз](https://github.com/beanbo/FastMD/releases/latest):**
-1. `FastMD-Setup.exe` — установка для одного пользователя, без прав администратора: ярлык в «Пуске», ассоциация `.md`, панель просмотра в Проводнике. Удаляется через «Параметры → Приложения».
-2. Или `FastMD-1.1.0-win-x64.zip` — распакуйте куда угодно и запустите `FastMD.exe`; чтобы `.md` открывались двойным кликом, выберите в контекстном меню «Открывать .md в FastMD…» и подтвердите выбор в «Параметрах».
+## Download
 
-Exe пока не подписан, поэтому при первом запуске Windows SmartScreen может предупредить: «Подробнее» → «Выполнить в любом случае». Подпись кода ждёт сертификата (задача 5.5).
+**[FastMD 1.1.0 — latest release](https://github.com/beanbo/FastMD/releases/latest):**
+1. `FastMD-Setup.exe` — a per-user install, no administrator rights: a Start menu shortcut, the `.md` association, a preview pane in Explorer. Uninstalls through Settings → Apps.
+2. Or `FastMD-1.1.0-win-x64.zip` — unpack it anywhere and run `FastMD.exe`; to make `.md` files open on a double click, pick "Open .md files with FastMD…" from the context menu and confirm the choice in Settings.
 
-## Почему так быстро
+The exe is not signed yet, so on the first run Windows SmartScreen may warn you: "More info" → "Run anyway". Code signing is waiting on a certificate (task 5.5).
 
-Стек выбран по замерам: 12 прототипов, 47 вариантов, один харнесс и один протокол. Подробности — в [REPORT.md](REPORT.md). Ниже время от запуска процесса до отрисованного документа (medium.md, 53 КБ, медиана):
+## Why it is this fast
 
-| Что открываем | мс |
+The stack was picked by measurement: 12 prototypes, 47 variants, one harness and one protocol. The details are in [REPORT.md](REPORT.md). Below is the time from process start to a rendered document (medium.md, 53 KB, median):
+
+| What is opened | ms |
 |---|---|
-| **Прототип FastMD: C++, Win32, DirectWrite, первый кадр на CPU** | **59** |
-| Пустое окно Win32 без настройки | 78 |
+| **The FastMD prototype: C++, Win32, DirectWrite, first frame on the CPU** | **59** |
+| An empty, untuned Win32 window | 78 |
 | Qt 6 Widgets | 149 |
 | WinUI 3 (C#, NativeAOT) | 324 |
 | WebView2 / Tauri | 447–630 |
-| Electron (класс Typora, Obsidian) | 753–903 |
-| VS Code, только окно | 1 138 |
+| Electron (the Typora, Obsidian class) | 753–903 |
+| VS Code, the window alone | 1,138 |
 
-Сам FastMD в контрольном прогоне: 66,7 мс против 79,2 мс у пустого окна в тех же условиях. Все новые функции работают вне критического пути первого кадра.
+FastMD itself in the control run: 66.7 ms against 79.2 ms for the empty window under the same conditions. Everything added since then works off the critical path of the first frame.
 
-Главные приёмы:
+The techniques that matter:
 
-- первый кадр рисуется на CPU (DirectWrite → GDI DIB), ведь GPU-устройство до первого кадра стоило бы +150–250 мс;
-- сначала верстается только первый экран, остальное делается в фоне после первого кадра;
-- один маленький exe (~0,7 МБ), статический CRT, никаких рантаймов;
-- при первом показе окна отключены инициализация IME в UI-потоке и анимация открытия; поле поиска с IME живёт в отдельном потоке.
+- the first frame is drawn on the CPU (DirectWrite → GDI DIB), because a GPU device created before the first frame would have cost +150–250 ms;
+- only the first screen is laid out at first, the rest is done in the background after the first frame;
+- one small exe (~0.7 MB), static CRT, no runtimes;
+- when the window is first shown, IME initialization on the UI thread and the open animation are both off; the search box, which needs IME, lives on a thread of its own.
 
-## Возможности
+### When a launch takes longer than usual
 
-- **Разметка:** CommonMark и GFM (таблицы, списки задач, зачёркивание, автоссылки), GitHub Alerts, сноски, YAML front matter таблицей, эмодзи-шорткоды, подсветка кода для 55 языков, цветные эмодзи, CJK.
-- **Как на GitHub:** подмножество HTML (выравнивание, `<details>`, `<picture>`, таблицы, `<kbd>`, картинки в строке), SVG и бейджи, картинки из сети с дисковым кэшем.
-- **Формулы и диаграммы:** `$…$` и `$$…$$` набираются по-настоящему (RaTeX, совместим с KaTeX), блок ```` ```mermaid ```` рисуется схемой — `graph` / `flowchart` укладывает свой раскладчик, остальные виды рисует библиотека. Схема занимает всю ширину окна, а если и этого мало — не ужимается до нечитаемого, а прокручивается вбок. Обе библиотеки подгружаются только у документа, где они нужны.
-- **Чтение:**
-  - оглавление с текущим разделом (Ctrl+Shift+O);
-  - широкий код и таблицы прокручиваются вбок (Shift+колесо, тачпад);
-  - ширина колонки от узкой до полной (Ctrl+Alt+← / →);
-  - книжный шрифт Sitka и размер текста;
-  - светлая и тёмная темы GitHub, Mica, высококонтрастная тема Windows.
-- **Работа с текстом:**
-  - выделение мышью и с клавиатуры (Shift+стрелки, по словам, до краёв строки и документа);
-  - копирование с оформлением (HTML и RTF) и как Markdown-исходник (Ctrl+Shift+C);
-  - перетаскивание текста, ссылок и картинок в другие приложения;
-  - печать и экспорт в PDF (Ctrl+P, Ctrl+Shift+P) — текстом, а не картинкой.
-- **Поиск:** Ctrl+F, учёт регистра, целые слова, метки совпадений на полосе прокрутки, ввод с IME.
-- **Память:**
-  - документ открывается на том месте, где вы его закрыли;
-  - окно — там, где было;
-  - без файла показываются недавние документы с поиском по названию; они же есть в Jump List.
-- **Навигация:** якоря заголовков как на GitHub, относительные `.md` с историей «назад / вперёд», Tab по ссылкам, меню ссылки и картинки.
-- **В Проводнике:** панель просмотра .md на том же движке (10–19 мс против 0,6–1,4 с у PowerToys) и эскизы-страницы вместо значка файла.
-- **Окружение:**
-  - установщик для одного пользователя, без прав администратора, и проверка обновлений раз в сутки (её можно выключить);
-  - живая перезагрузка при изменении файла;
-  - «Открыть в редакторе» с выбором редактора;
-  - окно настроек, интерфейс на русском и английском;
-  - чтение экранным диктором: документ, перемещение по словам, строкам, абзацам и заголовкам.
+Now and then — usually the first time after an install or an update — the window appears noticeably later than it normally does. That is not FastMD: the antivirus is scanning an exe it has not seen before, and it does so inside `CreateProcessW`, before the program's first line of code runs at all. The launches after it are quick again, because the verdict is cached.
 
-  Документ 3,7 МБ показывает первый экран за те же ~66 мс.
+To be rid of it entirely, add the program's folder to the antivirus exclusions. For Microsoft Defender: Windows Security → Virus & threat protection → Virus & threat protection settings → Manage settings → Exclusions → Add or remove exclusions → Add an exclusion → Folder, and point it at
 
-## Приватность
+```
+%LOCALAPPDATA%\Programs\FastMD
+```
 
-FastMD не собирает и не отправляет ничего о вас: ни телеметрии, ни идентификаторов, ни аналитики. В сеть программа выходит ровно в двух случаях, и оба видны:
+(or, if you unpacked the zip, at the folder you unpacked it into). The exclusion lifts scanning from that folder only; everything else on the machine stays protected exactly as before.
 
-| Что | Когда | Куда |
+## Features
+
+- **Markup:** CommonMark and GFM (tables, task lists, strikethrough, autolinks), GitHub Alerts, footnotes, YAML front matter as a table, emoji shortcodes, syntax highlighting for 55 languages, color emoji, CJK.
+- **Like GitHub:** a subset of HTML (alignment, `<details>`, `<picture>`, tables, `<kbd>`, inline images), SVG and badges, images from the network with an on-disk cache.
+- **Math and diagrams:** `$…$` and `$$…$$` are genuinely typeset (RaTeX, KaTeX-compatible), and a ```` ```mermaid ```` block is drawn as a diagram — `graph` / `flowchart` is laid out by our own layout engine, the other kinds are drawn by the library. A diagram takes the full width of the window, and where even that is not enough it scrolls sideways instead of shrinking into illegibility. Both libraries load only for a document that needs them.
+- **Reading:**
+  - a table of contents that follows the current section (Ctrl+Shift+O);
+  - wide code and tables scroll sideways (Shift+wheel, touchpad);
+  - column width from narrow to full (Ctrl+Alt+← / →);
+  - the Sitka book font, and a text size;
+  - GitHub light and dark themes, Mica, the Windows high-contrast theme.
+- **Working with text:**
+  - selection by mouse and by keyboard (Shift+arrows, by word, to the ends of the line and of the document);
+  - copying with formatting (HTML and RTF) and as Markdown source (Ctrl+Shift+C);
+  - dragging text, links and images into other applications;
+  - printing and PDF export (Ctrl+P, Ctrl+Shift+P) — as text, not as a picture.
+- **Search:** Ctrl+F, case sensitivity, whole words, match marks on the scrollbar, IME input.
+- **Memory:**
+  - a document opens at the place where you closed it;
+  - the window opens where it was;
+  - with no file given it shows recent documents with search by name; the same list is in the Jump List.
+- **Navigation:** GitHub-style heading anchors, relative `.md` links with back / forward history, Tab through links, link and image context menus.
+- **In Explorer:** a .md preview pane on the same engine (10–19 ms against 0.6–1.4 s for PowerToys) and page thumbnails in place of a file icon.
+- **Environment:**
+  - a per-user installer, no administrator rights, and an update check once a day (which can be turned off);
+  - live reload when the file changes;
+  - "Open in editor" with an editor of your choice;
+  - a settings window, interface in Russian and English;
+  - screen reader support: the document, and movement by word, line, paragraph and heading.
+
+  A 3.7 MB document shows its first screen in the same ~66 ms.
+
+## Privacy
+
+FastMD neither collects nor sends anything about you: no telemetry, no identifiers, no analytics. It goes to the network in exactly two cases, and both are visible:
+
+| What | When | Where |
 |---|---|---|
-| Картинки из документа | если в документе есть `http(s)`-картинка и в настройках стоит «всегда» (по умолчанию) или вы разрешили | на адреса из самого документа, только https, без cookie и авторизации |
-| Проверка обновлений | раз в сутки после первого кадра, если не выключено в настройках | `api.github.com`, один GET; установщик скачивается только после вашего согласия и сверяется по SHA-256 |
+| Images from the document | if the document has an `http(s)` image and the setting is "Always" (the default) or you allowed it | to the addresses in the document itself, https only, no cookies and no authentication |
+| Update check | once a day after the first frame, unless turned off in settings | `api.github.com`, one GET; the installer is downloaded only after you agree to it and is verified against a SHA-256 |
 
-Всё остальное остаётся на машине: настройки — в `HKCU\Software\FastMD`, позиции чтения и недавние документы — в `%LOCALAPPDATA%\FastMD\positions.bin`, кэш картинок — в `%LOCALAPPDATA%\FastMD\cache`, отчёты о сбоях — в `%LOCALAPPDATA%\FastMD\crashes` (никуда не отправляются). Панель просмотра в Проводнике в сеть не ходит вовсе.
+Everything else stays on the machine: settings in `HKCU\Software\FastMD`, reading positions and recent documents in `%LOCALAPPDATA%\FastMD\positions.bin`, the image cache in `%LOCALAPPDATA%\FastMD\cache`, crash reports in `%LOCALAPPDATA%\FastMD\crashes` (they are sent nowhere). The Explorer preview pane does not go to the network at all.
 
-Клавиши, настройки и устройство кода описаны в [app/README.md](app/README.md), ограничения текущей версии и план до 1.0 — в [docs/PLAN.md](docs/PLAN.md), история изменений — в [CHANGELOG.md](CHANGELOG.md).
+Keys, settings and how the code is put together are described in [app/README.md](app/README.md), the limitations of the current version and the roadmap in [docs/PLAN.md](docs/PLAN.md), the history of changes in [CHANGELOG.md](CHANGELOG.md).
 
-## Сборка из исходников
+## Building from source
 
-Нужны Windows 10/11 x64 и Visual Studio 2022 или новее: любая редакция или Build Tools с workload «Desktop development with C++». CMake и Ninja входят в состав VS.
+You need Windows 10/11 x64 and Visual Studio 2022 or newer: any edition, or the Build Tools, with the "Desktop development with C++" workload. CMake and Ninja come with VS.
 
 ```powershell
 pwsh -File app/build.ps1    # → app/build/Release/FastMD.exe
 ```
 
-## Что в репозитории
+## What is in the repository
 
-| Путь | Что там |
+| Path | What is there |
 |---|---|
-| `app/` | сам просмотрщик |
-| `REPORT.md` | итоговый отчёт о выборе стека |
-| `research/` | шесть теоретических отчётов: нативные UI, веб-движки, GPU-стеки, конвейер Markdown, старт Windows-приложений, обзор продуктов |
-| `bench/` | харнесс и протокол замеров, тестовый корпус, результаты, описания 12 прототипов |
-| `docs/PLAN.md` | план развития |
+| `app/` | the viewer itself |
+| `REPORT.md` | the final report on choosing the stack |
+| `research/` | six background reports: native UI, web engines, GPU stacks, the Markdown pipeline, Windows application startup, a survey of the products |
+| `bench/` | the measurement harness and protocol, the test corpus, the results, descriptions of the 12 prototypes |
+| `docs/PLAN.md` | the roadmap |
 
-## Лицензия
+## License
 
-FastMD © 2026 seka. Распространяется по лицензии [GNU GPL v3.0](LICENSE).
+FastMD © 2026 seka. Distributed under the [GNU GPL v3.0](LICENSE).
 
-В составе есть сторонние библиотеки, все под MIT:
+Third-party libraries are bundled, all of them under MIT:
 
-| Библиотека | Для чего | Лицензия |
+| Library | What for | License |
 |---|---|---|
-| [md4c](https://github.com/mity/md4c) | разбор Markdown | [app/third_party/md4c/LICENSE.md](app/third_party/md4c/LICENSE.md) |
-| [lunasvg](https://github.com/sammycage/lunasvg) и plutovg | отрисовка SVG | [app/third_party/lunasvg/LICENSE](app/third_party/lunasvg/LICENSE) |
-| RaTeX | набор формул | [app/third_party/ratex/LICENSE-ratex.txt](app/third_party/ratex/LICENSE-ratex.txt) |
-| mermaid-rs-renderer | разбор Mermaid и все диаграммы, кроме схем `graph` / `flowchart` | [app/third_party/ratex/LICENSE-mermaid-rs-renderer.txt](app/third_party/ratex/LICENSE-mermaid-rs-renderer.txt) |
+| [md4c](https://github.com/mity/md4c) | Markdown parsing | [app/third_party/md4c/LICENSE.md](app/third_party/md4c/LICENSE.md) |
+| [lunasvg](https://github.com/sammycage/lunasvg) and plutovg | SVG rendering | [app/third_party/lunasvg/LICENSE](app/third_party/lunasvg/LICENSE) |
+| RaTeX | math typesetting | [app/third_party/ratex/LICENSE-ratex.txt](app/third_party/ratex/LICENSE-ratex.txt) |
+| mermaid-rs-renderer | Mermaid parsing and every diagram other than `graph` / `flowchart` | [app/third_party/ratex/LICENSE-mermaid-rs-renderer.txt](app/third_party/ratex/LICENSE-mermaid-rs-renderer.txt) |
 
-Шрифты KaTeX, которые вкладываются в формулы, распространяются по [SIL Open Font License](app/third_party/ratex/OFL-katex-fonts.txt).
+The KaTeX fonts that are embedded into formulas are distributed under the [SIL Open Font License](app/third_party/ratex/OFL-katex-fonts.txt).
