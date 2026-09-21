@@ -75,6 +75,8 @@ DIAGRAMS = [
     ("graph shapes", "graph TD\n  A[квадрат] --> B(круглый)\n  B --> C{ромб}\n  C --> D((круг))\n  D --> E>флаг]"),
     ("graph subgraph", "graph TB\n  subgraph один\n    A --> B\n  end\n  subgraph два\n    C --> D\n  end\n  B --> C"),
     ("graph styles", "graph LR\n  A:::big --> B\n  classDef big fill:#f9f,stroke:#333"),
+    ("graph parts", "graph TB\n  subgraph S[Библиотеки]\n    L1[libone]\n    L2[libtwo]\n    L3[libthree]\n  end\n"
+                    "  A --> B --> C\n  A --> S"),
     ("sequence", "sequenceDiagram\n  Alice->>Bob: Привет\n  Bob-->>Alice: Привет!"),
     ("sequence activate", "sequenceDiagram\n  participant A\n  participant B\n  A->>+B: запрос\n  B-->>-A: ответ"),
     ("sequence loop", "sequenceDiagram\n  loop каждый день\n    A->>B: пинг\n  end"),
