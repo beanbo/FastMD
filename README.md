@@ -41,7 +41,7 @@ Exe пока не подписан, поэтому при первом запу�
 
 - **Разметка:** CommonMark и GFM (таблицы, списки задач, зачёркивание, автоссылки), GitHub Alerts, сноски, YAML front matter таблицей, эмодзи-шорткоды, подсветка кода для 55 языков, цветные эмодзи, CJK.
 - **Как на GitHub:** подмножество HTML (выравнивание, `<details>`, `<picture>`, таблицы, `<kbd>`, картинки в строке), SVG и бейджи, картинки из сети с дисковым кэшем.
-- **Формулы и диаграммы:** `$…$` и `$$…$$` набираются по-настоящему (RaTeX, совместим с KaTeX), блок ```` ```mermaid ```` рисуется схемой. Обе библиотеки подгружаются только у документа, где они нужны.
+- **Формулы и диаграммы:** `$…$` и `$$…$$` набираются по-настоящему (RaTeX, совместим с KaTeX), блок ```` ```mermaid ```` рисуется схемой — `graph` / `flowchart` укладывает свой раскладчик, остальные виды рисует библиотека. Схема шире колонки не ужимается до нечитаемого, а прокручивается вбок. Обе библиотеки подгружаются только у документа, где они нужны.
 - **Чтение:**
   - оглавление с текущим разделом (Ctrl+Shift+O);
   - широкий код и таблицы прокручиваются вбок (Shift+колесо, тачпад);
@@ -111,6 +111,6 @@ FastMD © 2026 seka. Распространяется по лицензии [GNU
 | [md4c](https://github.com/mity/md4c) | разбор Markdown | [app/third_party/md4c/LICENSE.md](app/third_party/md4c/LICENSE.md) |
 | [lunasvg](https://github.com/sammycage/lunasvg) и plutovg | отрисовка SVG | [app/third_party/lunasvg/LICENSE](app/third_party/lunasvg/LICENSE) |
 | RaTeX | набор формул | [app/third_party/ratex/LICENSE-ratex.txt](app/third_party/ratex/LICENSE-ratex.txt) |
-| mermaid-rs-renderer | диаграммы Mermaid | [app/third_party/ratex/LICENSE-mermaid-rs-renderer.txt](app/third_party/ratex/LICENSE-mermaid-rs-renderer.txt) |
+| mermaid-rs-renderer | разбор Mermaid и все диаграммы, кроме схем `graph` / `flowchart` | [app/third_party/ratex/LICENSE-mermaid-rs-renderer.txt](app/third_party/ratex/LICENSE-mermaid-rs-renderer.txt) |
 
 Шрифты KaTeX, которые вкладываются в формулы, распространяются по [SIL Open Font License](app/third_party/ratex/OFL-katex-fonts.txt).
