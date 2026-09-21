@@ -9,7 +9,6 @@
 //! (`layout_scope` calls itself), and edges that cross a box boundary are drawn between the boxes and then carried on
 //! to the node that really owns the end. That is what keeps a subgraph's contents inside its own frame.
 
-mod pack;
 mod sugiyama;
 mod svg;
 mod text;
@@ -31,11 +30,6 @@ pub struct Cfg {
     pub min_node_w: f32,
     pub min_node_h: f32,
     pub margin: f32,
-}
-
-impl Cfg {
-    /// How wide against how tall the packed parts of one box should come out.
-    const PACK_ASPECT: f32 = 1.6;
 }
 
 impl Default for Cfg {
@@ -432,15 +426,7 @@ impl Model<'_> {
             picked.push(i);
         }
 
-        // Parts of the box that nothing joins are laid out on their own and fitted together; one connected whole
-        // goes straight through, so an ordinary diagram is drawn exactly as before.
-        let groups = pack::parts(nodes.len(), &es);
-        let out = if groups.len() > 1 {
-            let aspect = if sideways { 1.0 / Cfg::PACK_ASPECT } else { Cfg::PACK_ASPECT };
-            pack::run_parts(&nodes, &es, &groups, &self.cfg, aspect)
-        } else {
-            sugiyama::run(&nodes, &es, &self.cfg)
-        };
+        let out = sugiyama::run(&nodes, &es, &self.cfg);
         let (mut width, mut height) = (out.width, out.height);
         if sideways {
             std::mem::swap(&mut width, &mut height);
