@@ -43,6 +43,7 @@ struct TableLayout {
 
 struct BlockLayout {
     IDWriteTextLayout* text = nullptr;  // BK_TEXT / BK_CODE / image alt text
+    IDWriteTextLayout* label = nullptr;  // BK_CODE: the language name drawn in its corner
     TableLayout* table = nullptr;       // BK_TABLE
     float height = 0;                   // full block height incl. decorations (DIP)
     float width = 0;                    // width the block was laid out for
@@ -51,7 +52,11 @@ struct BlockLayout {
     std::vector<D2D1_RECT_F> codeBg;    // inline-code backgrounds (layout-relative), lazily computed
     std::vector<D2D1_RECT_F> kbdBg;     // <kbd>: the same, but framed
     bool codeBgValid = false;
-    ~BlockLayout() { if (text) text->Release(); delete table; }
+    ~BlockLayout() {
+        if (text) text->Release();
+        if (label) label->Release();
+        delete table;
+    }
 };
 
 float BlockHeightEstimate(const Doc& d, const Typography& t, const Block& b, float width, bool* exact);

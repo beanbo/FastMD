@@ -279,6 +279,15 @@ struct Builder {
             Highlight(d, codeLang, codeLangLen, tStart, tEnd - tStart, lang);
             b.runCount = (uint32_t)d.runs.size() - rStart;
             b.lang = lang;
+            if (codeLang && codeLangLen) {  // the name as typed, shown in the corner of the block
+                std::wstring name(codeLang, codeLangLen);
+                size_t sp = name.find_first_of(L" \t{");  // ```js title="x"
+                if (sp != std::wstring::npos) name.resize(sp);
+                if (!name.empty() && name.size() <= 24) {
+                    d.langNames.push_back(name);
+                    b.aux = (uint32_t)d.langNames.size();
+                }
+            }
         }
         if (leafHeading) {
             std::wstring slug = GithubSlug(d.text.data() + tStart, tEnd - tStart);

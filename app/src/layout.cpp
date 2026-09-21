@@ -438,6 +438,11 @@ BlockLayout* LayoutBlock(const Doc& d, const Typography& t, uint32_t index, floa
             bl->height = m.height + 2 * Metrics::kCodePad;
             bl->natural = std::ceil(m.widthIncludingTrailingWhitespace) + 2 * Metrics::kCodePad;
         }
+        if (b.aux && b.aux - 1 < d.langNames.size()) {  // the language name for the block's corner
+            const std::wstring& name = d.langNames[b.aux - 1];
+            if (SUCCEEDED(t.factory->CreateTextLayout(name.data(), (UINT32)name.size(), t.ui, 200.f, 40.f, &bl->label)))
+                bl->label->SetFontSize(11.5f, DWRITE_TEXT_RANGE{0, (UINT32)name.size()});
+        }
         break;
     }
     case BK_HR: bl->height = 4.f; break;

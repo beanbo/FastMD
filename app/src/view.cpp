@@ -558,6 +558,11 @@ static void DrawBlock(uint32_t i, float y) {
         break;
     case BK_CODE: {
         g.canvas->FillRoundRect(x, y, right, y + L->height, 6.f, P_CODEBG);
+        if (L->label && (int)i != g.hoverCode) {  // the language in the corner; the copy button takes that spot on hover
+            DWRITE_TEXT_METRICS lm{};
+            L->label->GetMetrics(&lm);
+            g.canvas->Text(L->label, right - std::ceil(lm.widthIncludingTrailingWhitespace) - 10.f, y + 6.f, P_MUTED);
+        }
         if (L->text) {
             float tx = x + Metrics::kCodePad - HScrollOf(i), ty = y + Metrics::kCodePad;
             g.canvas->PushClip(x, y, right, y + L->height);

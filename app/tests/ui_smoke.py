@@ -799,6 +799,29 @@ def test_svg():
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ 2.5 languages
+def test_languages():
+    """code blocks in languages added in 2.5 are highlighted and labelled with their language"""
+    ok = True
+    doc = OUT / "langs.md"
+    doc.write_text("# Языки\n\n```php\n<?php\n// комментарий\nfunction greet(string $name): string {\n"
+                   "    return \"Привет\";\n}\n```\n\n```mermaid\ngraph TD\n  A[Начало] --> B[Конец]\n```\n",
+                   encoding="utf-8")
+    proc, hwnd = launch(doc, size="--size=820x600")
+    try:
+        img = shot(hwnd, "32-languages")
+        left, width = q(hwnd, "TEXT_LEFT"), q(hwnd, "TEXT_W")
+        kw = find_color(img, (0xcf, 0x22, 0x2e), (left, 80, left + width, 300), tol=40)
+        ok &= check("2.5 a php block is highlighted", kw is not None, str(kw))
+        # the language sits in the block's top-right corner: muted pixels there
+        corner = [1 for x in range(left + width - 120, left + width - 8)
+                  for y in range(90, 130) if sum(img.getpixel((x, y))) < 620]
+        ok &= check("2.5 the block is labelled with its language", len(corner) > 10, str(len(corner)))
+    finally:
+        close_and_wait(proc, hwnd)
+    return ok
+
+
 # ------------------------------------------------------------------------------------------------ partial frames
 def same_pixels(a, b):
     return ImageChops.difference(a.convert("RGB"), b.convert("RGB")).getbbox() is None
@@ -994,7 +1017,7 @@ def main():
     ok = True
     for t in (lambda: test_basics(doc), lambda: test_hscroll(doc), test_outline, lambda: test_positions(doc), test_find,
               test_start_screen, lambda: test_links(doc), test_footnotes, test_html, test_remote_images, test_svg,
-              test_scroll_frames,
+              test_languages, test_scroll_frames,
               lambda: test_image_scaling(doc),
               lambda: test_columns(doc),
               lambda: test_settings(doc),

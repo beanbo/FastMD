@@ -91,6 +91,7 @@ struct Doc {
     std::vector<std::wstring> links;
     std::vector<Heading> headings;
     std::vector<Anchor> anchors;
+    std::vector<std::wstring> langNames;  // as typed after the fence; Block::aux of a code block is the index + 1
     std::vector<uint8_t> detailsOpen;  // one per <details> group: is it unfolded right now
     bool themed = false;               // holds a <picture> that depends on the colour theme
     std::wstring baseDir;          // directory of the .md file (with trailing backslash)
