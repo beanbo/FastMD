@@ -92,6 +92,9 @@ struct Doc {
     std::vector<std::wstring> links;
     std::vector<Heading> headings;
     std::vector<Anchor> anchors;
+    // text position → position in the Markdown source, one entry per chunk md4c handed over (sorted by first):
+    // "copy as Markdown" gives back the author's own source rather than something rebuilt from the model
+    std::vector<std::pair<uint32_t, uint32_t>> srcMap;
     std::vector<std::wstring> langNames;  // as typed after the fence; Block::aux of a code block is the index + 1
     std::vector<uint8_t> detailsOpen;  // one per <details> group: is it unfolded right now
     bool themed = false;               // holds a <picture> that depends on the colour theme

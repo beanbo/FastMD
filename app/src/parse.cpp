@@ -101,6 +101,8 @@ const AlertSpec kAlerts[] = {
 
 struct Builder {
     Doc& d;
+    const wchar_t* srcBase = nullptr;  // the Markdown source, for the text → source map
+    const wchar_t* srcEnd = nullptr;
     std::vector<Ctx> stack;
     float indent = 0;
     int quoteDepth = 0, listDepth = 0;
@@ -321,6 +323,8 @@ struct Builder {
             return;
         }
         uint32_t start = (uint32_t)d.text.size();
+        if (srcBase && s >= srcBase && s < srcEnd)  // remember where this chunk came from in the source
+            d.srcMap.emplace_back(start, (uint32_t)(s - srcBase));
         bool raw = code || (leafKind == BK_CODE && collecting);  // code keeps :colons: and every character as typed
         if (isEntity) AppendEntity(d.text, s, n);
         else if (raw) d.text.append(s, n);
@@ -1046,6 +1050,8 @@ bool ParseMarkdown(Doc& d, const wchar_t* src, size_t n) {
     d.runs.reserve(n / 24 + 16);
     d.blocks.reserve(n / 60 + 16);
     Builder b(d);
+    b.srcBase = src;
+    b.srcEnd = src + n;
     size_t skip = b.FrontMatter(src, n);
     MD_PARSER p{};
     p.abi_version = 0;

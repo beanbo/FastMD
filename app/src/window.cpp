@@ -236,11 +236,17 @@ static void SetColumn(int preset, bool toast) {
 }
 
 // ------------------------------------------------------------------------------------------------ commands
-static void CopySelection() {
-    std::wstring t = SelectionText();
-    if (t.empty()) return;
-    CopyToClipboard(t);
+static void CopySelection() {  // text, and the same with its formatting for Word / Outlook / the web
+    if (SelectionText().empty()) return;
+    CopySelectionRich();
     ShowToast(Tr(S_COPIED), 900);
+}
+
+static void CopySelectionMarkdown() {
+    std::wstring md = SelectionMarkdown();
+    if (md.empty()) return;
+    CopyToClipboard(md);
+    ShowToast(Tr(S_COPIED_MD), 900);
 }
 
 static int FirstVisibleImage() {  // automation: the image commands without a context menu target
@@ -254,6 +260,7 @@ void Command(UINT id) {
     int li = g.ctxLink >= 0 ? g.ctxLink : g.focusLink;
     switch (id) {
     case CMD_COPY: CopySelection(); break;
+    case CMD_COPY_MD: CopySelectionMarkdown(); break;
     case CMD_SELECT_ALL: SelectAll(); Invalidate(); break;
     case CMD_OPEN: OpenDialog(); break;
     case CMD_RELOAD: ReloadDocument(); ShowToast(Tr(S_RELOADED), 700); break;
@@ -332,6 +339,7 @@ static void ContextMenu(int sx, int sy, bool keyboard) {
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     }
     AppendMenuW(m, MF_STRING | (HasSelection() ? 0 : MF_GRAYED), CMD_COPY, Tr(S_MENU_COPY));
+    AppendMenuW(m, MF_STRING | (HasSelection() ? 0 : MF_GRAYED), CMD_COPY_MD, Tr(S_MENU_COPY_MD));
     AppendMenuW(m, MF_STRING | hasDoc, CMD_SELECT_ALL, Tr(S_MENU_SELECT_ALL));
     AppendMenuW(m, MF_STRING | hasDoc, CMD_FIND, Tr(S_MENU_FIND));
     AppendMenuW(m, MF_STRING | (TocAvailable() ? 0 : MF_GRAYED) | (g.tocOpen ? MF_CHECKED : 0), CMD_TOC, Tr(S_MENU_TOC));
@@ -655,6 +663,8 @@ static void OnLButtonDown(int mx, int my, WPARAM keys) {
     g.lastClickPt = POINT{mx, my};
     uint32_t pos;
     if (!HitTestDoc(x, y, &pos, nullptr)) return;
+    g.caretOn = false;  // the mouse takes the selection over: no caret until the keyboard asks for one again
+    g.caretWantX = -1.f;
     if (g.clickCount == 2) SelectWordAt(pos);
     else if (g.clickCount == 3) SelectBlockAt(pos);
     else {
@@ -726,7 +736,10 @@ bool KeyCommand(WPARAM vk, bool ctrl, bool shift, bool alt) {
     }
     if (ctrl) {
         switch (vk) {
-        case 'C': case VK_INSERT: CopySelection(); return true;
+        case 'C': case VK_INSERT:
+            if (shift) CopySelectionMarkdown();
+            else CopySelection();
+            return true;
         case 'A': if (!g.findOpen) { SelectAll(); Invalidate(); } return true;
         case 'F': FindOpen(); return true;
         case 'O': Command(shift ? CMD_TOC : CMD_OPEN); return true;
@@ -763,13 +776,14 @@ bool KeyCommand(WPARAM vk, bool ctrl, bool shift, bool alt) {
 static bool OnKeyDown(WPARAM vk) {
     bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0, alt = GetKeyState(VK_MENU) < 0;
     if (g.path.empty() && !ctrl && !alt && HomeKey(vk)) return true;
+    if (shift && !alt && KeySelect((unsigned)vk, ctrl, shift)) return true;  // Shift+arrows select (plan 3.3)
     if (!ctrl && !alt) {
         switch (vk) {
         case VK_ESCAPE:
             if (g.findOpen) FindClose();
             else if (TocOverlayOpen()) TocSetOpen(false);
             else if (g.focusLink >= 0) { g.focusLink = -1; Invalidate(); }
-            else if (HasSelection()) { g.selAnchor = g.selFocus; Invalidate(); }
+            else if (HasSelection() || g.caretOn) { g.selAnchor = g.selFocus; g.caretOn = false; Invalidate(); }
             else PostMessageW(g.hwnd, WM_CLOSE, 0, 0);
             return true;
         case VK_TAB:
@@ -846,6 +860,13 @@ static LRESULT Query(WPARAM q, LPARAM lp) {
         ForceFullRedraw();
         Invalidate();
         return 1;
+    case Q_SEL_ANCHOR: return g.selAnchor;
+    case Q_SEL_FOCUS: return g.selFocus;
+    case Q_CARET: {
+        float cx, cy, ch;
+        if (!g.caretOn || !CaretPoint(g.selFocus, &cx, &cy, &ch)) return -1;
+        return MAKELONG(std::lround(cx * s), std::lround((cy + ch * 0.5f) * s));
+    }
     }
     return 0;
 }

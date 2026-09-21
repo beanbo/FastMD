@@ -37,6 +37,8 @@ const Pair kStr[] = {
     {L"Открыть файл картинки", L"Open image file"},
     // toasts / messages
     {L"Скопировано", L"Copied"},
+    {L"Скопировано как Markdown", L"Copied as Markdown"},
+    {L"Копировать как Markdown\tCtrl+Shift+C", L"Copy as Markdown\tCtrl+Shift+C"},
     {L"Код скопирован", L"Code copied"},
     {L"Адрес ссылки скопирован", L"Link address copied"},
     {L"Картинка скопирована", L"Image copied"},

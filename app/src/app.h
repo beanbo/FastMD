@@ -36,7 +36,7 @@ enum Cmd : UINT {
     CMD_TOC, CMD_COL_NARROW, CMD_COL_NORMAL, CMD_COL_WIDE, CMD_COL_FULL, CMD_COL_NARROWER, CMD_COL_WIDER,
     CMD_WRAP, CMD_SETTINGS, CMD_LINK_OPEN, CMD_IMG_COPY, CMD_IMG_OPEN,
     CMD_FIND_CASE, CMD_FIND_WORD, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_FIND_CLOSE, CMD_LINK_NEXT, CMD_LINK_PREV,
-    CMD_LOAD_REMOTE,
+    CMD_LOAD_REMOTE, CMD_COPY_MD,
 };
 
 // WM_APP_QUERY ids (tests): pixel values are client pixels
@@ -49,6 +49,8 @@ enum Query : UINT {
     Q_SETTINGS_BTN /* centre of the gear button x | y << 16, -1 = not shown */,
     Q_IMG_SCALED /* width of the first display-size image copy, 0 = none */,
     Q_FULL_REDRAW /* forget the last frame and repaint everything (tests compare it with a scrolled frame) */,
+    Q_SEL_ANCHOR, Q_SEL_FOCUS /* the two ends of the selection, in text offsets */,
+    Q_CARET /* MAKELONG(x, y) of the caret in client pixels, or -1 when no caret is drawn */,
 };
 
 enum ColumnPreset : uint8_t { COL_NARROW = 0, COL_NORMAL, COL_WIDE, COL_FULL };
@@ -152,6 +154,8 @@ struct App {
     // ---- selection (absolute offsets in doc.text)
     uint32_t selAnchor = 0, selFocus = 0;
     bool selecting = false;
+    bool caretOn = false;       // the caret is drawn only while the keyboard drives the selection
+    float caretWantX = -1.f;    // x the caret aims for while it moves up or down (-1 = take it from the caret)
     int clickCount = 0;
     DWORD lastClickTime = 0;
     POINT lastClickPt{};
@@ -255,6 +259,8 @@ int CodeBlockAt(float x, float y, bool* onCopyButton);
 void SelectAll();
 void SelectWordAt(uint32_t pos);
 void SelectBlockAt(uint32_t pos);
+bool KeySelect(unsigned vk, bool ctrl, bool shift);  // Shift+arrows / Home / End: move the caret, extend the selection
+bool CaretPoint(uint32_t pos, float* x, float* y, float* h);  // caret in client DIP
 bool HasSelection();
 std::wstring SelectionText();
 std::wstring BlockPlainText(uint32_t i);
@@ -361,6 +367,9 @@ std::vector<EditorInfo> DetectEditors();
 // ------------------------------------------------------------------------------------------------ shell.cpp
 void OpenLink(int linkIndex);
 void CopyToClipboard(const std::wstring& text);
+// copy.cpp: the selection with its formatting (CF_HTML + RTF + text), and as the Markdown source it came from
+void CopySelectionRich();
+std::wstring SelectionMarkdown();
 bool CopyImageToClipboard(uint32_t imageBlock);
 void OpenImageFile(uint32_t imageBlock);
 void OpenInEditor();

@@ -332,6 +332,10 @@ static void DrawHighlights(IDWriteTextLayout* tl, uint32_t textOff, uint32_t tex
 }
 
 // ------------------------------------------------------------------------------------------------ drawing
+// The caret (the moving end of a keyboard selection) is drawn with the document, so a scroll carries it along with
+// the text. Its geometry lives with the rest of the selection code, below.
+static bool CaretGeom(uint32_t pos, float* cx, float* docY, float* h, bool relayout);
+
 static void ApplyColors(BlockLayout* L, const Block& b) {
     if (L->colored) return;
     L->colored = true;
@@ -669,6 +673,14 @@ static void DrawDocumentBand(float top, float bottom) {
         uint8_t pal = q.alert ? (uint8_t)(P_ALERT_NOTE + q.alert - 1) : P_BORDER;
         g.canvas->FillRect(tl + q.x, t, tl + q.x + Metrics::kQuoteBar, b, pal);
     }
+    if (g.caretOn) {  // the blocks around it are laid out already: no need to measure anything here
+        float cx, dy, ch;
+        if (CaretGeom(g.selFocus, &cx, &dy, &ch, false)) {
+            float ct = dy - g.scrollY, cb = ct + ch;
+            float w = 2.f / Scale();  // two device pixels, so it stays visible at any scale
+            if (cb > top && ct < bottom) g.canvas->FillRect(cx, ct, cx + w, cb, P_TEXT);
+        }
+    }
 }
 
 // a rectangle of the document redrawn from scratch (background included), for a strip that scrolled into view or a
@@ -705,7 +717,7 @@ namespace {
 struct FrameKey {
     uint32_t docSerial = 0, gen = 0, pixelSerial = 0, hxSerial = 0;
     float scrollY = 0, textW = 0, wideW = 0, docH = 0, viewW = 0, viewH = 0, scale = 0, docLeft = 0;
-    uint32_t selA = 0, selB = 0;
+    uint32_t selA = 0, selB = 0, caret = 0;
     int hoverLink = 0, hoverCode = 0, hoverHBlock = 0, hbarFlash = 0, focusLink = 0, dragHBlock = 0, tocHover = 0,
         curMatch = 0, findHot = 0, recentHover = 0, hoverHeading = 0;
     size_t matches = 0;
@@ -732,6 +744,7 @@ FrameKey CurrentKey() {
     k.docLeft = DocLeft();
     k.selA = g.selAnchor;
     k.selB = g.selFocus;
+    k.caret = g.caretOn ? g.selFocus + 1 : 0;
     k.hoverLink = g.hoverLink;
     k.hoverCode = g.hoverCode;
     k.hoverHBlock = g.hoverHBlock;
@@ -978,6 +991,186 @@ void SelectBlockAt(uint32_t pos) {
     ContainerRange(pos, &s, &e);
     g.selAnchor = s;
     g.selFocus = e;
+}
+
+// ------------------------------------------------------------------------------------------- keyboard selection 3.3
+// Shift+arrows move the caret and the selection follows it; Ctrl+Shift+arrows move by words, Shift+Home/End along the
+// visual line, Ctrl+Shift+Home/End to the ends of the document. The caret appears only once the keyboard starts a
+// selection — the mouse hides it again.
+
+// client x and document y of the caret at pos, and the height of its line
+static bool CaretGeom(uint32_t pos, float* cx, float* docY, float* h, bool relayout) {
+    if (g.doc.blocks.empty()) return false;
+    uint32_t bi = BlockOfPos(pos);
+    const Block& b = g.doc.blocks[bi];
+    if (BlockHidden(b)) return false;
+    BlockLayout* L = EnsureLayout(bi);
+    if (relayout) RecomputeY();
+    float bx, bw;
+    BlockBox(bi, &bx, &bw);
+    IDWriteTextLayout* tl = nullptr;
+    uint32_t off = b.textOff;
+    float lx = bx, ly = 0;
+    if ((b.kind == BK_TEXT || b.kind == BK_CODE) && L->text) {
+        tl = L->text;
+        if (b.kind == BK_CODE) {
+            lx += Metrics::kCodePad - HScrollOf(bi);
+            ly = Metrics::kCodePad;
+        }
+    } else if (b.kind == BK_TABLE && L->table) {
+        const Table& t = g.doc.tables[b.aux];
+        float yy = 0;
+        for (uint32_t r = 0; r < t.rows && !tl; r++) {
+            float xx = bx - HScrollOf(bi);
+            for (uint32_t c = 0; c < t.cols; c++) {
+                const Cell& cell = g.doc.cells[t.cellOff + r * t.cols + c];
+                if (pos >= cell.textOff && pos <= cell.textOff + cell.textLen && L->table->cells[r * t.cols + c]) {
+                    tl = L->table->cells[r * t.cols + c];
+                    off = cell.textOff;
+                    lx = xx + 1 + Metrics::kCellPadX;
+                    ly = yy + 1 + Metrics::kCellPadY;
+                    break;
+                }
+                xx += L->table->colW[c];
+            }
+            yy += L->table->rowH[r];
+        }
+    }
+    if (!tl) {  // a picture or a rule: the caret stands at its left edge
+        *cx = bx;
+        *docY = g.Y[bi];
+        *h = std::max(8.f, g.H[bi]);
+        return true;
+    }
+    FLOAT px = 0, py = 0;
+    DWRITE_HIT_TEST_METRICS m{};
+    if (FAILED(tl->HitTestTextPosition(pos - off, FALSE, &px, &py, &m))) return false;
+    *cx = lx + px;
+    *docY = g.Y[bi] + ly + py;
+    *h = m.height > 1.f ? m.height : 16.f;
+    return true;
+}
+
+// where the caret stands in client DIP — automation reads it to see what the keyboard did
+bool CaretPoint(uint32_t pos, float* x, float* y, float* h) {
+    float dy;
+    if (!CaretGeom(pos, x, &dy, h, true)) return false;
+    *y = dy - g.scrollY;
+    return true;
+}
+
+static bool CaretStop(const Block& b) { return !BlockHidden(b) && b.textLen > 0; }
+
+// a position between blocks belongs to no text: snap it to the neighbour the caret is heading for
+static uint32_t SnapPos(uint32_t pos, int dir) {
+    size_t n = g.doc.blocks.size();
+    if (!n) return 0;
+    uint32_t bi = BlockOfPos(pos);
+    if (CaretStop(g.doc.blocks[bi]) && pos >= g.doc.blocks[bi].textOff && pos <= BlockEnd(g.doc.blocks[bi])) return pos;
+    if (dir >= 0)
+        for (size_t i = bi; i < n; i++)
+            if (CaretStop(g.doc.blocks[i]) && BlockEnd(g.doc.blocks[i]) >= pos)
+                return std::max(pos, g.doc.blocks[i].textOff);
+    for (size_t i = bi + 1; i-- > 0;)
+        if (CaretStop(g.doc.blocks[i])) return std::min(pos, BlockEnd(g.doc.blocks[i]));
+    return pos;
+}
+
+static bool IsTrailSurrogate(wchar_t c) { return c >= 0xDC00 && c <= 0xDFFF; }
+
+static uint32_t MoveChar(uint32_t pos, int dir) {
+    const std::wstring& t = g.doc.text;
+    const Block& b = g.doc.blocks[BlockOfPos(pos)];
+    uint32_t s = b.textOff, e = BlockEnd(b);
+    if (dir > 0 && pos < e) {
+        uint32_t p = pos + 1;
+        while (p < e && IsTrailSurrogate(t[p])) p++;  // never stop inside a surrogate pair
+        return p;
+    }
+    if (dir < 0 && pos > s) {
+        uint32_t p = pos - 1;
+        while (p > s && IsTrailSurrogate(t[p])) p--;
+        return p;
+    }
+    return SnapPos(dir > 0 ? e + 1 : (s ? s - 1 : 0), dir);  // over the edge: into the next block
+}
+
+static uint32_t MoveWord(uint32_t pos, int dir) {
+    const std::wstring& t = g.doc.text;
+    uint32_t s, e;
+    ContainerRange(pos, &s, &e);
+    e = std::min(e, (uint32_t)t.size());
+    uint32_t p = pos;
+    if (dir > 0) {
+        if (p >= e) return SnapPos(e + 1, 1);
+        if (IsWordChar(t[p])) while (p < e && IsWordChar(t[p])) p++;
+        else while (p < e && !IsWordChar(t[p]) && !iswspace(t[p])) p++;
+        while (p < e && iswspace(t[p])) p++;  // stop at the start of the next word, as Windows does
+        return p > pos ? p : SnapPos(e + 1, 1);
+    }
+    if (p <= s) return SnapPos(s ? s - 1 : 0, -1);
+    while (p > s && iswspace(t[p - 1])) p--;
+    if (p > s && IsWordChar(t[p - 1])) while (p > s && IsWordChar(t[p - 1])) p--;
+    else while (p > s && !IsWordChar(t[p - 1]) && !iswspace(t[p - 1])) p--;
+    return p < pos ? p : SnapPos(s ? s - 1 : 0, -1);
+}
+
+// one visual line (or a page) up or down, keeping the x the caret started from — the way every text editor does it
+static uint32_t MoveLine(uint32_t pos, int dir, float pageH) {
+    float cx, dy, h;
+    if (!CaretGeom(pos, &cx, &dy, &h, true)) return pos;
+    if (g.caretWantX < 0) g.caretWantX = cx;
+    cx = g.caretWantX;
+    float probe = pageH > 0 ? dy + dir * pageH : dir > 0 ? dy + h + 2.f : dy - 2.f;
+    for (int tries = 0; tries < 8; tries++) {  // gaps between blocks are not text: keep looking past them
+        uint32_t p = pos;
+        HitTestDoc(cx, probe - g.scrollY, &p, nullptr);
+        p = SnapPos(p, dir);
+        if (dir > 0 ? p > pos : p < pos) return p;
+        probe += dir * std::max(6.f, h * 0.5f);
+        if (probe < 0 || probe > g.docH) break;
+    }
+    return dir > 0 ? SnapPos((uint32_t)g.doc.text.size(), -1) : SnapPos(0, 1);
+}
+
+static uint32_t LineEdge(uint32_t pos, int dir) {
+    float cx, dy, h;
+    if (!CaretGeom(pos, &cx, &dy, &h, true)) return pos;
+    uint32_t p = pos;
+    HitTestDoc(dir > 0 ? 1e6f : -1e6f, dy + h * 0.5f - g.scrollY, &p, nullptr);
+    return SnapPos(p, dir);
+}
+
+bool KeySelect(unsigned vk, bool ctrl, bool shift) {
+    if (!shift || g.path.empty() || g.doc.blocks.empty() || g.findOpen) return false;
+    uint32_t pos = g.selFocus;
+    if (!g.caretOn && !HasSelection()) {  // start where the reader is looking, not at a document top far above
+        float cx, dy, h;
+        if (!CaretGeom(pos, &cx, &dy, &h, true) || dy + h < g.scrollY || dy > g.scrollY + ViewH()) {
+            uint32_t p = pos;
+            HitTestDoc(TextLeft(), 4.f, &p, nullptr);
+            pos = g.selAnchor = SnapPos(p, 1);
+        }
+    }
+    uint32_t next = pos;
+    bool vertical = false;
+    switch (vk) {
+    case VK_LEFT: next = ctrl ? MoveWord(pos, -1) : MoveChar(pos, -1); break;
+    case VK_RIGHT: next = ctrl ? MoveWord(pos, 1) : MoveChar(pos, 1); break;
+    case VK_UP: next = MoveLine(pos, -1, 0); vertical = true; break;
+    case VK_DOWN: next = MoveLine(pos, 1, 0); vertical = true; break;
+    case VK_PRIOR: next = MoveLine(pos, -1, ViewH() - 56.f); vertical = true; break;
+    case VK_NEXT: next = MoveLine(pos, 1, ViewH() - 56.f); vertical = true; break;
+    case VK_HOME: next = ctrl ? SnapPos(0, 1) : LineEdge(pos, -1); break;
+    case VK_END: next = ctrl ? SnapPos((uint32_t)g.doc.text.size(), -1) : LineEdge(pos, 1); break;
+    default: return false;
+    }
+    if (!vertical) g.caretWantX = -1;
+    g.caretOn = true;
+    g.selFocus = next;
+    RevealTextPos(next, false);
+    Invalidate();
+    return true;
 }
 
 static void AppendCRLF(std::wstring& out, const wchar_t* s, size_t n) {

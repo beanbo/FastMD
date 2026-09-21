@@ -38,12 +38,13 @@ CMD = {"COPY": 100, "SELECT_ALL": 101, "OPEN": 102, "RELOAD": 103, "EDIT": 104, 
        "ZOOM_RESET": 112, "BACK": 113, "FORWARD": 114, "LINK_COPY": 115, "ASSOCIATE": 116, "TOC": 117,
        "COL_NARROW": 118, "COL_NORMAL": 119, "COL_WIDE": 120, "COL_FULL": 121, "COL_NARROWER": 122, "COL_WIDER": 123,
        "WRAP": 124, "SETTINGS": 125, "LINK_OPEN": 126, "IMG_COPY": 127, "IMG_OPEN": 128, "FIND_CASE": 129,
-       "FIND_WORD": 130, "FIND_NEXT": 131, "FIND_PREV": 132, "FIND_CLOSE": 133, "LINK_NEXT": 134, "LINK_PREV": 135}
+       "FIND_WORD": 130, "FIND_NEXT": 131, "FIND_PREV": 132, "FIND_CLOSE": 133, "LINK_NEXT": 134, "LINK_PREV": 135,
+       "LOAD_REMOTE": 136, "COPY_MD": 137}
 Q = {"SCROLLY": 1, "DOCH": 2, "TOC_OPEN": 3, "TOC_DOCKED": 4, "TOC_COUNT": 5, "TOC_CURRENT": 6, "TOC_ITEM_Y": 7,
      "HSCROLL_BLOCK": 8, "HSCROLL_X": 9, "FOCUS_LINK": 10, "MATCHES": 11, "CUR_MATCH": 12, "TEXT_LEFT": 13,
      "TEXT_W": 14, "RECENT_COUNT": 15, "FIND_EDIT": 16, "SETTINGS_HWND": 17, "FIND_OPEN": 18, "COLUMN": 19,
      "FONT_SIZE": 20, "WRAP": 21, "LANG": 22, "FIND_PART_X": 23, "BLOCK_Y": 24, "RESTORED": 25, "THEME_DARK": 26,
-     "TARGETY": 27, "SETTINGS_HIT": 28, "SITKA": 29, "SETTINGS_BTN": 30, "IMG_SCALED": 31, "FULL_REDRAW": 32}
+     "TARGETY": 27, "SETTINGS_HIT": 28, "SITKA": 29, "SETTINGS_BTN": 30, "IMG_SCALED": 31, "FULL_REDRAW": 32, "SEL_ANCHOR": 33, "SEL_FOCUS": 34, "CARET": 35}
 FP_NEXT, FP_CASE = 7, 3  # FindPart
 
 u32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
@@ -156,6 +157,23 @@ def clipboard():
         u32.CloseClipboard()
 
 
+def clipboard_format(name):
+    """contents of a registered clipboard format (HTML Format, Rich Text Format) as text"""
+    fmt = u32.RegisterClipboardFormatW(name)
+    if not fmt or not open_clipboard():
+        return ""
+    try:
+        h = u32.GetClipboardData(fmt)
+        if not h:
+            return ""
+        p = k32.GlobalLock(h)
+        data = ctypes.string_at(p)
+        k32.GlobalUnlock(h)
+        return data.decode("utf-8", "replace")
+    finally:
+        u32.CloseClipboard()
+
+
 def clipboard_has(fmt):
     if not open_clipboard():
         return False
@@ -201,6 +219,29 @@ def drag(hwnd, x0, y0, x1, y1):
     for k in range(1, 9):
         post(hwnd, WM_MOUSEMOVE, MK_LBUTTON, lp(x0 + (x1 - x0) * k / 8, y0 + (y1 - y0) * k / 8), 0.02)
     post(hwnd, WM_LBUTTONUP, 0, lp(x1, y1), 0.15)
+
+
+VK = {"left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28, "home": 0x24, "end": 0x23, "esc": 0x1B}
+
+
+def keys(hwnd, vks, shift=False, ctrl=False, wait=0.12):
+    """posted key presses with real modifier state: the app reads GetKeyState, so the input queues are attached"""
+    tid = u32.GetWindowThreadProcessId(hwnd, None)
+    me = k32.GetCurrentThreadId()
+    st = (ctypes.c_ubyte * 256)()
+    u32.AttachThreadInput(me, tid, True)
+    try:
+        u32.GetKeyboardState(ctypes.byref(st))
+        for vk, on in ((0x10, shift), (0xA0, shift), (0x11, ctrl), (0xA2, ctrl)):
+            st[vk] = 0x80 if on else 0
+        u32.SetKeyboardState(ctypes.byref(st))
+        for vk in vks:
+            post(hwnd, WM_KEYDOWN, vk, 0, wait)
+        for vk in (0x10, 0xA0, 0x11, 0xA2):
+            st[vk] = 0
+        u32.SetKeyboardState(ctypes.byref(st))
+    finally:
+        u32.AttachThreadInput(me, tid, False)
 
 
 def type_text(hwnd, text, wait=0.3):
@@ -822,6 +863,93 @@ def test_languages():
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ 3.1, 3.2 clipboard
+def test_clipboard(doc):
+    """copying keeps the formatting (CF_HTML + RTF) and can hand back the Markdown source"""
+    ok = True
+    proc, hwnd = launch(doc)
+    try:
+        cmd(hwnd, "SELECT_ALL", 0.3)
+        cmd(hwnd, "COPY", 0.6)
+        html, rtf, text = clipboard_format("HTML Format"), clipboard_format("Rich Text Format"), clipboard()
+        ok &= check("3.1 plain text is still there", "Проверка возможностей" in text)
+        ok &= check("3.1 CF_HTML with its header and markup",
+                    html.startswith("Version:0.9") and "<!--StartFragment-->" in html and "<h1>" in html
+                    and "<strong>" in html and "<code>" in html, repr(html[:60]))
+        raw = html.encode("utf-8")  # the offsets in the header are byte offsets, and the text is Russian
+        off = lambda name: int(html.split(name)[1][:10]) if name in html else -1
+        ok &= check("3.1 the HTML offsets point at the fragment",
+                    off("StartFragment:") == raw.find(b"<!--StartFragment-->") + len("<!--StartFragment-->")
+                    and off("EndFragment:") == raw.find(b"<!--EndFragment-->")
+                    and off("StartHTML:") == raw.find(b"<html>") and off("EndHTML:") == len(raw),
+                    f'{off("StartFragment:")} {off("EndFragment:")} {len(raw)}')
+        ok &= check("3.1 RTF with bold, a table and a link",
+                    rtf.startswith("{\\rtf1") and "\\b " in rtf and "HYPERLINK" in rtf, repr(rtf[:40]))
+        cmd(hwnd, "COPY_MD", 0.6)
+        md = clipboard()
+        src = doc.read_text(encoding="utf-8")
+        ok &= check("3.2 copy as Markdown gives the source back",
+                    "# Проверка возможностей" in md and "| Функция | Статус |" in md and "**Ctrl+F**" in md,
+                    repr(md[:60]))
+        ok &= check("3.2 it is the author's own text, not a rebuild",
+                    md.replace("\r\n", "\n").strip()[:200] in src, repr(md[:40]))
+    finally:
+        close_and_wait(proc, hwnd)
+    return ok
+
+
+# ------------------------------------------------------------------------------------------------ 3.3 keyboard
+def test_key_selection():
+    """selecting from the keyboard: Shift+arrows, whole words, line ends — and a caret that is really drawn"""
+    ok = True
+    doc = OUT / "keys.md"  # its own file: other tests edit features.md and leave a reading position behind
+    doc.write_text("# Заголовок\n\nСсылки: к разделу, сайт и почта.\n\nВторой абзац, чтобы курсору было куда "
+                   "спуститься строкой ниже.\n\nКонец документа.\n", encoding="utf-8")
+    proc, hwnd = launch(doc)
+    try:
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 3, q(hwnd, "BLOCK_Y", 1) + 8)  # into the first paragraph
+        start = q(hwnd, "SEL_FOCUS")
+        ok &= check("3.3 the mouse leaves no caret behind", q(hwnd, "CARET") == -1)
+        keys(hwnd, [VK["right"]] * 5, shift=True)
+        ok &= check("3.3 Shift+Right selects five characters",
+                    q(hwnd, "SEL_ANCHOR") == start and q(hwnd, "SEL_FOCUS") == start + 5,
+                    f'{start} → {q(hwnd, "SEL_FOCUS")}')
+        cmd(hwnd, "COPY", 0.4)
+        ok &= check("3.3 what is selected is what gets copied", clipboard() == "Ссылк", repr(clipboard()))
+        keys(hwnd, [VK["right"]], shift=True, ctrl=True)
+        cmd(hwnd, "COPY", 0.4)
+        ok &= check("3.3 Ctrl+Shift+Right takes the rest of the word, punctuation stays behind",
+                    clipboard() == "Ссылки", repr(clipboard()))
+        f1 = q(hwnd, "SEL_FOCUS")
+        keys(hwnd, [VK["down"]], shift=True)
+        ok &= check("3.3 Shift+Down moves a line down and keeps the anchor",
+                    q(hwnd, "SEL_ANCHOR") == start and q(hwnd, "SEL_FOCUS") > f1,
+                    f'{f1} → {q(hwnd, "SEL_FOCUS")}')
+        keys(hwnd, [VK["up"]], shift=True)
+        ok &= check("3.3 Shift+Up comes back to the same place", q(hwnd, "SEL_FOCUS") == f1,
+                    f'{f1} → {q(hwnd, "SEL_FOCUS")}')
+        keys(hwnd, [VK["end"]], shift=True)
+        cmd(hwnd, "COPY", 0.4)
+        ok &= check("3.3 Shift+End reaches the end of the line",
+                    clipboard().endswith("почта.") and "\r\n" not in clipboard(), repr(clipboard()[-20:]))
+        c = q(hwnd, "CARET")
+        box = (c & 0xFFFF, (c >> 16) - 5, (c & 0xFFFF) + 4, (c >> 16) + 5)
+        with_caret = shot(hwnd, "25-caret")
+        keys(hwnd, [VK["esc"]])
+        ok &= check("3.3 Esc drops the selection and the caret",
+                    q(hwnd, "CARET") == -1 and q(hwnd, "SEL_ANCHOR") == q(hwnd, "SEL_FOCUS"))
+        d = ImageChops.difference(with_caret.crop(box), shot(hwnd, "25-caret-off").crop(box))
+        ok &= check("3.3 the caret is drawn where it says it is",
+                    sum(1 for p in d.getdata() if sum(p) > 60) >= 6, f"{box}")
+        keys(hwnd, [VK["end"]], shift=True, ctrl=True)
+        cmd(hwnd, "COPY", 0.4)
+        ok &= check("3.3 Ctrl+Shift+End selects to the end of the document",
+                    clipboard().endswith("Конец документа."), repr(clipboard()[-20:]))
+    finally:
+        close_and_wait(proc, hwnd)
+    return ok
+
+
 # ------------------------------------------------------------------------------------------------ partial frames
 def same_pixels(a, b):
     return ImageChops.difference(a.convert("RGB"), b.convert("RGB")).getbbox() is None
@@ -1017,7 +1145,7 @@ def main():
     ok = True
     for t in (lambda: test_basics(doc), lambda: test_hscroll(doc), test_outline, lambda: test_positions(doc), test_find,
               test_start_screen, lambda: test_links(doc), test_footnotes, test_html, test_remote_images, test_svg,
-              test_languages, test_scroll_frames,
+              test_languages, lambda: test_clipboard(doc), test_key_selection, test_scroll_frames,
               lambda: test_image_scaling(doc),
               lambda: test_columns(doc),
               lambda: test_settings(doc),

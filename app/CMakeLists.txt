@@ -31,6 +31,7 @@ add_executable(FastMD WIN32
     src/layout.cpp src/canvas_gdi.cpp
     src/highlight.cpp src/theme.cpp src/util.cpp
     src/find.cpp src/toc.cpp src/home.cpp src/store.cpp src/shell.cpp src/settings_ui.cpp src/strings.cpp
+    src/copy.cpp
     third_party/md4c/md4c.c
     res/fastmd.rc)
 

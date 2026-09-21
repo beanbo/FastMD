@@ -117,6 +117,8 @@ static void ResetViewState() {
     g.known.clear();
     g.selAnchor = g.selFocus = 0;
     g.selecting = false;
+    g.caretOn = false;
+    g.caretWantX = -1.f;
     g.matches.clear();
     g.curMatch = -1;
     g.lowerText.clear();
