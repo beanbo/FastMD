@@ -458,6 +458,12 @@ static void ScrollTest() {  // steady-state cost of a scrolling frame, logged to
 static void AfterFirstFrame() {
     g.firstFrame = false;
     Invalidate();  // the icon buttons (settings, outline, its close icon) were left out of the first frame
+    // COM has to outlive the workers. The image and scaling threads CoInitialize around their WIC work and
+    // CoUninitialize when they are done (loader.cpp); with no other apartment in the process, the last of those calls
+    // tears COM down for the whole process while SHAddToRecentDocs below is still inside urlmon and Windows.Storage,
+    // and the shell call goes on with state that has just been freed. So this thread takes an apartment before any
+    // worker starts and never releases it; after the first frame, so start-up pays nothing.
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     StartBackgroundWork();
     DragAcceptFiles(g.hwnd, TRUE);
     if (!g.path.empty()) SHAddToRecentDocs(SHARD_PATHW, g.path.c_str());

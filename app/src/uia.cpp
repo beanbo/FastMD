@@ -270,8 +270,8 @@ struct DocumentProvider final : IRawElementProviderSimple, IRawElementProviderFr
 
     // ---- IRawElementProviderSimple
     HRESULT STDMETHODCALLTYPE get_ProviderOptions(ProviderOptions* out) override {
-        // no UseComThreading: the window thread has no COM apartment on purpose (it costs 10-20 ms at start-up),
-        // and UI Automation is happy to call a plain server-side provider on its own thread
+        // no UseComThreading: the window thread has no COM apartment until after the first frame (it costs 10-20 ms
+        // at start-up), and UI Automation is happy to call a plain server-side provider on its own thread
         *out = ProviderOptions_ServerSideProvider;
         return S_OK;
     }
