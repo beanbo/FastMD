@@ -8,6 +8,7 @@
 //   store.cpp       — settings (registry), reading positions + recent documents (positions.bin), editor detection
 //   shell.cpp       — links, clipboard, editor / Explorer / dialogs, .md association
 //   settings_ui.cpp — settings window and the gear button that opens it
+//   tasks.cpp       — task lists: a click on a box ticks the item in the file itself
 //   strings.cpp     — UI strings (ru / en)
 //   window.cpp      — Win32 window, input, commands, menus, wWinMain
 #pragma once
@@ -55,6 +56,9 @@ enum Query : UINT {
     Q_DRAG /* formats a drag would carry: lp = kind * 65536 + arg → DragFormat bits */,
     Q_MATH /* formulas and diagrams: lp = 0 all, 1 drawn, 2 failed */,
     Q_UPDATE /* lp = 0 newer version found, 1 start a test download, 2 installer downloaded and checked */,
+    Q_TASK /* lp = task → 1 ticked, 0 not, -1 no such task */,
+    Q_TASK_BOX /* lp = task → centre of its box x | y << 16 in client px, -1 = not on screen */,
+    Q_DOC_SERIAL /* changes with every load of a document: a reload shows up here */,
 };
 
 // what can be dragged out of the window, and the formats it is offered in (drag.cpp)
@@ -222,6 +226,8 @@ struct App {
     DWORD hbarFlashUntil = 0;
     bool settingsBtnHot = false;    // the gear button (top-right corner) under the mouse
     int hoverHeading = -1;          // heading under the mouse: shows the link icon beside it
+    int hoverTask = -1;             // task list item whose box is under the mouse (block index)
+    int downTask = -1;              // the box the left button went down on: ticked if it comes up there too
     std::wstring tip;               // tooltip pill (buttons)
     std::wstring toast;
     DWORD toastUntil = 0;
@@ -290,6 +296,8 @@ int HeadingBlockBySlug(const std::wstring& slug);
 int HeadingAt(float x, float y, bool* onIcon);  // heading under the pointer (-1 = none), and its link icon
 int SummaryAt(float x, float y);                // <summary> line under the pointer (-1 = none)
 void ToggleDetails(uint32_t block);             // fold the block's <details> open or shut
+int TaskAt(float x, float y);                   // task list box under the pointer: its block (-1 = none)
+bool TaskBoxRect(uint32_t block, float* l, float* t, float* r, float* b);  // client DIP; false = none on screen
 bool BlockHidden(const Block& b);               // inside a folded <details>
 std::wstring SlugOfBlock(uint32_t block);       // "" if the block is not a heading
 void ScrollToBlock(uint32_t i, bool animate);
@@ -367,6 +375,7 @@ void StartMeasure();
 void JoinWorkers();
 void StartWatcher();
 void StopWatcher();
+void OnFileChanged();                // the watcher saw the file change: reload unless the disk holds what is shown
 HANDLE Spawn(LPTHREAD_START_ROUTINE fn, void* arg, int prio = THREAD_PRIORITY_NORMAL, SIZE_T stack = 0);
 std::wstring WindowTitle();
 void LoadPositionsAsync();           // after the first frame
@@ -439,6 +448,9 @@ bool RegisterAssociation(bool openSettings);
 bool PreviewRegister(bool on);       // window.cpp: the preview pane and thumbnails in Explorer (plan 5.2, 5.3)
 void UnregisterAssociation();
 std::wstring UrlDecode(const std::wstring& s);
+
+// ------------------------------------------------------------------------------------------------ tasks.cpp
+bool ToggleTask(uint32_t block);     // tick or untick a task list item in the file, then on screen
 
 // ------------------------------------------------------------------------------------------------ settings_ui.cpp
 void SettingsOpen();

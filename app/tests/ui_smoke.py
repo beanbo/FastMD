@@ -44,7 +44,8 @@ Q = {"SCROLLY": 1, "DOCH": 2, "TOC_OPEN": 3, "TOC_DOCKED": 4, "TOC_COUNT": 5, "T
      "HSCROLL_BLOCK": 8, "HSCROLL_X": 9, "FOCUS_LINK": 10, "MATCHES": 11, "CUR_MATCH": 12, "TEXT_LEFT": 13,
      "TEXT_W": 14, "RECENT_COUNT": 15, "FIND_EDIT": 16, "SETTINGS_HWND": 17, "FIND_OPEN": 18, "COLUMN": 19,
      "FONT_SIZE": 20, "WRAP": 21, "LANG": 22, "FIND_PART_X": 23, "BLOCK_Y": 24, "RESTORED": 25, "THEME_DARK": 26,
-     "TARGETY": 27, "SETTINGS_HIT": 28, "SITKA": 29, "SETTINGS_BTN": 30, "IMG_SCALED": 31, "FULL_REDRAW": 32, "SEL_ANCHOR": 33, "SEL_FOCUS": 34, "CARET": 35, "DRAG": 36, "MATH": 37, "UPDATE": 38}
+     "TARGETY": 27, "SETTINGS_HIT": 28, "SITKA": 29, "SETTINGS_BTN": 30, "IMG_SCALED": 31, "FULL_REDRAW": 32, "SEL_ANCHOR": 33, "SEL_FOCUS": 34, "CARET": 35, "DRAG": 36, "MATH": 37, "UPDATE": 38,
+     "TASK": 39, "TASK_BOX": 40, "DOC_SERIAL": 41}
 FP_NEXT, FP_CASE = 7, 3  # FindPart
 
 u32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
@@ -1027,6 +1028,142 @@ def test_broken_html():
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ task lists
+TASKS_MD = """---
+title: Задачи
+---
+
+# Список дел
+
+Кириллица перед списком: смещения в байтах и в символах здесь расходятся.
+
+- [ ] Первая задача
+- [x] Вторая, уже сделана
+- [X] Третья, отмечена заглавной
+  - [ ] Вложенная
+1. [ ] Нумерованная
+
+> - [ ] В цитате
+
+```text
+- [ ] это код, а не задача
+```
+"""
+TASK_LINES = ["Первая задача", "Вторая, уже сделана", "Третья, отмечена заглавной", "Вложенная", "Нумерованная",
+              "В цитате"]
+
+
+def task_box(hwnd, k):
+    c = q(hwnd, "TASK_BOX", k)
+    return None if c < 0 else (c & 0xFFFF, c >> 16)
+
+
+def task_text(marks):
+    """TASKS_MD with the boxes set to marks (one character per task, in document order)"""
+    text = TASKS_MD
+    for line, m in zip(TASK_LINES, marks):
+        at = text.index("] " + line)
+        text = text[:at - 1] + m + text[at:]
+    return text
+
+
+def test_tasks():
+    """a click on a task box ticks the item in the file: one character changes, in the file's own encoding"""
+    ok = True
+    acp = k32.GetACP()
+    variants = [  # name, how the text becomes the file's bytes
+        ("utf8", lambda t: t.encode("utf-8")),
+        ("bom-crlf", lambda t: b"\xef\xbb\xbf" + t.replace("\n", "\r\n").encode("utf-8")),
+        ("utf16", lambda t: b"\xff\xfe" + t.replace("\n", "\r\n").encode("utf-16-le")),
+        ("ansi", lambda t: t.encode(f"cp{acp}", errors="replace")),  # not UTF-8: read in the ANSI code page
+    ]
+    start = " xX   "
+    for name, encode in variants:
+        doc = OUT / f"tasks-{name}.md"
+        doc.write_bytes(encode(TASKS_MD))
+        proc, hwnd = launch(doc, size="--size=900x800")
+        try:
+            states = [q(hwnd, "TASK", k) for k in range(7)]
+            ok &= check(f"tasks ({name}): six boxes, the code block has none, [X] counts as ticked",
+                        states == [0, 1, 1, 0, 0, 0, -1], str(states))
+            serial = q(hwnd, "DOC_SERIAL")
+            marks = list(start)
+            for k in (0, 2, 5, 0, 3):  # tick, untick the capital X, the quoted one, the first one back, the nested
+                box = task_box(hwnd, k)
+                if not box:
+                    ok &= check(f"tasks ({name}): box {k} is on screen", False)
+                    break
+                click(hwnd, box[0], box[1], 0.5)
+                marks[k] = " " if marks[k] != " " else "x"
+            want = encode(task_text("".join(marks)))
+            got = doc.read_bytes()
+            ok &= check(f"tasks ({name}): the file changed in the marks only, byte for byte", got == want,
+                        f"{len(got)} vs {len(want)} bytes" if got != want else "")
+            states = [q(hwnd, "TASK", k) for k in range(6)]
+            ok &= check(f"tasks ({name}): the boxes on screen follow", states == [int(m != " ") for m in marks],
+                        f"{states} for {marks!r}")
+            time.sleep(0.4)  # the watcher saw our own writes: they must not reload the document
+            ok &= check(f"tasks ({name}): our own write does not reload the document",
+                        q(hwnd, "DOC_SERIAL") == serial, f"{serial} → {q(hwnd, 'DOC_SERIAL')}")
+            if name != "utf8":
+                continue
+            # the Markdown source in memory follows too: "copy as Markdown" gives the new mark
+            cmd(hwnd, "SELECT_ALL", 0.3)
+            cmd(hwnd, "COPY_MD", 0.4)
+            ok &= check("tasks: copy as Markdown gives the ticked source", "- [x] Вложенная" in clipboard(),
+                        repr(clipboard()[:80]))
+            post(hwnd, WM_KEYDOWN, 0x1B, 0, 0.2)
+            # a press on a box that is let go somewhere else is not a click. (The accent the box takes under the pointer
+            # is not checked here: a posted WM_MOUSEMOVE is followed at once by WM_MOUSELEAVE, the real pointer being
+            # elsewhere, and the test does not move the reader's mouse.)
+            box = task_box(hwnd, 4)
+            before = doc.read_bytes()
+            post(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp(*box), 0.05)
+            post(hwnd, WM_MOUSEMOVE, MK_LBUTTON, lp(box[0] + 200, box[1] + 40), 0.05)
+            post(hwnd, WM_LBUTTONUP, 0, lp(box[0] + 200, box[1] + 40), 0.5)
+            ok &= check("tasks: pressed on a box and let go elsewhere changes nothing",
+                        doc.read_bytes() == before and q(hwnd, "TASK", 4) == 0)
+            # a read-only file: nothing is written, and the box stays as the file says
+            os.chmod(doc, 0o444)
+            try:
+                click(hwnd, box[0], box[1], 0.5)
+                ok &= check("tasks: a read-only file is left alone", doc.read_bytes() == before and q(hwnd, "TASK", 4) == 0)
+            finally:
+                os.chmod(doc, 0o666)
+            # a file another program holds without letting others write: the same
+            k32.CreateFileW.restype = wt.HANDLE
+            k32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p, wt.DWORD, wt.DWORD, wt.HANDLE]
+            k32.CloseHandle.argtypes = [wt.HANDLE]
+            h = k32.CreateFileW(str(doc), 0x80000000, 1, None, 3, 0, None)  # GENERIC_READ, FILE_SHARE_READ only
+            try:
+                click(hwnd, box[0], box[1], 0.5)
+                ok &= check("tasks: a file locked by another program is left alone",
+                            doc.read_bytes() == before and q(hwnd, "TASK", 4) == 0)
+            finally:
+                k32.CloseHandle(h)
+            shot(hwnd, "59-tasks-busy-toast")
+            # changed on disk behind the window's back: the click must not write into a file it has not seen
+            serial = q(hwnd, "DOC_SERIAL")
+            changed = before + "\nДописано снаружи.\n".encode("utf-8")
+            doc.write_bytes(changed)
+            post(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp(*box), 0)  # before the watcher's reload (120 ms debounce)
+            post(hwnd, WM_LBUTTONUP, 0, lp(*box), 0.8)
+            ok &= check("tasks: a file changed on disk is reloaded, not written",
+                        doc.read_bytes() == changed and q(hwnd, "DOC_SERIAL") != serial and q(hwnd, "TASK", 4) == 0,
+                        f"serial {serial} → {q(hwnd, 'DOC_SERIAL')}")
+            click(hwnd, box[0], box[1], 0.5)  # and after the reload the same click works
+            ok &= check("tasks: after the reload the box can be ticked",
+                        doc.read_bytes() == changed.replace("[ ] Нумерованная".encode("utf-8"),
+                                                            "[x] Нумерованная".encode("utf-8"))
+                        and q(hwnd, "TASK", 4) == 1)
+            shot(hwnd, "60-tasks-light")
+            cmd(hwnd, "THEME_DARK", 0.5)
+            shot(hwnd, "61-tasks-dark")
+        finally:
+            close_and_wait(proc, hwnd)
+    return ok
+
+
 # ------------------------------------------------------------------------------------------------ 5.6 updates
 def test_update():
     """the update check: one request, a newer version noticed, the installer downloaded and checked by its hash"""
@@ -1430,7 +1567,7 @@ def main():
     ok = True
     for t in (lambda: test_basics(doc), lambda: test_hscroll(doc), test_outline, lambda: test_positions(doc), test_find,
               test_start_screen, lambda: test_links(doc), test_footnotes, test_html, test_remote_images, test_svg,
-              test_languages, lambda: test_clipboard(doc), test_key_selection, test_pdf, lambda: test_drag(doc), test_math, test_wide_diagram, test_update, test_broken_html, test_scroll_frames,
+              test_languages, lambda: test_clipboard(doc), test_key_selection, test_pdf, lambda: test_drag(doc), test_math, test_wide_diagram, test_update, test_broken_html, test_tasks, test_scroll_frames,
               lambda: test_image_scaling(doc),
               lambda: test_columns(doc),
               lambda: test_settings(doc),

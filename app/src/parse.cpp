@@ -104,6 +104,7 @@ struct Builder {
     Doc& d;
     const wchar_t* srcBase = nullptr;  // the Markdown source, for the text → source map
     const wchar_t* srcEnd = nullptr;
+    uint32_t mdBase = 0;               // where md4c's input starts in the source (after the front matter)
     std::vector<Ctx> stack;
     float indent = 0;
     int quoteDepth = 0, listDepth = 0;
@@ -148,6 +149,7 @@ struct Builder {
     // pending list marker (attached to the next leaf)
     uint8_t pendMarker = MK_NONE, pendLevel = 0;
     uint32_t pendNumber = 0;
+    uint32_t pendTask = 0;  // task item: source offset of the character between its brackets
     std::vector<std::wstring> pendAnchors;  // #targets for the next emitted block (footnote jumps)
     uint32_t fnId = 0;                      // footnote definition being collected
     // tables
@@ -185,6 +187,8 @@ struct Builder {
         b.listLevel = pendLevel;
         b.number = pendNumber;
         b.textOff = (uint32_t)d.text.size();  // every block owns a [textOff, textOff+textLen) range, in order
+        if (pendMarker == MK_TASK_OPEN || pendMarker == MK_TASK_DONE)
+            d.tasks.push_back(Task{(uint32_t)d.blocks.size(), pendTask});
         pendMarker = MK_NONE;
         d.blocks.push_back(b);
         for (std::wstring& a : pendAnchors) d.anchors.push_back(Anchor{std::move(a), (uint32_t)d.blocks.size() - 1});
@@ -783,8 +787,10 @@ struct Builder {
             Ctx& list = stack.back();
             if (list.items++ > 0) Margin(4);  // li + li { margin-top: .25em }
             pendLevel = (uint8_t)listDepth;
-            if (li->is_task) pendMarker = (li->task_mark == L' ') ? MK_TASK_OPEN : MK_TASK_DONE;
-            else if (list.type == C_OL) { pendMarker = MK_NUMBER; pendNumber = list.next++; }
+            if (li->is_task) {
+                pendMarker = (li->task_mark == L' ') ? MK_TASK_OPEN : MK_TASK_DONE;
+                pendTask = mdBase + (uint32_t)li->task_mark_offset;
+            } else if (list.type == C_OL) { pendMarker = MK_NUMBER; pendNumber = list.next++; }
             else pendMarker = MK_BULLET;
             stack.push_back(Ctx{C_LI, list.tight, false, 0, 0, -1});
             break;
@@ -1144,6 +1150,7 @@ bool ParseMarkdown(Doc& d, const wchar_t* src, size_t n) {
     b.srcBase = src;
     b.srcEnd = src + n;
     size_t skip = b.FrontMatter(src, n);
+    b.mdBase = (uint32_t)skip;
     MD_PARSER p{};
     p.abi_version = 0;
     p.flags = MD_DIALECT_GITHUB | MD_FLAG_LATEXMATHSPANS;  // $…$ and $$…$$ as on GitHub

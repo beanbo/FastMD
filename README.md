@@ -66,7 +66,8 @@ To be rid of it entirely, add the program's folder to the antivirus exclusions. 
   - selection by mouse and by keyboard (Shift+arrows, by word, to the ends of the line and of the document);
   - copying with formatting (HTML and RTF) and as Markdown source (Ctrl+Shift+C);
   - dragging text, links and images into other applications;
-  - printing and PDF export (Ctrl+P, Ctrl+Shift+P) — as text, not as a picture.
+  - printing and PDF export (Ctrl+P, Ctrl+Shift+P) — as text, not as a picture;
+  - task list boxes tick with a click, in the file itself (`- [ ]` ↔ `- [x]`): only the character between the brackets changes, and only while the file on disk is exactly what is on screen. This is the one time FastMD writes to a document.
 - **Search:** Ctrl+F, case sensitivity, whole words, match marks on the scrollbar, IME input.
 - **Memory:**
   - a document opens at the place where you closed it;

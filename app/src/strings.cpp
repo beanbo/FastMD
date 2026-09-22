@@ -70,6 +70,12 @@ const Pair kStr[] = {
     {L"Устанавливаю обновление…", L"Installing the update…"},
     {L"Не удалось загрузить обновление", L"The update could not be downloaded"},
     {L"Обновить FastMD…", L"Update FastMD…"},
+    {L"Файл занят другой программой — отметка не сохранена",
+     L"Another program is using the file — the tick was not saved"},
+    {L"Файл защищён от записи — отметка не сохранена", L"The file is write-protected — the tick was not saved"},
+    {L"Файл изменился на диске — документ обновлён, отметьте ещё раз",
+     L"The file changed on disk — reloaded, click the box again"},
+    {L"Не удалось сохранить отметку в файл", L"Could not save the tick to the file"},
     // find bar
     {L"Найти в документе", L"Find in document"},
     {L"нет совпадений", L"no results"},

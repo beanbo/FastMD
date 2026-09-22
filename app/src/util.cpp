@@ -99,6 +99,27 @@ std::wstring DirOf(const std::wstring& path) {
 }
 
 // ------------------------------------------------------------------------------------------------ files
+void DecodeText(const char* p, int len, std::wstring& out, TextEncoding* enc) {
+    uint32_t header = 0;
+    if (len >= 3 && (uint8_t)p[0] == 0xEF && (uint8_t)p[1] == 0xBB && (uint8_t)p[2] == 0xBF) {  // UTF-8 BOM
+        p += 3;
+        len -= 3;
+        header = 3;
+    }
+    if (len >= 2 && (uint8_t)p[0] == 0xFF && (uint8_t)p[1] == 0xFE) {  // UTF-16 LE file
+        out.assign((const wchar_t*)(p + 2), (len - 2) / 2);
+        if (enc) *enc = TextEncoding{header + 2, 1200};
+        return;
+    }
+    int wn = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, p, len, nullptr, 0);
+    UINT cp = CP_UTF8;
+    DWORD flags = MB_ERR_INVALID_CHARS;
+    if (wn == 0 && len > 0) { cp = CP_ACP; flags = 0; wn = MultiByteToWideChar(cp, 0, p, len, nullptr, 0); }
+    out.resize(wn);
+    out.resize(MultiByteToWideChar(cp, flags, p, len, out.data(), wn));
+    if (enc) *enc = TextEncoding{header, cp};
+}
+
 bool ReadFileUtf16(const wchar_t* path, std::wstring& out, uint64_t* ticksRead, FILETIME* writeTime) {
     HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                            OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
@@ -113,19 +134,7 @@ bool ReadFileUtf16(const wchar_t* path, std::wstring& out, uint64_t* ticksRead, 
     CloseHandle(f);
     if (!ok) { if (buf) VirtualFree(buf, 0, MEM_RELEASE); return false; }
     if (ticksRead) *ticksRead = NowTicks();
-    const char* p = buf;
-    int len = (int)got;
-    if (len >= 3 && (uint8_t)p[0] == 0xEF && (uint8_t)p[1] == 0xBB && (uint8_t)p[2] == 0xBF) { p += 3; len -= 3; }
-    if (len >= 2 && (uint8_t)p[0] == 0xFF && (uint8_t)p[1] == 0xFE) {  // UTF-16 LE file
-        out.assign((const wchar_t*)(p + 2), (len - 2) / 2);
-    } else {
-        int wn = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, p, len, nullptr, 0);
-        UINT cp = CP_UTF8;
-        DWORD flags = MB_ERR_INVALID_CHARS;
-        if (wn == 0 && len > 0) { cp = CP_ACP; flags = 0; wn = MultiByteToWideChar(cp, 0, p, len, nullptr, 0); }
-        out.resize(wn);
-        out.resize(MultiByteToWideChar(cp, flags, p, len, out.data(), wn));
-    }
+    DecodeText(buf, (int)got, out, nullptr);
     VirtualFree(buf, 0, MEM_RELEASE);
     return true;
 }
