@@ -27,7 +27,7 @@ struct ViewState {
     uint32_t anchor;   // block the window was scrolled to, and the offset into it: the reading place
     float anchorOff;
     bool caret, tocOpen, findOpen, dark;
-    int hoverLink, hoverCode, hoverHeading, focusLink;
+    int hoverLink, hoverCode, hoverHeading, hoverTask, focusLink;
     Canvas* canvas;
 };
 
@@ -36,7 +36,8 @@ void Save(ViewState& v) {
     v.textW = g.textW; v.wideW = g.wideW; v.scrollY = g.scrollY; v.targetY = g.targetY;
     v.selA = g.selAnchor; v.selB = g.selFocus; v.caret = g.caretOn;
     v.tocOpen = g.tocOpen; v.findOpen = g.findOpen; v.dark = PaletteIsDark();
-    v.hoverLink = g.hoverLink; v.hoverCode = g.hoverCode; v.hoverHeading = g.hoverHeading; v.focusLink = g.focusLink;
+    v.hoverLink = g.hoverLink; v.hoverCode = g.hoverCode; v.hoverHeading = g.hoverHeading; v.hoverTask = g.hoverTask;
+    v.focusLink = g.focusLink;
     v.canvas = g.canvas;
     v.anchor = g.doc.blocks.empty() ? 0 : FirstVisible(g.scrollY);
     v.anchorOff = v.anchor < g.Y.size() ? g.scrollY - g.Y[v.anchor] : 0.f;
@@ -50,7 +51,8 @@ void Restore(const ViewState& v) {
     g.scrollY = v.scrollY; g.targetY = v.targetY;
     g.selAnchor = v.selA; g.selFocus = v.selB; g.caretOn = v.caret;
     g.tocOpen = v.tocOpen; g.findOpen = v.findOpen;
-    g.hoverLink = v.hoverLink; g.hoverCode = v.hoverCode; g.hoverHeading = v.hoverHeading; g.focusLink = v.focusLink;
+    g.hoverLink = v.hoverLink; g.hoverCode = v.hoverCode; g.hoverHeading = v.hoverHeading; g.hoverTask = v.hoverTask;
+    g.focusLink = v.focusLink;
     SetDarkPalette(v.dark);
     Relayout();  // back to the window's width; the print generation's measure jobs are dropped
     // Relayout anchors the view on the block at the top of the *paper* layout, which means nothing here: put the
@@ -142,7 +144,7 @@ bool PrintPages(HDC dc, const wchar_t* jobName, const wchar_t* outFile, int from
     g.findOpen = false;
     g.selAnchor = g.selFocus = 0;
     g.caretOn = false;
-    g.hoverLink = g.hoverCode = g.hoverHeading = g.focusLink = -1;
+    g.hoverLink = g.hoverCode = g.hoverHeading = g.hoverTask = g.focusLink = -1;
     SetDarkPalette(false);  // dark pages are for screens
     g.fitWide = true;       // paper does not scroll: a wide diagram shrinks to the page instead
     pg.pageH = pg.areaH / s;

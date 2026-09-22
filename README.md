@@ -10,9 +10,9 @@ English · [Русский](README.ru.md)
 
 ## Download
 
-**[FastMD 1.1.1 — latest release](https://github.com/beanbo/FastMD/releases/latest):**
+**[FastMD 1.2.0 — latest release](https://github.com/beanbo/FastMD/releases/latest):**
 1. `FastMD-Setup.exe` — a per-user install, no administrator rights: a Start menu shortcut, the `.md` association, a preview pane in Explorer. Uninstalls through Settings → Apps.
-2. Or `FastMD-1.1.1-win-x64.zip` — unpack it anywhere and run `FastMD.exe`; to make `.md` files open on a double click, pick "Open .md files with FastMD…" from the context menu and confirm the choice in Settings.
+2. Or `FastMD-1.2.0-win-x64.zip` — unpack it anywhere and run `FastMD.exe`; to make `.md` files open on a double click, pick "Open .md files with FastMD…" from the context menu and confirm the choice in Settings.
 
 The exe is not signed yet, so on the first run Windows SmartScreen may warn you: "More info" → "Run anyway". Code signing is waiting on a certificate (task 5.5).
 
@@ -66,7 +66,8 @@ To be rid of it entirely, add the program's folder to the antivirus exclusions. 
   - selection by mouse and by keyboard (Shift+arrows, by word, to the ends of the line and of the document);
   - copying with formatting (HTML and RTF) and as Markdown source (Ctrl+Shift+C);
   - dragging text, links and images into other applications;
-  - printing and PDF export (Ctrl+P, Ctrl+Shift+P) — as text, not as a picture.
+  - printing and PDF export (Ctrl+P, Ctrl+Shift+P) — as text, not as a picture;
+  - task list boxes tick with a click, in the file itself (`- [ ]` ↔ `- [x]`): only the character between the brackets changes, and only while the file on disk is exactly what is on screen. This is the one time FastMD writes to a document.
 - **Search:** Ctrl+F, case sensitivity, whole words, match marks on the scrollbar, IME input.
 - **Memory:**
   - a document opens at the place where you closed it;

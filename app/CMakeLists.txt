@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 # the one place the version lives: src/version.h (generated) feeds the exe resource and the settings window
-project(FastMD VERSION 1.1.1 LANGUAGES C CXX RC)
+project(FastMD VERSION 1.2.0 LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,7 +31,7 @@ add_executable(FastMD WIN32
     src/layout.cpp src/canvas_gdi.cpp src/canvas_print.cpp src/print.cpp
     src/highlight.cpp src/theme.cpp src/util.cpp
     src/find.cpp src/toc.cpp src/home.cpp src/store.cpp src/shell.cpp src/settings_ui.cpp src/strings.cpp
-    src/copy.cpp src/drag.cpp src/crash.cpp src/update.cpp src/uia.cpp
+    src/copy.cpp src/drag.cpp src/crash.cpp src/update.cpp src/uia.cpp src/tasks.cpp
     third_party/md4c/md4c.c
     res/fastmd.rc)
 

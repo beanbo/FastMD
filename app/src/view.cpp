@@ -400,7 +400,22 @@ static IDWriteTextLayout* NumberLayout(uint32_t n) {
     return L;
 }
 
-static void DrawMarker(const Block& b, float x, float baseline) {
+static bool IsTask(const Block& b) { return b.marker == MK_TASK_OPEN || b.marker == MK_TASK_DONE; }
+
+// a list marker stands on the baseline of its block's first line: DIP below the block's top
+static float MarkerBaseline(const Block& b) {
+    if (b.kind == BK_CODE) return Metrics::kCodePad + g.typo.baseline[R_CODE];
+    if (b.kind == BK_TEXT && b.heading) return g.typo.baseline[b.heading];
+    return g.typo.baseline[R_BODY];
+}
+
+// the box of a task list item, left of the text that starts at x
+static D2D1_RECT_F TaskBox(float x, float baseline) {
+    float s = g.typo.textScale, l = x - 24.f * s, t = baseline - 12.5f * s;
+    return D2D1::RectF(l, t, l + 15.f * s, t + 15.f * s);
+}
+
+static void DrawMarker(const Block& b, float x, float baseline, bool hot) {
     uint8_t col = b.muted ? P_MUTED : P_TEXT;
     float s = g.typo.textScale;
     switch (b.marker) {
@@ -421,13 +436,14 @@ static void DrawMarker(const Block& b, float x, float baseline) {
     }
     case MK_TASK_OPEN:
     case MK_TASK_DONE: {
-        float sz = 15.f * s, l = x - 24.f * s, t = baseline - 12.5f * s;
+        D2D1_RECT_F r = TaskBox(x, baseline);
+        float l = r.left, t = r.top;
         if (b.marker == MK_TASK_DONE) {
-            g.canvas->FillRoundRect(l, t, l + sz, t + sz, 3.5f * s, P_ACCENT);
+            g.canvas->FillRoundRect(l, t, r.right, r.bottom, 3.5f * s, P_ACCENT);
             g.canvas->Line(l + 3.8f * s, t + 7.8f * s, l + 6.4f * s, t + 10.4f * s, 1.8f * s, P_ONACCENT);
             g.canvas->Line(l + 6.4f * s, t + 10.4f * s, l + 11.2f * s, t + 4.8f * s, 1.8f * s, P_ONACCENT);
-        } else {
-            g.canvas->StrokeRoundRect(l, t, l + sz, t + sz, 3.5f * s, 1.1f, P_MUTED);
+        } else {  // under the pointer the empty box takes the accent: it can be clicked
+            g.canvas->StrokeRoundRect(l, t, r.right, r.bottom, 3.5f * s, hot ? 1.5f : 1.1f, hot ? P_ACCENT : P_MUTED);
         }
         break;
     }
@@ -520,8 +536,41 @@ int HeadingAt(float px, float py, bool* onIcon) {
         float x, w;
         BlockBox(i, &x, &w);
         if (px < x - kAnchorGap - 4.f || px > x + w) return -1;
-        if (onIcon) *onIcon = px < x - 2.f;
+        if (onIcon) *onIcon = px < x - 2.f && !IsTask(b);
         return (int)i;
+    }
+    return -1;
+}
+
+// ------------------------------------------------------------------------------------------------ task lists
+// box of a task list item in client DIP; false = the block has no box or it is not on screen
+bool TaskBoxRect(uint32_t i, float* l, float* t, float* r, float* b) {
+    if (i >= g.doc.blocks.size() || g.Y.size() != g.doc.blocks.size()) return false;
+    const Block& bl = g.doc.blocks[i];
+    if (!IsTask(bl) || BlockHidden(bl)) return false;
+    float x, w, top = g.Y[i] - g.scrollY;
+    if (top > ViewH() || top + g.H[i] < 0) return false;
+    BlockBox(i, &x, &w);
+    D2D1_RECT_F rc = TaskBox(x, top + MarkerBaseline(bl));
+    *l = rc.left;
+    *t = rc.top;
+    *r = rc.right;
+    *b = rc.bottom;
+    return true;
+}
+
+// the task box under the pointer (its block, -1 = none), with a little room around it: a 15 px target is small
+int TaskAt(float px, float py) {
+    const std::vector<Task>& ts = g.doc.tasks;
+    if (g.path.empty() || ts.empty() || g.Y.size() != g.doc.blocks.size()) return -1;
+    const float kSlack = 3.f;
+    uint32_t first = FirstVisible(std::max(0.f, py + g.scrollY - 32.f));
+    auto it = std::lower_bound(ts.begin(), ts.end(), first, [](const Task& t, uint32_t bi) { return t.block < bi; });
+    for (; it != ts.end() && g.Y[it->block] - g.scrollY < py + 32.f; ++it) {
+        float l, t, r, b;
+        if (TaskBoxRect(it->block, &l, &t, &r, &b) && px >= l - kSlack && px <= r + kSlack && py >= t - kSlack &&
+            py <= b + kSlack)
+            return (int)it->block;
     }
     return -1;
 }
@@ -536,7 +585,6 @@ static void DrawBlock(uint32_t i, float y) {
     float right = x + w;
     uint8_t col = b.muted ? P_MUTED : P_TEXT;
     int role = b.heading ? b.heading : R_BODY;
-    float markerBase = y + g.typo.baseline[R_BODY];
     switch (b.kind) {
     case BK_TEXT:
         if (L->text) {
@@ -568,10 +616,9 @@ static void DrawBlock(uint32_t i, float y) {
                 g.canvas->Line(cx + s - 1.f, cy, cx - 1.f, cy + s, 1.6f, P_MUTED);
             }
         }
-        // pointing at a heading offers its own link, in the column's left padding
-        if (b.heading && (int)i == g.hoverHeading && !g.firstFrame)
+        // pointing at a heading offers its own link, in the column's left padding (a task box keeps that place)
+        if (b.heading && (int)i == g.hoverHeading && !g.firstFrame && !IsTask(b))
             DrawIcon(0xE71B, x - kAnchorGap, y + g.typo.baseline[role] - 16.f, 20.f, 12.f, P_MUTED);  // Segoe Fluent: Link
-        markerBase = y + g.typo.baseline[role];
         break;
     case BK_CODE: {
         g.canvas->FillRoundRect(x, y, right, y + L->height, 6.f, P_CODEBG);
@@ -587,7 +634,6 @@ static void DrawBlock(uint32_t i, float y) {
             g.canvas->Text(L->text, tx, ty, P_TEXT);
             g.canvas->PopClip();
         }
-        markerBase = y + Metrics::kCodePad + g.typo.baseline[R_CODE];
         if ((int)i == g.hoverCode) {  // copy button
             float bs = 30.f, bx = right - bs - 8.f, by = y + 8.f;
             g.canvas->FillRoundRect(bx, by, bx + bs, by + bs, 6.f, g.hoverCopyBtn ? P_BORDER : P_BG);
@@ -629,7 +675,7 @@ static void DrawBlock(uint32_t i, float y) {
         break;
     }
     }
-    if (b.marker) DrawMarker(b, x, markerBase);
+    if (b.marker) DrawMarker(b, x, y + MarkerBaseline(b), (int)i == g.hoverTask);
 }
 
 IDWriteTextLayout* UiLayout(const std::wstring& s, float maxW, IDWriteTextFormat* fmt) {
@@ -796,7 +842,7 @@ struct FrameKey {
     float scrollY = 0, textW = 0, wideW = 0, docH = 0, viewW = 0, viewH = 0, scale = 0, docLeft = 0;
     uint32_t selA = 0, selB = 0, caret = 0;
     int hoverLink = 0, hoverCode = 0, hoverHBlock = 0, hbarFlash = 0, focusLink = 0, dragHBlock = 0, tocHover = 0,
-        curMatch = 0, findHot = 0, recentHover = 0, hoverHeading = 0;
+        curMatch = 0, findHot = 0, recentHover = 0, hoverHeading = 0, hoverTask = 0;
     size_t matches = 0;
     bool hoverCopyBtn = false, hotHBar = false, hotScroll = false, dark = false, selecting = false, tocBtnHot = false,
          settingsBtnHot = false, draggingThumb = false, home = false, overText = false;
@@ -833,6 +879,7 @@ FrameKey CurrentKey() {
     k.findHot = g.findHot;
     k.recentHover = g.recentHover;
     k.hoverHeading = g.hoverHeading;
+    k.hoverTask = g.hoverTask;
     k.matches = g.matches.size();
     k.hoverCopyBtn = g.hoverCopyBtn;
     k.hotHBar = g.hotHBar;

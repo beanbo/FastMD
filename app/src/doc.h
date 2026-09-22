@@ -87,6 +87,7 @@ struct Image {
 struct QuoteSpan { float x; uint32_t first, last; uint8_t alert; };
 struct Heading { uint32_t block; uint8_t level; std::wstring slug; };
 struct Anchor { std::wstring slug; uint32_t block; };  // #target that is not a heading (footnotes)
+struct Task { uint32_t block, src; };  // task list item: the block that draws its box, the mark's offset in the source
 
 struct Doc {
     std::wstring text;             // concatenated rendered text of all blocks
@@ -100,6 +101,7 @@ struct Doc {
     std::vector<std::wstring> links;
     std::vector<Heading> headings;
     std::vector<Anchor> anchors;
+    std::vector<Task> tasks;       // sorted by block: a click on a box ticks the item in the file (tasks.cpp)
     // text position → position in the Markdown source, one entry per chunk md4c handed over (sorted by first):
     // "copy as Markdown" gives back the author's own source rather than something rebuilt from the model
     std::vector<std::pair<uint32_t, uint32_t>> srcMap;
@@ -121,6 +123,10 @@ uint32_t AlertColor(uint8_t alert);  // 0xRRGGBB for the current palette
 void Highlight(Doc& d, const wchar_t* lang, uint32_t langLen, uint32_t textOff, uint32_t textLen, uint8_t& langId);
 
 // util.cpp
+// How a file's bytes became the UTF-16 text: a byte-order mark (header bytes) and a code page — CP_UTF8, CP_ACP for
+// bytes that are not UTF-8, or 1200 for UTF-16 LE. A ticked task box is written back in the same encoding.
+struct TextEncoding { uint32_t header = 0; UINT cp = CP_UTF8; };
+void DecodeText(const char* p, int len, std::wstring& out, TextEncoding* enc);
 bool ReadFileUtf16(const wchar_t* path, std::wstring& out, uint64_t* ticksRead, FILETIME* writeTime);
 bool ReadFileBytes(const wchar_t* path, std::vector<uint8_t>& out, size_t maxBytes);
 bool GetFileStamp(const wchar_t* path, FILETIME* writeTime, uint64_t* size);

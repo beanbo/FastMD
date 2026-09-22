@@ -583,8 +583,9 @@ static void OnMouseMove(int mx, int my) {
     int hblock = (overlay || hot) ? -1 : HScrollBlockAt(x, y, &onHBar);
     int link = (overlay || hot) ? -1 : LinkAt(x, y);
     int code = (overlay || hot) ? -1 : CodeBlockAt(x, y, &onBtn);
+    int task = (overlay || hot) ? -1 : TaskAt(x, y);
     bool onAnchor = false;
-    int heading = (overlay || hot || link >= 0) ? -1 : HeadingAt(x, y, &onAnchor);
+    int heading = (overlay || hot || link >= 0 || task >= 0) ? -1 : HeadingAt(x, y, &onAnchor);
     bool onSummary = !overlay && !hot && link < 0 && SummaryAt(x, y) >= 0;
     std::wstring tip = tocBtn ? std::wstring(Tr(S_TOC_BUTTON_TIP))
                      : gear   ? std::wstring(Tr(S_SETTINGS_BUTTON_TIP))
@@ -592,8 +593,9 @@ static void OnMouseMove(int mx, int my) {
     if (fpart != g.findHot || tocItem != g.tocHover || tocBtn != g.tocBtnHot || gear != g.settingsBtnHot ||
         hot != g.hotScroll || link != g.hoverLink || code != g.hoverCode || onBtn != g.hoverCopyBtn ||
         hblock != g.hoverHBlock || onHBar != g.hotHBar || home != g.recentHover || heading != g.hoverHeading ||
-        tip != g.tip) {
+        task != g.hoverTask || tip != g.tip) {
         g.hoverHeading = heading;
+        g.hoverTask = task;
         g.findHot = fpart;
         g.tocHover = tocItem;
         g.tocBtnHot = tocBtn;
@@ -609,8 +611,8 @@ static void OnMouseMove(int mx, int my) {
         Invalidate();
     }
     LPCWSTR cur = IDC_ARROW;
-    if (link >= 0 || onBtn || tocBtn || gear || onAnchor || onSummary || tocItem >= 0 || tocItem == -2 || home >= 0 ||
-        (fpart != FP_NONE && fpart != FP_BAR && fpart != FP_FIELD && fpart != FP_COUNT))
+    if (link >= 0 || onBtn || tocBtn || gear || onAnchor || onSummary || task >= 0 || tocItem >= 0 || tocItem == -2 ||
+        home >= 0 || (fpart != FP_NONE && fpart != FP_BAR && fpart != FP_FIELD && fpart != FP_COUNT))
         cur = IDC_HAND;
     else if (fpart == FP_FIELD) cur = IDC_IBEAM;
     else if (!overlay && !hot && !onHBar && !g.path.empty()) {
@@ -626,6 +628,7 @@ static void OnLButtonDown(int mx, int my, WPARAM keys) {
     g.downX = mx;
     g.downY = my;
     g.dragKind = -1;  // set below if this press could drag something out of the window
+    g.downTask = -1;  // a press whose button-up never came (capture lost) must not tick a box later
     int fpart = FindPartAt(x, y);
     if (fpart != FP_NONE) { FindClick(fpart); return; }
     int item;
@@ -665,6 +668,11 @@ static void OnLButtonDown(int mx, int my, WPARAM keys) {
     if (onBtn && code >= 0) {
         CopyToClipboard(BlockPlainText((uint32_t)code));
         ShowToast(Tr(S_CODE_COPIED), 900);
+        return;
+    }
+    int task = TaskAt(x, y);  // a task box works like a button: it is ticked when the button comes up on it
+    if (task >= 0) {
+        g.downTask = task;
         return;
     }
     int summary = SummaryAt(x, y);  // <details>: the summary line folds it open or shut
@@ -718,6 +726,12 @@ static void OnLButtonUp(int mx, int my) {
     KillTimer(g.hwnd, TIMER_AUTOSCROLL);
     if (g.draggingThumb) { g.draggingThumb = false; Invalidate(); return; }
     if (g.dragHBlock >= 0) { g.dragHBlock = -1; Invalidate(); return; }
+    if (g.downTask >= 0) {  // pressed on a task box: released on the same box ticks it, anywhere else lets it be
+        int task = g.downTask;
+        g.downTask = -1;
+        if (TaskAt(mx / Scale(), my / Scale()) == task) ToggleTask((uint32_t)task);
+        return;
+    }
     g.selecting = false;
     int dx = mx - g.downX, dy = my - g.downY;
     if (g.dragKind == DRAG_TEXT) g.selAnchor = g.selFocus = g.dragPos;  // a press inside a selection that never
@@ -924,6 +938,15 @@ static LRESULT Query(WPARAM q, LPARAM lp) {
         if (!g.caretOn || !CaretPoint(g.selFocus, &cx, &cy, &ch)) return -1;
         return MAKELONG(std::lround(cx * s), std::lround((cy + ch * 0.5f) * s));
     }
+    case Q_TASK:
+        if (lp < 0 || (size_t)lp >= g.doc.tasks.size()) return -1;
+        return g.doc.blocks[g.doc.tasks[lp].block].marker == MK_TASK_DONE;
+    case Q_TASK_BOX: {
+        float l, t, r, b;
+        if (lp < 0 || (size_t)lp >= g.doc.tasks.size() || !TaskBoxRect(g.doc.tasks[lp].block, &l, &t, &r, &b)) return -1;
+        return MAKELONG(std::lround((l + r) * 0.5f * s), std::lround((t + b) * 0.5f * s));
+    }
+    case Q_DOC_SERIAL: return g.docSerial;
     }
     return 0;
 }
@@ -1008,9 +1031,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSELEAVE:
         if (g.hotScroll || g.hoverLink >= 0 || g.hoverCode >= 0 || g.hoverHBlock >= 0 || g.findHot != -1 ||
             g.tocHover != -1 || g.tocBtnHot || g.settingsBtnHot || g.recentHover >= 0 || g.hoverHeading >= 0 ||
-            !g.tip.empty()) {
+            g.hoverTask >= 0 || !g.tip.empty()) {
             g.hotScroll = g.tocBtnHot = g.settingsBtnHot = g.hotHBar = false;
-            g.hoverLink = g.hoverCode = g.hoverHBlock = g.recentHover = g.hoverHeading = -1;
+            g.hoverLink = g.hoverCode = g.hoverHBlock = g.recentHover = g.hoverHeading = g.hoverTask = -1;
             g.findHot = g.tocHover = -1;
             g.hoverCopyBtn = false;
             g.tip.clear();
@@ -1046,7 +1069,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (wp == TIMER_TOAST) { KillTimer(hwnd, TIMER_TOAST); Invalidate(); }
         else if (wp == TIMER_HBAR) { KillTimer(hwnd, TIMER_HBAR); Invalidate(); }
-        else if (wp == TIMER_RELOAD) { KillTimer(hwnd, TIMER_RELOAD); ReloadDocument(); }
+        else if (wp == TIMER_RELOAD) { KillTimer(hwnd, TIMER_RELOAD); OnFileChanged(); }
         else if (wp == TIMER_AUTOSCROLL && g.selecting) {
             POINT p;
             GetCursorPos(&p);

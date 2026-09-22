@@ -127,6 +127,7 @@ static void ResetViewState() {
     g.hotHBar = false;
     g.hx.clear();
     g.focusLink = g.ctxLink = g.ctxImage = -1;
+    g.hoverTask = g.downTask = -1;
     g.tocHover = -1;
     g.restoreBlock = -1;
     g.restored = false;
@@ -623,6 +624,17 @@ void StopWatcher() {
     WaitForSingleObject(g.watchThread, 2000);
     CloseHandle(g.watchThread);
     g.watchThread = nullptr;
+}
+
+// The file is what the window shows when its stamp is the one taken at load, or after our own write (a ticked task
+// box, tasks.cpp): then there is nothing to reload, and the reader keeps the pictures and the layout as they are.
+void OnFileChanged() {
+    FILETIME t{};
+    uint64_t size = 0;
+    if (!g.loadFailed && GetFileStamp(g.path.c_str(), &t, &size) && size == g.fileSize &&
+        CompareFileTime(&t, &g.fileTime) == 0)
+        return;
+    ReloadDocument();
 }
 
 // ------------------------------------------------------------------------------------------------ reading positions

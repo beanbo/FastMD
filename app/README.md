@@ -60,6 +60,7 @@ FastMD.exe file.md
 | A heading's address | hover over a heading: a link icon appears to its left, and a click copies `file.md#anchor` |
 | Links with the mouse | click: `#anchor` scrolls to the heading, `.md` opens right here, `http(s)` and `mailto` go to the browser, anything else after a confirmation; right click — "Open", "Copy link address" |
 | Images | right click — "Copy image", "Open image file" |
+| Task lists | a click on a box ticks it in the file (`- [ ]` ↔ `- [x]`); a press let go outside the box does nothing |
 | Column width | Ctrl+Alt+← / → (narrow, normal, wide, full width) |
 | Zoom | Ctrl+wheel, Ctrl + / Ctrl −, Ctrl+0 |
 | Back / forward | Alt+← / Alt+→, Backspace, the side mouse buttons |
@@ -117,6 +118,7 @@ The detailed plan of every remaining step is in [../docs/PLAN.md](../docs/PLAN.m
 | `src/shell.cpp` | links, the clipboard (text, images), the editor, Explorer, dialogs, the .md association |
 | `src/copy.cpp` | copying the selection: HTML and RTF with formatting, the Markdown source through the `Doc::srcMap` map |
 | `src/drag.cpp` | dragging out: a data object with text, a link or an image (COM only for the duration of the drag) |
+| `src/tasks.cpp` | ticking a task box in the file: one character between the brackets, overwritten in place in the file's own encoding, and only while the file on disk decodes to exactly the text on screen; the file watcher does not reload for this write |
 | `src/print.cpp` | printing and PDF export: layout for paper, splitting into pages, headers and footers |
 | `src/canvas_print.cpp` | a canvas over the printer DC: glyphs go to GDI, so text stays text in the PDF |
 | `src/settings_ui.cpp` | the settings window, drawn by the same engine, and the gear icon that opens it |
