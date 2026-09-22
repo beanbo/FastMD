@@ -10,9 +10,9 @@ English · [Русский](README.ru.md)
 
 ## Download
 
-**[FastMD 1.1.1 — latest release](https://github.com/beanbo/FastMD/releases/latest):**
+**[FastMD 1.2.0 — latest release](https://github.com/beanbo/FastMD/releases/latest):**
 1. `FastMD-Setup.exe` — a per-user install, no administrator rights: a Start menu shortcut, the `.md` association, a preview pane in Explorer. Uninstalls through Settings → Apps.
-2. Or `FastMD-1.1.1-win-x64.zip` — unpack it anywhere and run `FastMD.exe`; to make `.md` files open on a double click, pick "Open .md files with FastMD…" from the context menu and confirm the choice in Settings.
+2. Or `FastMD-1.2.0-win-x64.zip` — unpack it anywhere and run `FastMD.exe`; to make `.md` files open on a double click, pick "Open .md files with FastMD…" from the context menu and confirm the choice in Settings.
 
 The exe is not signed yet, so on the first run Windows SmartScreen may warn you: "More info" → "Run anyway". Code signing is waiting on a certificate (task 5.5).
 
