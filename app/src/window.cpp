@@ -59,6 +59,9 @@ static void SavePlacement() {
     RegWriteBinary(L"Window", &s, sizeof(s));
 }
 
+// Everything that must happen before the window may go away (close, restart after an update). false = stay open.
+bool PrepareToClose() { return true; }
+
 static void SaveAll() {  // window closes / session ends
     if (BenchActive()) return;
     g.cfg.tocOpen = g.tocOpen;
@@ -186,7 +189,9 @@ static void OnSettingsBroadcast() {  // another window changed the settings: tak
     if (c.font != g.cfg.font || c.fontSize != g.cfg.fontSize || c.wrapCode != g.cfg.wrapCode) changed |= SC_TYPE;
     if (c.column != g.cfg.column) changed |= SC_COLUMN;
     if (c.language != g.cfg.language) changed |= SC_LANGUAGE;
-    if (c.smoothScroll != g.cfg.smoothScroll || c.editor != g.cfg.editor) changed |= SC_OTHER;
+    if (c.smoothScroll != g.cfg.smoothScroll || c.editor != g.cfg.editor || c.remoteImages != g.cfg.remoteImages ||
+        c.updateCheck != g.cfg.updateCheck)
+        changed |= SC_OTHER;
     g.cfg.theme = c.theme;
     g.cfg.column = c.column;
     g.cfg.wrapCode = c.wrapCode;
@@ -195,6 +200,8 @@ static void OnSettingsBroadcast() {  // another window changed the settings: tak
     g.cfg.smoothScroll = c.smoothScroll;
     g.cfg.language = c.language;
     g.cfg.editor = c.editor;
+    g.cfg.remoteImages = c.remoteImages;  // otherwise this window's SaveAll at close would put the old values back
+    g.cfg.updateCheck = c.updateCheck;
     if (changed) ApplySettings(changed, false);
 }
 
@@ -264,7 +271,7 @@ void Command(UINT id) {
     case CMD_COPY_MD: CopySelectionMarkdown(); break;
     case CMD_PRINT: PrintDocument(); break;
     case CMD_EXPORT_PDF: ExportPdf(); break;
-    case CMD_UPDATE: UpdateInstall(); break;
+    case CMD_UPDATE: UpdateInstall(true); break;
     case CMD_SELECT_ALL: SelectAll(); Invalidate(); break;
     case CMD_OPEN: OpenDialog(); break;
     case CMD_RELOAD: ReloadDocument(); ShowToast(Tr(S_RELOADED), 700); break;
@@ -588,7 +595,8 @@ static void OnMouseMove(int mx, int my) {
     int heading = (overlay || hot || link >= 0 || task >= 0) ? -1 : HeadingAt(x, y, &onAnchor);
     bool onSummary = !overlay && !hot && link < 0 && SummaryAt(x, y) >= 0;
     std::wstring tip = tocBtn ? std::wstring(Tr(S_TOC_BUTTON_TIP))
-                     : gear   ? std::wstring(Tr(S_SETTINGS_BUTTON_TIP))
+                     : gear   ? (UpdateAvailable() ? Tr(S_SETTINGS_BUTTON_UPDATE_TIP) + UpdateVersion()
+                                                   : std::wstring(Tr(S_SETTINGS_BUTTON_TIP)))
                               : std::wstring(FindTip(fpart));
     if (fpart != g.findHot || tocItem != g.tocHover || tocBtn != g.tocBtnHot || gear != g.settingsBtnHot ||
         hot != g.hotScroll || link != g.hoverLink || code != g.hoverCode || onBtn != g.hoverCopyBtn ||
@@ -927,6 +935,8 @@ static LRESULT Query(WPARAM q, LPARAM lp) {
     }
     case Q_UPDATE:
         if (lp == 1) { UpdateFetchForTest(); return 1; }
+        if (lp == 3) return UpdateGetStatus();
+        if (lp == 4) { UpdateCheckNow(); return 1; }
         return lp == 2 ? UpdateFetched() : UpdateAvailable();
     case Q_DRAG: {  // 0xFFFF as the picture's block means "the one on screen", as the image menu items do
         int kind = (int)(lp >> 16), arg = (int)(lp & 0xFFFF);
@@ -1070,6 +1080,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == TIMER_TOAST) { KillTimer(hwnd, TIMER_TOAST); Invalidate(); }
         else if (wp == TIMER_HBAR) { KillTimer(hwnd, TIMER_HBAR); Invalidate(); }
         else if (wp == TIMER_RELOAD) { KillTimer(hwnd, TIMER_RELOAD); OnFileChanged(); }
+        else if (wp == TIMER_UPDATE) UpdateCheckAsync();  // hourly: asks GitHub only once a day has passed
         else if (wp == TIMER_AUTOSCROLL && g.selecting) {
             POINT p;
             GetCursorPos(&p);
@@ -1101,9 +1112,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP_MEASURED: OnMeasured((MeasureJob*)lp); return 0;
     case WM_APP_FULLDOC: if (!g.firstFrame) OnFullDoc(); return 0;
     case WM_APP_IMAGES: OnImagesLoaded(); return 0;
-    case WM_APP_UPDATE:
-        if (g.ready) OnUpdateMessage(wp);
-        return 0;
+    case WM_APP_UPDATE: OnUpdateMessage(wp, lp); return 0;
     case WM_APP_SCALED: OnScaledImages((std::vector<ScaledImage>*)lp, (uint32_t)wp); return 0;
     case WM_APP_FILECHANGED: SetTimer(hwnd, TIMER_RELOAD, 120, nullptr); return 0;  // debounce editor save bursts
     case WM_APP_POSITIONS: OnPositionsLoaded((std::vector<PosEntry>*)lp); return 0;

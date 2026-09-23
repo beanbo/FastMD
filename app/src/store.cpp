@@ -147,6 +147,30 @@ void SetLastUpdateCheck(uint64_t t) {
     RegCloseKey(k);
 }
 
+// the newest release a check found, with its installer and hash: later windows show it without asking GitHub again
+void LoadFoundUpdate(std::wstring& version, std::wstring& url, std::wstring& shaUrl) {
+    HKEY k = OpenKey(false);
+    version = GetString(k, L"UpdateVersion");
+    url = GetString(k, L"UpdateUrl");
+    shaUrl = GetString(k, L"UpdateShaUrl");
+    if (k) RegCloseKey(k);
+}
+
+void SaveFoundUpdate(const std::wstring& version, const std::wstring& url, const std::wstring& shaUrl) {
+    HKEY k = OpenKey(true);
+    if (!k) return;
+    if (version.empty()) {
+        RegDeleteValueW(k, L"UpdateVersion");
+        RegDeleteValueW(k, L"UpdateUrl");
+        RegDeleteValueW(k, L"UpdateShaUrl");
+    } else {
+        SetString(k, L"UpdateVersion", version);
+        SetString(k, L"UpdateUrl", url);
+        SetString(k, L"UpdateShaUrl", shaUrl);
+    }
+    RegCloseKey(k);
+}
+
 // the newest crash dump the reader has already been offered (FILETIME ticks): so it is offered once, not every start
 uint64_t LastCrashSeen() {
     HKEY k = OpenKey(false);

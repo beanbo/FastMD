@@ -47,6 +47,8 @@ Q = {"SCROLLY": 1, "DOCH": 2, "TOC_OPEN": 3, "TOC_DOCKED": 4, "TOC_COUNT": 5, "T
      "TARGETY": 27, "SETTINGS_HIT": 28, "SITKA": 29, "SETTINGS_BTN": 30, "IMG_SCALED": 31, "FULL_REDRAW": 32, "SEL_ANCHOR": 33, "SEL_FOCUS": 34, "CARET": 35, "DRAG": 36, "MATH": 37, "UPDATE": 38,
      "TASK": 39, "TASK_BOX": 40, "DOC_SERIAL": 41}
 FP_NEXT, FP_CASE = 7, 3  # FindPart
+US_CHECKING, US_LATEST, US_AVAILABLE, US_CHECK_FAILED = 1, 2, 3, 7  # UpdateStatus
+ACCENT = (0x09, 0x69, 0xDA)  # P_ACCENT, light theme
 
 u32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
 u32.SendMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
@@ -321,6 +323,14 @@ def set_reg(name, value):
             winreg.SetValueEx(k, name, 0, winreg.REG_DWORD, value)
         else:
             winreg.SetValueEx(k, name, 0, winreg.REG_SZ, value)
+
+
+def reg_value(name):
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REGKEY) as k:
+            return winreg.QueryValueEx(k, name)[0]
+    except OSError:
+        return None
 
 
 def del_reg(name):
@@ -1177,12 +1187,18 @@ def test_update():
 
     class Handler(http.server.BaseHTTPRequestHandler):
         hits = 0
+        tag = "v99.9.9"  # what /latest answers; "" = the server fails
 
         def do_GET(self):
             Handler.hits += 1
             host = f"http://127.0.0.1:{self.server.server_address[1]}"
+            if self.path.endswith("/latest") and not Handler.tag:
+                self.send_response(500)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if self.path.endswith("/latest"):
-                body = ('{"tag_name": "v99.9.9", "name": "FastMD 99.9.9", "assets": ['
+                body = ('{"tag_name": "' + Handler.tag + '", "name": "FastMD", "assets": ['
                         '{"name": "FastMD-99.9.9-win-x64.zip", "browser_download_url": "' + host + '/FastMD.zip"},'
                         '{"name": "FastMD-Setup.exe", "browser_download_url": "' + host + '/FastMD-Setup.exe"},'
                         '{"name": "FastMD-Setup.exe.sha256", "browser_download_url": "' + host + '/FastMD-Setup.exe.sha256"}]}'
@@ -1227,8 +1243,70 @@ def test_update():
             ok &= check("5.6 it lands in the profile, byte for byte",
                         got.exists() and got.read_bytes() == payload, str(got))
             ok &= check("5.6 one check, one installer, one hash", Handler.hits == 3, f"{Handler.hits}")
+            ok &= check("5.6 the version found is remembered", reg_value("UpdateVersion") == "99.9.9",
+                        str(reg_value("UpdateVersion")))
         finally:
             close_and_wait(proc, hwnd)
+        # the next window knows about it at once, without asking GitHub again the same day
+        Handler.hits = 0
+        proc, hwnd = launch(doc)
+        try:
+            time.sleep(1.0)
+            ok &= check("5.6 a later window shows the remembered update without asking",
+                        q(hwnd, "UPDATE", 0) == 1 and q(hwnd, "UPDATE", 3) == US_AVAILABLE and Handler.hits == 0,
+                        f"found={q(hwnd, 'UPDATE', 0)} status={q(hwnd, 'UPDATE', 3)} hits={Handler.hits}")
+            img = shot(hwnd, "70-update-dot")
+            box = gear_box(hwnd)
+            ok &= check("5.6 the gear button carries a dot", box is not None and
+                        find_color(img, ACCENT, (box[2] - 12, box[1], box[2], box[1] + 12), 90) is not None,
+                        str(box))
+            cmd(hwnd, "SETTINGS", 0.8)
+            sh = q(hwnd, "SETTINGS_HWND")
+            ok &= check("5.6 the settings offer the update", sh != 0 and q(hwnd, "SETTINGS_HIT", 800) > 0)
+            shot(sh, "71-settings-update-available")
+            # check now (the button's state when nothing is known): GitHub now says this is the latest
+            Handler.tag = "v0.0.1"
+            q(hwnd, "UPDATE", 4)
+            for _ in range(40):
+                if q(hwnd, "UPDATE", 3) != US_CHECKING:
+                    break
+                time.sleep(0.25)
+            ok &= check("5.6 check now: up to date, the remembered version is forgotten",
+                        q(hwnd, "UPDATE", 3) == US_LATEST and q(hwnd, "UPDATE", 0) == 0 and
+                        reg_value("UpdateVersion") is None, f"status={q(hwnd, 'UPDATE', 3)}")
+            # the button itself: "Check now" asks again, GitHub has a newer one now
+            Handler.tag = "v99.9.9"
+            time.sleep(0.3)
+            click_setting(hwnd, sh, 800)
+            for _ in range(40):
+                if q(hwnd, "UPDATE", 3) != US_CHECKING:
+                    break
+                time.sleep(0.25)
+            ok &= check("5.6 the settings button checks right away and finds it", q(hwnd, "UPDATE", 3) == US_AVAILABLE,
+                        f"status={q(hwnd, 'UPDATE', 3)}")
+            shot(sh, "72-settings-after-check")
+            post(sh, WM_KEYDOWN, 0x1B, 0, 0.3)
+        finally:
+            close_and_wait(proc, hwnd)
+        # GitHub does not answer: tried again an hour later, not the next day
+        Handler.tag = ""
+        set_reg("UpdateSeenLo", 0)
+        set_reg("UpdateSeenHi", 0)
+        del_reg("UpdateVersion")
+        proc, hwnd = launch(doc)
+        try:
+            for _ in range(40):
+                if q(hwnd, "UPDATE", 3) == US_CHECK_FAILED:
+                    break
+                time.sleep(0.25)
+            seen = ((reg_value("UpdateSeenHi") or 0) << 32) | (reg_value("UpdateSeenLo") or 0)
+            now = (int(time.time()) + 11644473600) * 10_000_000
+            ago = (now - seen) / 36e9  # hours the stored stamp lies in the past
+            ok &= check("5.6 a failed check is tried again in an hour", q(hwnd, "UPDATE", 3) == US_CHECK_FAILED and
+                        22.5 < ago < 23.5, f"status={q(hwnd, 'UPDATE', 3)} stamp {ago:.2f} h ago")
+        finally:
+            close_and_wait(proc, hwnd)
+        Handler.tag = "v99.9.9"
         # switched off in the settings: no request at all
         Handler.hits = 0
         set_reg("UpdateCheck", 0)
@@ -1478,7 +1556,7 @@ def test_settings(doc):
         click_setting(hwnd, sh, 2)      # theme: dark
         click_setting(hwnd, sh, 101)    # font: Sitka
         click_setting(hwnd, sh, 205)    # text size 20
-        click_setting(hwnd, sh, 802)    # English (row 8: theme, font, size, column, wrap, smooth, remote, update, language)
+        click_setting(hwnd, sh, 902)    # English (row 9: theme, font, size, column, wrap, smooth, remote, update, version, language)
         shot(sh, "20-settings")
         shot(hwnd, "21-settings-applied")
         ok &= check("1.9 theme applies at once", q(hwnd, "THEME_DARK") == 1)
@@ -1493,7 +1571,7 @@ def test_settings(doc):
         ok &= check("1.9 settings persist", q(hwnd, "FONT_SIZE") == 20 and q(hwnd, "LANG") == 1 and q(hwnd, "SITKA") == 1)
         cmd(hwnd, "SETTINGS", 0.8)
         sh = q(hwnd, "SETTINGS_HWND")
-        for id_ in (0, 100, 202, 800):  # back to the defaults
+        for id_ in (0, 100, 202, 900):  # back to the defaults
             click_setting(hwnd, sh, id_)
         post(sh, WM_KEYDOWN, 0x1B, 0, 0.3)
     finally:
@@ -1565,14 +1643,20 @@ def main():
     (OUT / "img").mkdir(exist_ok=True)
     shutil.copy(REPO / "bench" / "corpus" / "img" / "diagram0.png", OUT / "img" / "diagram0.png")
     ok = True
-    for t in (lambda: test_basics(doc), lambda: test_hscroll(doc), test_outline, lambda: test_positions(doc), test_find,
-              test_start_screen, lambda: test_links(doc), test_footnotes, test_html, test_remote_images, test_svg,
-              test_languages, lambda: test_clipboard(doc), test_key_selection, test_pdf, lambda: test_drag(doc), test_math, test_wide_diagram, test_update, test_broken_html, test_tasks, test_scroll_frames,
-              lambda: test_image_scaling(doc),
-              lambda: test_columns(doc),
-              lambda: test_settings(doc),
-              lambda: test_placement(doc)):
-        ok &= t()
+    tests = [("basics", lambda: test_basics(doc)), ("hscroll", lambda: test_hscroll(doc)), ("outline", test_outline),
+             ("positions", lambda: test_positions(doc)), ("find", test_find), ("start_screen", test_start_screen),
+             ("links", lambda: test_links(doc)), ("footnotes", test_footnotes), ("html", test_html),
+             ("remote_images", test_remote_images), ("svg", test_svg), ("languages", test_languages),
+             ("clipboard", lambda: test_clipboard(doc)), ("key_selection", test_key_selection), ("pdf", test_pdf),
+             ("drag", lambda: test_drag(doc)), ("math", test_math), ("wide_diagram", test_wide_diagram),
+             ("update", test_update), ("broken_html", test_broken_html), ("tasks", test_tasks),
+             ("scroll_frames", test_scroll_frames), ("image_scaling", lambda: test_image_scaling(doc)),
+             ("columns", lambda: test_columns(doc)), ("settings", lambda: test_settings(doc)),
+             ("placement", lambda: test_placement(doc))]
+    only = [n for n in os.environ.get("FASTMD_ONLY", "").split(",") if n]  # e.g. FASTMD_ONLY=update,settings
+    for name, t in tests:
+        if not only or name in only:
+            ok &= t()
     reset_profile()
     print("RESULT", "PASS" if ok else "FAIL")
     return 0 if ok else 1

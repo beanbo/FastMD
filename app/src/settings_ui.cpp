@@ -13,8 +13,8 @@ const wchar_t kRepoUrl[] = L"https://github.com/beanbo/FastMD";
 const float kW = 680.f, kLabelX = 28.f, kCtlX = 236.f, kRowH = 48.f, kTop = 20.f, kCtlH = 32.f;
 const int kSizes[] = {14, 15, 16, 17, 18, 20};
 
-enum Row { ROW_THEME, ROW_FONT, ROW_SIZE, ROW_COLUMN, ROW_WRAP, ROW_SMOOTH, ROW_REMOTE, ROW_UPDATE, ROW_LANG,
-           ROW_EDITOR, ROW_ASSOC, ROW_COUNT };
+enum Row { ROW_THEME, ROW_FONT, ROW_SIZE, ROW_COLUMN, ROW_WRAP, ROW_SMOOTH, ROW_REMOTE, ROW_UPDATE, ROW_VERSION,
+           ROW_LANG, ROW_EDITOR, ROW_ASSOC, ROW_COUNT };
 const int kLinkId = 9000;
 
 HWND g_wnd = nullptr;
@@ -69,8 +69,8 @@ int Selected(int row) {
 }
 
 const wchar_t* Label(int row) {
-    static const StrId ids[ROW_COUNT] = {S_SET_THEME,  S_SET_FONT,   S_SET_SIZE,     S_SET_COLUMN, S_SET_WRAP,
-                                         S_SET_SMOOTH, S_SET_REMOTE, S_SET_UPDATE,   S_SET_LANGUAGE,
+    static const StrId ids[ROW_COUNT] = {S_SET_THEME,  S_SET_FONT,   S_SET_SIZE,    S_SET_COLUMN,   S_SET_WRAP,
+                                         S_SET_SMOOTH, S_SET_REMOTE, S_SET_UPDATE,  S_SET_VERSION,  S_SET_LANGUAGE,
                                          S_SET_EDITOR, S_SET_ASSOC};
     return Tr(ids[row]);
 }
@@ -146,6 +146,68 @@ void Button(int id, const std::wstring& text, float x, float y, bool dropdown) {
     g_hits.push_back(Hit{x, y, x + w, y + kCtlH, id});
 }
 
+// The update row: one button that does the next step - check, update to the version found, restart into it - and a
+// note beside it saying where things stand. While something runs, the button only says what.
+void UpdateRow(float x, float y) {
+    UpdateStatus st = UpdateGetStatus();
+    std::wstring ver = UpdateVersion();
+    wchar_t buf[160];
+    std::wstring label, note;
+    bool accent = false, busy = false;
+    switch (st) {
+    case US_CHECKING: label = Tr(S_UPD_CHECKING); busy = true; break;
+    case US_DOWNLOADING: label = Tr(S_UPD_DOWNLOADING); busy = true; break;
+    case US_INSTALLING: label = Tr(S_UPD_INSTALLING); busy = true; break;
+    case US_INSTALLED:
+        label = Tr(S_UPD_RESTART);
+        accent = true;
+        swprintf_s(buf, Tr(S_UPD_NOTE_INSTALLED_FMT), ver.c_str());
+        note = buf;
+        break;
+    case US_AVAILABLE:
+    case US_DOWNLOAD_FAILED:
+        swprintf_s(buf, Tr(S_UPD_UPDATE_FMT), ver.c_str());
+        label = buf;
+        accent = true;
+        if (st == US_DOWNLOAD_FAILED) note = Tr(S_UPD_NOTE_DL_FAILED);
+        else {
+            swprintf_s(buf, Tr(S_UPD_NOTE_CURRENT_FMT), FASTMD_VERSION_WSTR);
+            note = buf;
+        }
+        break;
+    case US_LATEST:
+        label = Tr(S_UPD_CHECK);
+        swprintf_s(buf, Tr(S_UPD_NOTE_LATEST_FMT), FASTMD_VERSION_WSTR);
+        note = buf;
+        break;
+    case US_CHECK_FAILED: label = Tr(S_UPD_CHECK); note = Tr(S_UPD_NOTE_FAILED); break;
+    default:
+        label = Tr(S_UPD_CHECK);
+        swprintf_s(buf, Tr(S_UPD_NOTE_CURRENT_FMT), FASTMD_VERSION_WSTR);
+        note = buf;
+        break;
+    }
+    int id = ROW_VERSION * 100;
+    IDWriteTextLayout* L = Layout(label, 360.f, 13.f, accent);
+    float w = (L ? TextW(L) : 60.f) + 28.f;
+    if (accent) g_cv->FillRoundRect(x, y, x + w, y + kCtlH, 6.f, g_hot == id ? P_LINK : P_ACCENT);
+    else {
+        g_cv->FillRoundRect(x, y, x + w, y + kCtlH, 6.f, g_hot == id && !busy ? P_HOVER : P_PANEL);
+        g_cv->StrokeRoundRect(x, y, x + w, y + kCtlH, 6.f, 1.f, P_BORDER);
+    }
+    if (L) {
+        TextMid(L, x + 14.f, y, kCtlH, accent ? P_ONACCENT : busy ? P_MUTED : P_TEXT);
+        L->Release();
+    }
+    if (!busy) g_hits.push_back(Hit{x, y, x + w, y + kCtlH, id});
+    if (!note.empty()) {
+        if (IDWriteTextLayout* N = Layout(note, kW - kLabelX - (x + w + 14.f), 12.5f)) {
+            TextMid(N, x + w + 14.f, y, kCtlH, P_MUTED);
+            N->Release();
+        }
+    }
+}
+
 void Paint() {
     if (!g_cv) return;
     g_hits.clear();
@@ -159,6 +221,7 @@ void Paint() {
         }
         if (row == ROW_EDITOR) Button(row * 100, EditorLabel(), kCtlX, y, true);
         else if (row == ROW_ASSOC) Button(row * 100, Tr(S_SET_ASSOC_BTN), kCtlX, y, false);
+        else if (row == ROW_VERSION) UpdateRow(kCtlX, y);
         else Segmented(row, kCtlX, y);
     }
     // footer: version, licence, repository
@@ -228,7 +291,18 @@ void Pick(int id) {
         if (opt == 0) LoadRemoteImages();  // switched to "always": fetch what this document is still missing
         changed = SC_OTHER;
         break;
-    case ROW_UPDATE: g.cfg.updateCheck = opt == 1; changed = SC_OTHER; break;
+    case ROW_UPDATE:
+        g.cfg.updateCheck = opt == 1;
+        ApplySettings(SC_OTHER, true);
+        if (g.cfg.updateCheck) UpdateCheckAsync();  // switched on: ask now if a day has passed
+        return;
+    case ROW_VERSION:
+        switch (UpdateGetStatus()) {
+        case US_AVAILABLE: case US_DOWNLOAD_FAILED: UpdateInstall(false); break;  // the button named the version
+        case US_INSTALLED: UpdateRestart(); break;
+        default: UpdateCheckNow(); break;
+        }
+        return;
     case ROW_LANG: g.cfg.language = (uint8_t)opt; changed = SC_LANGUAGE; break;
     case ROW_EDITOR: {
         for (const Hit& h : g_hits)
@@ -384,4 +458,6 @@ void DrawSettingsButton() {
     bool hot = g.settingsBtnHot;
     if (hot) g.canvas->FillRoundRect(l, t, r, b, 6.f, P_HOVER);
     DrawIcon(0xE713, l, t, r - l, 15.f, hot ? P_TEXT : P_MUTED);  // Segoe Fluent Icons: Settings
+    // a newer version is known: a dot on the gear until it is installed (the tooltip names the version)
+    if (UpdateAvailable()) g.canvas->FillCircle(r - 7.f, t + 7.f, 3.5f, P_ACCENT);
 }

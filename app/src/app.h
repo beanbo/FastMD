@@ -25,10 +25,10 @@ enum : UINT {
     WM_APP_POSITIONS,              // positions.bin read after the first frame (lParam = std::vector<PosEntry>*)
     WM_APP_FINDINPUT,              // find input box → UI thread: wParam = FI_*, lParam = event data
     WM_APP_SCALED,                 // images re-scaled to display size (wParam = docGen, lParam = std::vector<ScaledImage>*)
-    WM_APP_UPDATE,                 // update check: wParam 0 = newer version found, 1 = installer ready, 2 = failed
+    WM_APP_UPDATE,                 // updater (update.cpp): wParam = what happened, lParam = its data
     WM_APP_QUERY = WM_APP + 64,    // automation / UI tests: wParam = Query → LRESULT (read-only state)
 };
-enum : UINT_PTR { TIMER_TOAST = 1, TIMER_RELOAD = 2, TIMER_AUTOSCROLL = 3, TIMER_HBAR = 4 };
+enum : UINT_PTR { TIMER_TOAST = 1, TIMER_RELOAD = 2, TIMER_AUTOSCROLL = 3, TIMER_HBAR = 4, TIMER_UPDATE = 5 };
 
 // WM_COMMAND ids (menus; tests and automation drive the viewer with them too — keep the numbers stable)
 enum Cmd : UINT {
@@ -55,7 +55,8 @@ enum Query : UINT {
     Q_CARET /* MAKELONG(x, y) of the caret in client pixels, or -1 when no caret is drawn */,
     Q_DRAG /* formats a drag would carry: lp = kind * 65536 + arg → DragFormat bits */,
     Q_MATH /* formulas and diagrams: lp = 0 all, 1 drawn, 2 failed */,
-    Q_UPDATE /* lp = 0 newer version found, 1 start a test download, 2 installer downloaded and checked */,
+    Q_UPDATE /* lp = 0 newer version known, 1 start a test download, 2 installer downloaded and checked,
+                3 UpdateStatus, 4 check now (the settings button) */,
     Q_TASK /* lp = task → 1 ticked, 0 not, -1 no such task */,
     Q_TASK_BOX /* lp = task → centre of its box x | y << 16 in client px, -1 = not on screen */,
     Q_DOC_SERIAL /* changes with every load of a document: a reload shows up here */,
@@ -415,15 +416,25 @@ std::wstring PickExeDialog(HWND owner);
 std::wstring SavePdfDialog();        // where to write the exported PDF ("" = cancelled)
 
 // ------------------------------------------------------------------------------------------------ update.cpp
-void UpdateCheckAsync();             // after the first frame: at most one request a day
-bool UpdateAvailable();
+enum UpdateStatus : int {
+    US_IDLE, US_CHECKING, US_LATEST, US_AVAILABLE, US_DOWNLOADING, US_INSTALLING, US_INSTALLED, US_CHECK_FAILED,
+    US_DOWNLOAD_FAILED,
+};
+void UpdateCheckAsync();             // after the first frame: at most one request a day (a failed one: an hour later)
+void UpdateCheckNow();               // the settings button: ask GitHub right away
+bool UpdateAvailable();              // a newer release is known (found now or remembered from an earlier check)
 std::wstring UpdateVersion();
-void UpdateInstall();                // ask, download, check the hash, run the installer
-void OnUpdateMessage(WPARAM what);
+UpdateStatus UpdateGetStatus();
+void UpdateInstall(bool ask);        // (ask,) download, check the hash, run the installer, offer a restart
+void UpdateRestart();                // start the installed FastMD on this document and close this window
+void OnUpdateMessage(WPARAM what, LPARAM lp);
 void UpdateFetchForTest();           // automation: download + verify, without running anything
 bool UpdateFetched();
 uint64_t LastUpdateCheck();          // store.cpp
 void SetLastUpdateCheck(uint64_t t);
+// store.cpp: the newest release a check found, so later windows show it without asking ("" = none)
+void LoadFoundUpdate(std::wstring& version, std::wstring& url, std::wstring& shaUrl);
+void SaveFoundUpdate(const std::wstring& version, const std::wstring& url, const std::wstring& shaUrl);
 
 // ------------------------------------------------------------------------------------------------ uia.cpp
 LRESULT UiaHandleGetObject(WPARAM wp, LPARAM lp);  // WM_GETOBJECT: hand a screen reader the document
@@ -467,6 +478,7 @@ enum SettingsChange : uint32_t {
     SC_THEME = 1, SC_TYPE = 2 /* font, size, wrap */, SC_COLUMN = 4, SC_LANGUAGE = 8, SC_OTHER = 16, SC_ALL = 31,
 };
 void Invalidate();
+bool PrepareToClose();               // the window is about to close (or restart): false = the reader chose to stay
 void Relayout();                     // column widths / typography changed: drop layouts, re-estimate, re-measure
 bool KeyCommand(WPARAM vk, bool ctrl, bool shift, bool alt);  // keyboard shortcuts (also forwarded by the find box)
 void ScrollTo(float y, bool animate);
