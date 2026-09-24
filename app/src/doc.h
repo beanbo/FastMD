@@ -4,6 +4,7 @@
 #pragma once
 #include "common.h"
 #include "theme.h"
+#include <memory>
 
 enum RunFlags : uint16_t {
     F_BOLD = 1, F_ITALIC = 2, F_CODE = 4, F_STRIKE = 8, F_LINK = 16, F_ICON = 32,
@@ -51,14 +52,25 @@ struct Table {
     uint32_t cellOff;        // Doc::cells[cellOff + r*cols + c]
     uint32_t alignOff;       // Doc::aligns[alignOff + c]: 0 default, 1 left, 2 center, 3 right
 };
+// Decoded pixels never change once they are published: every Image that shows the same picture points at one Pixels,
+// and a worker that reads them (the scaler) holds its own reference, so replacing a picture on the UI thread can never
+// free what a worker is still reading (EDIT-MODE.md §5.2, §5.3).
+struct Pixels {
+    std::vector<uint32_t> px;   // premultiplied BGRA
+    int pxW = 0, pxH = 0;       // size of px as decoded (a GIF frame can be smaller than its header's screen)
+    std::vector<uint8_t> svg;   // the SVG source, kept so the picture can be redrawn crisply at any size
+    uint32_t serial = 0;        // NewPixelSerial(): a display-size copy is only ever used with the pixels it came from
+};
+// the same picture at its display size, made by the scaler from the Pixels with this serial (px empty = that size
+// could not be made, and is not tried again)
+struct Scaled { std::vector<uint32_t> px; int w = 0, h = 0; uint32_t serial = 0; };
+enum RenderState : uint8_t { RS_NONE = 0, RS_PENDING = 1, RS_OK = 2, RS_FAILED = 3 };
+
 struct Image {
     std::wstring path;          // absolute local path ("" = not fetched yet / unsupported)
     std::wstring url;           // https:// source, downloaded into the cache after the first frame
     int w = -1, h = -1;         // pixel size from the file header (-1 = unknown yet, 0 = failed) — layout
     int attrW = 0, attrH = 0;   // size asked for by HTML width / height attributes (0 = not given)
-    int canon = -1;             // index of the first image with the same path (holds the pixels)
-    std::vector<uint32_t> px;   // decoded premultiplied BGRA (canonical entry only), filled by the image thread
-    std::vector<uint8_t> svg;   // the SVG source, kept so the picture can be redrawn crisply at any size
     std::wstring alt;           // alt text, shown in the placeholder of a picture that stands on its own line
     // A formula or a diagram is a picture whose source is text: fastmd-tex.dll / fastmd-mermaid.dll turn it into SVG
     // on a worker thread after the first frame, and from there it is an ordinary vector picture (plan 4.1, 4.2).
@@ -69,28 +81,18 @@ struct Image {
     // the TeX between the dollars, the Mermaid content lines, or a picture's destination; alt a picture's alt text.
     uint32_t outerBeg = UINT32_MAX, outerEnd = UINT32_MAX, srcBeg = UINT32_MAX, srcEnd = UINT32_MAX;
     uint32_t altBeg = UINT32_MAX, altEnd = UINT32_MAX;
-    int pxW = 0, pxH = 0;       // size of px as decoded (a GIF frame can be smaller than its header's screen)
-    std::atomic<int> state{0};  // 0 = not requested, 1 = loading, 2 = ready, 3 = failed
-    // the same picture at its display size: drawn as a row copy, and scaled with a real filter instead of the
+    // What is drawn, UI thread only: the window fills these from its render table (loader.cpp), the preview pane
+    // while it loads. Pixels are shared, so a copy of an Image keeps its picture.
+    std::shared_ptr<const Pixels> pix;
+    // the picture at its display size: drawn as a row copy, and scaled with a real filter instead of the
     // nearest-neighbour fallback. Made in the background (loader.cpp) for the size the canvas asks for.
-    std::vector<uint32_t> sc;             // UI thread only
-    std::atomic<int> scW{0}, scH{0};      // size of sc (0 = none yet)
-    std::atomic<int> wantW{0}, wantH{0};  // display size the canvas last drew at (0 = the decoded size fits)
-    Image() = default;
-    Image(const Image& o)
-        : path(o.path), url(o.url), alt(o.alt), math(o.math), mathKind(o.mathKind), outerBeg(o.outerBeg),
-          outerEnd(o.outerEnd), srcBeg(o.srcBeg), srcEnd(o.srcEnd), altBeg(o.altBeg), altEnd(o.altEnd), w(o.w),
-          h(o.h), attrW(o.attrW), attrH(o.attrH) {}
-    Image& operator=(const Image& o) {
-        path = o.path; url = o.url; alt = o.alt; math = o.math; mathKind = o.mathKind; ascent = 0;
-        outerBeg = o.outerBeg; outerEnd = o.outerEnd; srcBeg = o.srcBeg; srcEnd = o.srcEnd;
-        altBeg = o.altBeg; altEnd = o.altEnd;
-        w = o.w; h = o.h; attrW = o.attrW; attrH = o.attrH; canon = -1;
-        px.clear(); pxW = pxH = 0; state = 0;
-        sc.clear(); scW = 0; scH = 0; wantW = 0; wantH = 0;
-        return *this;
-    }
+    std::shared_ptr<const Scaled> sc;
+    uint8_t state = RS_NONE;    // RenderState
+    bool renderFailed = false;  // the pixels are the last good picture of a source that no longer renders
+    std::wstring pxFor;         // render-table key the pixels were made from
+    int wantW = 0, wantH = 0;   // display size the canvas last drew at (0 = the decoded size fits)
 };
+uint32_t NewPixelSerial();      // layout.cpp: a fresh Pixels::serial (any thread)
 struct QuoteSpan { float x; uint32_t first, last; uint8_t alert; };
 struct Heading { uint32_t block; uint8_t level; std::wstring slug; };
 struct Anchor { std::wstring slug; uint32_t block; };  // #target that is not a heading (footnotes)

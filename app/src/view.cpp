@@ -657,16 +657,15 @@ static void DrawBlock(uint32_t i, float y) {
         DrawHScrollBar(i);
         break;
     case BK_IMAGE: {
-        Image& im0 = g.doc.images[b.aux];
-        Image& im = im0.canon >= 0 ? g.doc.images[im0.canon] : im0;
+        Image& im = g.doc.images[b.aux];
         float iw = L->natural;  // BlockBox has already placed the box for <p align=…>
         bool wide = iw > w + 0.5f;  // a diagram too wide for the column: draw it whole and let the block scroll
         float ix = wide ? x - HScrollOf(i) : x;
         if (wide) g.canvas->PushClip(x, y, right, y + L->height);
-        if (im.state.load() == 2) g.canvas->DrawImage(im, ix, y, ix + iw, y + L->height);
+        if (im.state == RS_OK) g.canvas->DrawImage(im, ix, y, ix + iw, y + L->height);
         else {
             g.canvas->FillRoundRect(ix, y, ix + iw, y + L->height, 6.f, P_PLACEHOLDER);
-            if (L->text && im0.w <= 0) g.canvas->Text(L->text, ix + 12.f, y + 9.f, P_MUTED);
+            if (L->text && im.w <= 0) g.canvas->Text(L->text, ix + 12.f, y + 9.f, P_MUTED);
         }
         if (wide) {
             g.canvas->PopClip();

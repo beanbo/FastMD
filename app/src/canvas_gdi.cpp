@@ -215,7 +215,8 @@ struct GdiCanvas final : RendererCanvas {
         layout->Draw(nullptr, this, x, y);
     }
     void DrawImage(::Image& im, float l, float t, float r, float b) override {
-        if (im.state.load() != 2 || im.pxW <= 0 || im.pxH <= 0 || im.px.size() < (size_t)im.pxW * im.pxH) return;
+        const Pixels* pix = im.pix.get();
+        if (!pix || pix->pxW <= 0 || pix->pxH <= 0 || pix->px.size() < (size_t)pix->pxW * pix->pxH) return;
         float s = S();
         int x0 = (int)std::lround(l * s), y0 = (int)std::lround(t * s), x1 = (int)std::lround(r * s), y1 = (int)std::lround(b * s);
         int dw = x1 - x0, dh = y1 - y0;
@@ -234,26 +235,28 @@ struct GdiCanvas final : RendererCanvas {
                 *p = (rb & 0xff00ff) | (g & 0x00ff00);
             }
         };
-        // a copy at exactly this size (loader.cpp makes it in the background): one row at a time, no scaling here
-        if (im.scW.load(std::memory_order_acquire) == dw && im.scH.load() == dh && im.sc.size() >= (size_t)dw * dh) {
-            const uint32_t* src = im.sc.data() + (size_t)(cy0 - y0) * dw + (cx0 - x0);
+        // a copy at exactly this size, made from these very pixels (loader.cpp makes it in the background): one row at
+        // a time, no scaling here
+        const Scaled* sc = im.sc.get();
+        if (sc && sc->serial == pix->serial && sc->w == dw && sc->h == dh && sc->px.size() >= (size_t)dw * dh) {
+            const uint32_t* src = sc->px.data() + (size_t)(cy0 - y0) * dw + (cx0 - x0);
             for (int y = cy0; y < cy1; y++, src += dw) {
                 uint32_t* p = Row(y) + cx0;
                 for (int i = 0; i < n; i++) put(p + i, src[i]);
             }
             return;
         }
-        if (dw != im.pxW || dh != im.pxH) {  // ask for that copy; until it is ready, scale by the nearest neighbour
-            im.wantW.store(dw, std::memory_order_relaxed);
-            im.wantH.store(dh, std::memory_order_relaxed);
+        if (dw != pix->pxW || dh != pix->pxH) {  // ask for that copy; until it is ready, scale by the nearest neighbour
+            im.wantW = dw;
+            im.wantH = dh;
         }
         // the nearest source column of every visible column, once per call: a 64-bit division per pixel cost ≈0.5 ms
         // per frame with large images in a full-screen window
-        const int sw = im.pxW, sh = im.pxH;
+        const int sw = pix->pxW, sh = pix->pxH;
         xmap.resize(n);
         for (int i = 0; i < n; i++) xmap[i] = (int)((int64_t)(cx0 + i - x0) * sw / dw);
         const int* xm = xmap.data();
-        const uint32_t* src = im.px.data();
+        const uint32_t* src = pix->px.data();
         for (int y = cy0; y < cy1; y++) {
             uint32_t* p = Row(y) + cx0;
             const uint32_t* srow = src + (size_t)((int64_t)(y - y0) * sh / dh) * sw;

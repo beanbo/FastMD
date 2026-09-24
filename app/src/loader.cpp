@@ -13,27 +13,86 @@
 // documents above this size get a prefix parse for the first screen (the full parse runs concurrently)
 static const size_t kPrefixThreshold = 256 * 1024, kPrefixChars = 48 * 1024;
 
-HANDLE Spawn(LPTHREAD_START_ROUTINE fn, void* arg, int prio, SIZE_T stack) {
+// Closes the handles of workers that have finished, so a long session does not pile them up (the caller holds the lock).
+static void DropFinishedWorkers() {
+    auto& ws = g.workers;
+    ws.erase(std::remove_if(ws.begin(), ws.end(), [](const Worker& w) {
+                 if (WaitForSingleObject(w.h, 0) != WAIT_OBJECT_0) return false;
+                 CloseHandle(w.h);
+                 return true;
+             }),
+             ws.end());
+}
+
+HANDLE Spawn(LPTHREAD_START_ROUTINE fn, void* arg, int prio, SIZE_T stack, WorkerKind kind) {
     HANDLE th = CreateThread(nullptr, stack, fn, arg, 0, nullptr);
     if (!th) return nullptr;
     if (prio != THREAD_PRIORITY_NORMAL) SetThreadPriority(th, prio);
     AcquireSRWLockExclusive(&g.workersLock);
-    g.workers.push_back(th);
+    DropFinishedWorkers();
+    g.workers.push_back(Worker{th, kind});
     ReleaseSRWLockExclusive(&g.workersLock);
     return th;
 }
 
 void JoinWorkers() {
-    g.gen++;     // measure threads check the layout generation and stop early
-    g.docGen++;  // image / full-parse threads check the document generation (a re-layout must not stop them)
+    g.gen++;      // measure threads check the layout generation and stop early
+    g.docGen++;   // a full parse checks the document generation (a re-layout must not stop it)
+    g.loadGen++;  // the picture worker skips what was queued for this document; its current job's result is dropped
     AcquireSRWLockExclusive(&g.workersLock);
-    std::vector<HANDLE> ws;
+    std::vector<Worker> ws;
     ws.swap(g.workers);
     ReleaseSRWLockExclusive(&g.workersLock);
-    for (HANDLE h : ws) { WaitForSingleObject(h, INFINITE); CloseHandle(h); }
+    for (const Worker& w : ws) { WaitForSingleObject(w.h, INFINITE); CloseHandle(w.h); }
     g.jobsPending = 0;
     if (Doc* d = g.fullDoc.exchange(nullptr)) delete d;
     g.fullPending = false;
+    g.renders.clear();  // a load renders everything anew (as it always did): the files may have changed meanwhile
+}
+
+// An edit replaces the model many times a second, so it waits only for what reads g.doc and stops within one block:
+// the measure jobs. Everything else keeps running - the scaler holds its own pixels, the picture worker its own jobs,
+// the updater nothing of the document (EDIT-MODE.md §5.1). The generations are bumped first, so a measure job in the
+// middle of a big chunk gives up at its next block instead of finishing it.
+void JoinDocReaders() {
+    // the full parse reads g.src: edit mode is refused while it runs, so there is none to wait for here
+    if (g.fullPending) DebugLog("JoinDocReaders while the full parse is pending");
+    g.gen++;
+    g.docGen++;
+    std::vector<HANDLE> measure;
+    AcquireSRWLockExclusive(&g.workersLock);
+    DropFinishedWorkers();
+    for (size_t i = 0; i < g.workers.size();) {
+        if (g.workers[i].kind != WK_MEASURE) { i++; continue; }
+        measure.push_back(g.workers[i].h);
+        g.workers.erase(g.workers.begin() + i);
+    }
+    ReleaseSRWLockExclusive(&g.workersLock);
+    for (HANDLE h : measure) { WaitForSingleObject(h, INFINITE); CloseHandle(h); }
+    g.jobsPending = 0;
+}
+
+const TestSlow& TestSlowMs() {
+    static const TestSlow slow = [] {
+        TestSlow t;
+        wchar_t v[256];
+        DWORD n = GetEnvironmentVariableW(L"FASTMD_TEST_SLOW", v, (DWORD)std::size(v));
+        if (!n || n >= std::size(v)) return t;
+        for (wchar_t *p = v, *end = nullptr; *p; p = *end ? end + 1 : end) {  // "images:300,scale:300"
+            wchar_t* colon = wcschr(p, L':');
+            if (!colon) break;
+            *colon = 0;
+            DWORD ms = 0;
+            for (end = colon + 1; *end >= L'0' && *end <= L'9'; end++) ms = ms * 10 + (*end - L'0');
+            if (!wcscmp(p, L"images")) t.images = ms;
+            else if (!wcscmp(p, L"scale")) t.scale = ms;
+            else if (!wcscmp(p, L"preview")) t.preview = ms;
+            else if (!wcscmp(p, L"fullparse")) t.fullparse = ms;
+            else if (!wcscmp(p, L"save")) t.save = ms;
+        }
+        return t;
+    }();
+    return slow;
 }
 
 std::wstring WindowTitle() {
@@ -46,6 +105,7 @@ std::wstring WindowTitle() {
 // ------------------------------------------------------------------------------------------------ parse
 static DWORD WINAPI FullParseThread(void* p) {
     uint32_t myGen = (uint32_t)(uintptr_t)p;
+    if (DWORD ms = TestSlowMs().fullparse) Sleep(ms);
     Doc* d = new Doc();
     d->baseDir = g.doc.baseDir;
     ParseMarkdown(*d, g.src.data(), g.src.size());
@@ -75,7 +135,7 @@ static void LoadSource(bool startup) {
         // big file: the first screen comes from a prefix that ends at a top-level heading (identical blocks); the
         // full model replaces it right after the first frame
         g.fullPending = true;
-        Spawn(FullParseThread, (void*)(uintptr_t)(uint32_t)g.docGen);
+        Spawn(FullParseThread, (void*)(uintptr_t)(uint32_t)g.docGen, THREAD_PRIORITY_NORMAL, 0, WK_FULLPARSE);
         ParseMarkdown(g.doc, g.src.data(), cut);
         if (startup) Mark("parsed_prefix");
     } else {
@@ -131,8 +191,7 @@ static void ResetViewState() {
     g.tocHover = -1;
     g.restoreBlock = -1;
     g.restored = false;
-    g.imagesStarted = false;
-    g.scalingImages = false;  // JoinWorkers has already waited for the scaler; a late result is dropped by its gen
+    g.scalingImages = false;  // JoinWorkers has already waited for the scaler; a late result matches no pixels any more
     g.docH = 0;
 }
 
@@ -215,14 +274,17 @@ void NavigateForward() {
 }
 
 // ------------------------------------------------------------------------------------------------ exact heights
+static uint32_t MeasuredBlock(const MeasureJob* job, size_t k) { return job->idx.empty() ? job->from + (uint32_t)k : job->idx[k]; }
+
 static DWORD WINAPI MeasureThread(void* p) {
     auto* job = (MeasureJob*)p;
     Typography t;
     t.Init(g.dwf, &g.typo);
-    for (uint32_t i = job->from; i < job->to; i++) {
+    for (size_t k = 0; k < job->h.size(); k++) {
         if (g.gen != job->gen || g.closing) break;
+        uint32_t i = MeasuredBlock(job, k);
         const Block& b = g.doc.blocks[i];
-        if (BlockHidden(b)) { job->h[i - job->from] = 0.f; continue; }  // folded <details>: no height
+        if (BlockHidden(b)) { job->h[k] = 0.f; continue; }  // folded <details>: no height
         float w = LayoutWidthFor(b, job->textW, job->wideW);
         bool exact = false;
         float h = BlockHeightEstimate(g.doc, t, b, w, &exact);
@@ -231,14 +293,33 @@ static DWORD WINAPI MeasureThread(void* p) {
             h = L->height;
             delete L;
         }
-        job->h[i - job->from] = h;
+        job->h[k] = h;
     }
     t.Release();
     if (g.closing || !PostMessageW(g.hwnd, WM_APP_MEASURED, 0, (LPARAM)job)) delete job;
     return 0;
 }
 
+// Edit mode (EDIT-MODE.md §5.4): after a pause in typing only the blocks whose height is still a guess are measured,
+// nearest to the viewport first, at most 64 at a time on one thread - the next edit stops the job within one block,
+// and the next batch follows when this one is in.
+static void StartMeasureUnknown() {
+    size_t n = g.doc.blocks.size();
+    if (g.jobsPending || !n) return;
+    uint32_t a = std::min<uint32_t>(FirstVisible(g.scrollY), (uint32_t)n - 1);
+    auto* job = new MeasureJob{g.gen, 0, 0, g.textW, g.wideW, {}, {}};
+    for (size_t d = 0; job->idx.size() < 64 && (d <= a || a + d < n); d++) {  // outwards from the top of the view
+        if (a + d < n && !g.known[a + d]) job->idx.push_back(a + (uint32_t)d);
+        if (d && d <= a && !g.known[a - d] && job->idx.size() < 64) job->idx.push_back(a - (uint32_t)d);
+    }
+    if (job->idx.empty()) { delete job; return; }
+    job->h.assign(job->idx.size(), 0.f);
+    g.jobsPending++;
+    if (!Spawn(MeasureThread, job, THREAD_PRIORITY_BELOW_NORMAL, 256 * 1024, WK_MEASURE)) { g.jobsPending--; delete job; }
+}
+
 void StartMeasure() {
+    if (g.editing) { StartMeasureUnknown(); return; }
     size_t n = g.doc.blocks.size();
     size_t unknown = 0;
     for (size_t i = 0; i < n; i++) unknown += !g.known[i];
@@ -248,11 +329,11 @@ void StartMeasure() {
     int threads = (int)std::clamp<size_t>(n / 400, 1, std::min<DWORD>(8, std::max<DWORD>(1, si.dwNumberOfProcessors / 2)));
     size_t chunk = (n + threads - 1) / threads;
     for (int k = 0; k < threads; k++) {
-        auto* job = new MeasureJob{g.gen, (uint32_t)(k * chunk), (uint32_t)std::min(n, (k + 1) * chunk), g.textW, g.wideW, {}};
+        auto* job = new MeasureJob{g.gen, (uint32_t)(k * chunk), (uint32_t)std::min(n, (k + 1) * chunk), g.textW, g.wideW, {}, {}};
         if (job->from >= job->to) { delete job; continue; }
         job->h.assign(job->to - job->from, 0.f);
         g.jobsPending++;
-        if (!Spawn(MeasureThread, job, THREAD_PRIORITY_BELOW_NORMAL, 256 * 1024)) { g.jobsPending--; delete job; }
+        if (!Spawn(MeasureThread, job, THREAD_PRIORITY_BELOW_NORMAL, 256 * 1024, WK_MEASURE)) { g.jobsPending--; delete job; }
     }
 }
 
@@ -262,8 +343,9 @@ void OnMeasured(MeasureJob* job) {
         static MeasureJob* cur;
         cur = job;
         WithAnchor([] {
-            for (uint32_t i = cur->from; i < cur->to; i++) {
-                if (!g.cache[i]) g.H[i] = cur->h[i - cur->from];
+            for (size_t k = 0; k < cur->h.size(); k++) {
+                uint32_t i = MeasuredBlock(cur, k);
+                if (!g.cache[i]) g.H[i] = cur->h[k];
                 g.known[i] = 1;
             }
             RecomputeY();
@@ -272,141 +354,406 @@ void OnMeasured(MeasureJob* job) {
         if (g.jobsPending == 0) {
             Mark("measured_all");
             DebugFlush();
+            if (g.editing) StartMeasureUnknown();  // the next batch of guessed heights
         }
         Invalidate();
     }
     delete job;
 }
 
-// ------------------------------------------------------------------------------------------------ images (WIC)
-static DWORD WINAPI ImageThread(void* p) {
-    uint32_t myGen = (uint32_t)(uintptr_t)p;
-    HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    IWICImagingFactory* wic = nullptr;
-    CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
-    auto& imgs = g.doc.images;
-    bool fetched = false;
-    const float mathFont = (float)g.cfg.fontSize;
-    const uint32_t mathColor = g_pal[P_TEXT];
-    const bool dark = PaletteIsDark();
-    for (size_t i = 0; i < imgs.size() && !g.closing && g.docGen == myGen; i++) {
-        Image& im = imgs[i];
+// ------------------------------------------------------------------------------------------------ pictures
+// Pictures, formulas and diagrams are made on one long-lived worker thread that never touches the document
+// (EDIT-MODE.md §5.2). StartImages hands it jobs by value, one per source and render context, and the results come
+// back in batches that the UI thread puts on every entry of the document showing that source. So the model can be
+// replaced at any moment - a reload no longer waits for a download, an edit will not wait for a diagram - the same
+// formula is rendered once however often it appears, nothing is queued twice, and a failure is remembered instead of
+// being tried again on every occasion. The render table (g.renders) is the memory of all of that.
+namespace {
+struct ImageJob {
+    std::wstring key;         // render-table key
+    uint32_t ctx, loadGen;
+    uint8_t kind;             // Image::mathKind
+    std::string math;
+    std::wstring path, url;
+    float fontPx;             // the render context of a formula or a diagram, as it was when the job was queued
+    uint32_t rgb;
+    bool dark;
+};
+}  // namespace
+
+static SRWLOCK g_jobLock = SRWLOCK_INIT;
+static std::vector<ImageJob> g_jobs;           // queued, oldest first (under g_jobLock)
+static HANDLE g_jobEvent = nullptr;            // auto-reset: something was queued
+static std::vector<std::wstring> g_imgKeys;    // the render-table key of every entry of g.doc.images ...
+static uint32_t g_imgKeysSerial = UINT32_MAX, g_imgKeysCtx = 0;  // ... for this document and render context
+static uint64_t g_useTick = 0;                 // RenderEntry::lastUse
+
+// A formula is typeset in the text colour at the text size, a diagram in the theme's colours, so its pixels belong to
+// that context; a picture from a file looks the same in every one (context 0).
+static uint32_t MathContext() {
+    const uint32_t parts[] = {(uint32_t)g.cfg.fontSize, g_pal[P_TEXT], (uint32_t)PaletteIsDark()};
+    uint32_t h = 2166136261u;
+    for (uint32_t v : parts) h = (h ^ v) * 16777619u;
+    return h;
+}
+
+// the source (`m<kind>:<TeX or Mermaid>`, `u:<url>`, `p:<path>`, the same shape as editcore's PictureKey), then
+// '\x1f' and the context in hex
+static std::wstring RenderKey(const Image& im, uint32_t mctx) {
+    std::wstring k = im.mathKind ? L"m0:" : im.url.empty() ? L"p:" : L"u:";
+    if (im.mathKind) k[1] = (wchar_t)(L'0' + im.mathKind);
+    k += im.mathKind ? im.alt : im.url.empty() ? im.path : im.url;
+    uint32_t ctx = im.mathKind ? mctx : 0;
+    k.push_back(L'\x1f');
+    for (int s = 28; s >= 0; s -= 4) k.push_back(L"0123456789abcdef"[(ctx >> s) & 15]);
+    return k;
+}
+
+std::wstring ImageRenderKey(const Image& im) { return RenderKey(im, MathContext()); }
+
+static const std::vector<std::wstring>& ImageKeys(uint32_t mctx) {
+    if (g_imgKeysSerial != g.docSerial || g_imgKeysCtx != mctx || g_imgKeys.size() != g.doc.images.size()) {
+        g_imgKeys.clear();
+        for (const Image& im : g.doc.images) g_imgKeys.push_back(RenderKey(im, mctx));
+        g_imgKeysSerial = g.docSerial;
+        g_imgKeysCtx = mctx;
+    }
+    return g_imgKeys;
+}
+
+static void PostImages(std::vector<RenderResult>*& batch) {
+    if (!batch) return;
+    if (g.closing || !g.hwnd || !PostMessageW(g.hwnd, WM_APP_IMAGES, 0, (LPARAM)batch)) delete batch;
+    batch = nullptr;
+}
+
+// One job, on the worker: the source becomes pixels, or a failure. True when it went to the network (the picture is
+// then handed over as soon as it arrives rather than with the next batch).
+static bool RenderImage(const ImageJob& job, IWICImagingFactory*& wic, RenderResult& r, bool& fetched) {
+    r.key = job.key;
+    r.ctx = job.ctx;
+    r.loadGen = job.loadGen;
+    r.math = job.kind != 0;
+    auto pix = std::make_shared<Pixels>();
+    if (job.kind) {
         // A formula or a diagram (plan 4.1, 4.2): its source becomes SVG, and from there it is a vector picture like
-        // any other. The same formula twice in a document is drawn once.
-        if (im.mathKind) {
-            size_t c = i;
-            for (size_t k = 0; k < i; k++)
-                if (imgs[k].mathKind == im.mathKind && imgs[k].math == im.math) { c = k; break; }
-            im.canon = (int)c;
-            if (c != i) continue;
-            std::vector<uint8_t> svg;
-            float mw = 0, mh = 0, asc = 0;
-            bool ok = im.mathKind == 3
-                          ? MermaidSvg(im.math, dark, svg)
-                          : TexSvg(im.math, im.mathKind == 2, mathFont, mathColor, svg, &mw, &mh, &asc);
-            if (ok && (mw <= 0 || mh <= 0)) ok = SvgMeasure(svg.data(), svg.size(), &mw, &mh);
-            if (ok && mw >= 1.f && mh >= 1.f) {
-                // Both sides clamped on their own would squash a big diagram; scale it down whole instead.
-                float k = std::min(1.f, 4096.f / std::max(mw, mh));
-                int w = std::max(1, (int)std::lround(mw * k)), h = std::max(1, (int)std::lround(mh * k));
-                std::vector<uint32_t> px;
-                if (SvgRender(svg.data(), svg.size(), w, h, px)) {
-                    im.px.swap(px);
-                    im.pxW = w;
-                    im.pxH = h;
-                    im.w = w;
-                    im.h = h;
-                    im.ascent = asc > 0 ? asc : (float)h;
-                    im.svg.swap(svg);
-                    im.state = 2;
-                    continue;
-                }
+        // any other.
+        float mw = 0, mh = 0, asc = 0;
+        bool ok = job.kind == 3 ? MermaidSvg(job.math, job.dark, pix->svg)
+                                : TexSvg(job.math, job.kind == 2, job.fontPx, job.rgb, pix->svg, &mw, &mh, &asc);
+        if (ok && (mw <= 0 || mh <= 0)) ok = SvgMeasure(pix->svg.data(), pix->svg.size(), &mw, &mh);
+        if (ok && mw >= 1.f && mh >= 1.f) {
+            // Both sides clamped on their own would squash a big diagram; scale it down whole instead.
+            float k = std::min(1.f, 4096.f / std::max(mw, mh));
+            int w = std::max(1, (int)std::lround(mw * k)), h = std::max(1, (int)std::lround(mh * k));
+            if (SvgRender(pix->svg.data(), pix->svg.size(), w, h, pix->px)) {
+                pix->pxW = r.w = w;
+                pix->pxH = r.h = h;
+                r.ascent = asc > 0 ? asc : (float)h;
+                r.ok = true;
             }
-            im.state = 3;
-            continue;
         }
-        if (im.path.empty() && !im.url.empty() && RemoteImagesAllowed()) {
-            // from the network, strictly after the first frame: the cache file is the picture's path from then on
-            std::wstring cache = CacheFileFor(im.url);
-            if (GetFileAttributesW(cache.c_str()) == INVALID_FILE_ATTRIBUTES) {
-                std::vector<uint8_t> body;
-                if (HttpGet(im.url, body, 16u << 20, false)) {
-                    CreateDirectoryW((DataDir() + L"cache").c_str(), nullptr);
-                    std::wstring tmp = cache + L".part";
-                    HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
-                    if (f != INVALID_HANDLE_VALUE) {
-                        DWORD wrote = 0;
-                        bool okw = WriteFile(f, body.data(), (DWORD)body.size(), &wrote, nullptr) && wrote == body.size();
-                        CloseHandle(f);
-                        if (okw && MoveFileExW(tmp.c_str(), cache.c_str(), MOVEFILE_REPLACE_EXISTING)) im.path = cache;
-                        else DeleteFileW(tmp.c_str());
+    } else {
+        std::wstring path = job.path;
+        if (!job.url.empty()) {
+            // From the network, strictly after the first frame: the cache file is the picture's path from then on. The
+            // setting is asked once more here: it may have changed while the job waited in the queue.
+            path.clear();
+            if (RemoteImagesAllowed()) {
+                std::wstring cache = CacheFileFor(job.url);
+                if (GetFileAttributesW(cache.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                    std::vector<uint8_t> body;
+                    if (HttpGet(job.url, body, 16u << 20, false)) {
+                        CreateDirectoryW((DataDir() + L"cache").c_str(), nullptr);
+                        std::wstring tmp = cache + L".part";
+                        HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+                        if (f != INVALID_HANDLE_VALUE) {
+                            DWORD wrote = 0;
+                            bool okw = WriteFile(f, body.data(), (DWORD)body.size(), &wrote, nullptr) && wrote == body.size();
+                            CloseHandle(f);
+                            if (okw && MoveFileExW(tmp.c_str(), cache.c_str(), MOVEFILE_REPLACE_EXISTING)) path = cache;
+                            else DeleteFileW(tmp.c_str());
+                        }
                     }
+                } else {
+                    path = cache;
                 }
-            } else {
-                im.path = cache;
+                fetched = true;
             }
-            fetched = true;
+            r.cachePath = path;
         }
-        if (im.path.empty()) { im.state = 3; continue; }
-        size_t c = i;
-        for (size_t k = 0; k < i; k++) if (imgs[k].path == im.path) { c = k; break; }
-        im.canon = (int)c;
-        if (c != i) continue;
-        bool ok = false;
         std::vector<uint8_t> bytes;  // SVG is drawn by fastmd-svg.dll; everything else goes through WIC
-        if (ReadFileBytes(im.path.c_str(), bytes, 16u << 20) && IsSvgData(bytes.data(), bytes.size())) {
+        if (!path.empty() && ReadFileBytes(path.c_str(), bytes, 16u << 20) && IsSvgData(bytes.data(), bytes.size())) {
             float sw = 0, sh = 0;
             if (SvgMeasure(bytes.data(), bytes.size(), &sw, &sh) && sw >= 1.f && sh >= 1.f) {
                 int w = std::clamp((int)std::lround(sw), 1, 4096), h = std::clamp((int)std::lround(sh), 1, 4096);
-                std::vector<uint32_t> px;
-                if (SvgRender(bytes.data(), bytes.size(), w, h, px)) {
-                    im.px.swap(px);
-                    im.pxW = w;
-                    im.pxH = h;
-                    if (im.w <= 0) { im.w = w; im.h = h; }
-                    im.svg.swap(bytes);
-                    ok = true;
+                if (SvgRender(bytes.data(), bytes.size(), w, h, pix->px)) {
+                    pix->pxW = r.w = w;
+                    pix->pxH = r.h = h;
+                    pix->svg.swap(bytes);
+                    r.ok = true;
                 }
             }
-            im.state = ok ? 2 : 3;
-            if (ok && !im.url.empty() && !g.closing && g.docGen == myGen) PostMessageW(g.hwnd, WM_APP_IMAGES, 0, 0);
+        } else if (!path.empty()) {
+            if (!wic) CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
+            IWICBitmapDecoder* dec = nullptr;
+            IWICBitmapFrameDecode* fr = nullptr;
+            IWICFormatConverter* conv = nullptr;
+            if (wic && SUCCEEDED(wic->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &dec)) &&
+                SUCCEEDED(dec->GetFrame(0, &fr)) && SUCCEEDED(wic->CreateFormatConverter(&conv)) &&
+                SUCCEEDED(conv->Initialize(fr, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom))) {
+                UINT w = 0, h = 0;
+                conv->GetSize(&w, &h);
+                pix->px.resize((size_t)w * h);
+                if (SUCCEEDED(conv->CopyPixels(nullptr, w * 4, (UINT)(pix->px.size() * 4), (BYTE*)pix->px.data()))) {
+                    pix->pxW = r.w = (int)w;  // the decoded size (a GIF frame may be smaller than its header's screen size)
+                    pix->pxH = r.h = (int)h;
+                    r.ok = true;
+                }
+            }
+            SafeRelease(conv);
+            SafeRelease(fr);
+            SafeRelease(dec);
+        }
+        // a file that could not be read is tried again when it changes (the window's activation looks, §5.2)
+        if (!r.ok && job.url.empty()) GetFileStamp(path.c_str(), &r.failTime, &r.failSize);
+    }
+    if (r.ok) {
+        pix->serial = NewPixelSerial();
+        r.pix = std::move(pix);
+    }
+    return !job.url.empty();
+}
+
+// The worker: started with the first picture of the process and alive as long as the process. It stops only for a
+// load (a job of an older loadGen is skipped) or the window closing - never for an edit.
+static DWORD WINAPI PictureWorker(void*) {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);  // WIC; the apartment is kept for the life of the thread
+    IWICImagingFactory* wic = nullptr;
+    std::vector<ImageJob> todo;
+    size_t next = 0;
+    std::vector<RenderResult>* batch = nullptr;
+    ULONGLONG batchStart = 0;
+    bool fetched = false;
+    while (!g.closing) {
+        if (next == todo.size()) {
+            todo.clear();
+            next = 0;
+            AcquireSRWLockExclusive(&g_jobLock);
+            todo.swap(g_jobs);
+            ReleaseSRWLockExclusive(&g_jobLock);
+            if (todo.empty()) {  // nothing to do: hand over what is done, then sleep until something is queued
+                PostImages(batch);
+                if (fetched) TrimHttpCache();
+                fetched = false;
+                WaitForSingleObject(g_jobEvent, INFINITE);
+            }
             continue;
         }
-        IWICBitmapDecoder* dec = nullptr;
-        IWICBitmapFrameDecode* fr = nullptr;
-        IWICFormatConverter* conv = nullptr;
-        if (wic && SUCCEEDED(wic->CreateDecoderFromFilename(im.path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &dec)) &&
-            SUCCEEDED(dec->GetFrame(0, &fr)) && SUCCEEDED(wic->CreateFormatConverter(&conv)) &&
-            SUCCEEDED(conv->Initialize(fr, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom))) {
-            UINT w = 0, h = 0;
-            conv->GetSize(&w, &h);
-            std::vector<uint32_t> px((size_t)w * h);
-            if (SUCCEEDED(conv->CopyPixels(nullptr, w * 4, (UINT)(px.size() * 4), (BYTE*)px.data()))) {
-                im.px.swap(px);
-                im.pxW = (int)w;  // the decoded size (a GIF frame may be smaller than its header's screen size)
-                im.pxH = (int)h;
-                if (im.w <= 0) { im.w = (int)w; im.h = (int)h; }
-                ok = true;
-            }
+        const ImageJob& job = todo[next++];
+        if (job.loadGen != g.loadGen) continue;  // queued for a document that is not open any more
+        g.rendersStarted++;
+        if (DWORD ms = TestSlowMs().images) Sleep(ms);
+        if (!batch) {
+            batch = new std::vector<RenderResult>();
+            batchStart = GetTickCount64();
         }
-        SafeRelease(conv);
-        SafeRelease(fr);
-        SafeRelease(dec);
-        im.state = ok ? 2 : 3;
-        // downloads take their time: show each picture as it arrives instead of waiting for the last one
-        if (ok && !im.url.empty() && !g.closing && g.docGen == myGen) PostMessageW(g.hwnd, WM_APP_IMAGES, 0, 0);
+        batch->emplace_back();
+        bool net = RenderImage(job, wic, batch->back(), fetched);
+        // handed over in batches (every 50 ms or 8 pictures), so a document of many formulas is not re-laid out for
+        // each; a download at once, since it took its time
+        if (net || batch->size() >= 8 || GetTickCount64() - batchStart >= 50) PostImages(batch);
     }
-    SafeRelease(wic);
-    if (SUCCEEDED(hrCo)) CoUninitialize();
-    if (fetched) TrimHttpCache();
-    if (!g.closing && g.docGen == myGen) PostMessageW(g.hwnd, WM_APP_IMAGES, 0, 0);
     return 0;
 }
 
-static void StartImages() {
-    if (g.imagesStarted || g.doc.images.empty()) return;
-    g.imagesStarted = true;
-    Spawn(ImageThread, (void*)(uintptr_t)(uint32_t)g.docGen, THREAD_PRIORITY_BELOW_NORMAL);
+static void QueueImageJobs(std::vector<ImageJob>& jobs) {
+    AcquireSRWLockExclusive(&g_jobLock);
+    for (ImageJob& j : jobs) g_jobs.push_back(std::move(j));
+    ReleaseSRWLockExclusive(&g_jobLock);
+    if (!g_jobEvent) {
+        g_jobEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        HANDLE th = g_jobEvent ? CreateThread(nullptr, 0, PictureWorker, nullptr, 0, nullptr) : nullptr;
+        if (th) {
+            SetThreadPriority(th, THREAD_PRIORITY_BELOW_NORMAL);
+            CloseHandle(th);  // detached: nothing ever waits for it
+        }
+    }
+    if (g_jobEvent) SetEvent(g_jobEvent);
+}
+
+// Puts what the table knows about a source on one entry of the document; true when that changes what is drawn.
+static bool ShowEntry(Image& im, const RenderEntry& e, const std::wstring& key) {
+    if (im.state == e.state && im.pix == e.pix) return false;
+    if (e.state == RS_PENDING) {  // nothing new yet: a picture already shown stays until its successor arrives
+        if (im.state == RS_NONE) im.state = RS_PENDING;
+        return false;
+    }
+    im.state = e.state;
+    im.renderFailed = false;
+    if (e.state == RS_OK) {
+        im.pix = e.pix;
+        im.sc = e.sc;
+        im.pxFor = key;
+        if (im.mathKind) {  // the real size replaces the parser's guess
+            im.w = e.w;
+            im.h = e.h;
+            im.ascent = e.ascent;
+        } else if (im.w <= 0) {  // a picture whose header said nothing (a download, an unreadable header)
+            im.w = e.w;
+            im.h = e.h;
+        }
+    } else {
+        im.pix.reset();
+        im.sc.reset();
+    }
+    if (!e.cachePath.empty()) im.path = e.cachePath;  // a remote picture: its file in the download cache (R20)
+    return true;
+}
+
+// The entries in `changed` draw differently now. The blocks that show one lose their layout (a picture's size is part
+// of it) and a picture block takes the picture's height; the view keeps its place.
+static const std::vector<uint8_t>* g_changed;
+
+static bool RunsShowChanged(uint32_t runOff, uint32_t runCount) {
+    for (uint32_t k = 0; k < runCount; k++) {
+        const Run& r = g.doc.runs[runOff + k];
+        if ((r.flags & F_IMAGE) && r.image < g_changed->size() && (*g_changed)[r.image]) return true;
+    }
+    return false;
+}
+
+static void RefreshImageBlocks(const std::vector<uint8_t>& changed) {
+    g.pixelSerial++;  // the same layout may now draw differently: a scrolled frame must not reuse the old pixels
+    g_changed = &changed;
+    WithAnchor([] {
+        const Doc& d = g.doc;
+        for (size_t i = 0; i < d.blocks.size(); i++) {
+            const Block& b = d.blocks[i];
+            bool hit = b.kind == BK_IMAGE ? b.aux < g_changed->size() && (*g_changed)[b.aux]
+                                          : RunsShowChanged(b.runOff, b.runCount);  // a badge inside a line
+            if (!hit && b.kind == BK_TABLE && b.aux < d.tables.size()) {           // ... or inside a cell
+                const Table& t = d.tables[b.aux];
+                for (uint32_t c = 0; c < t.rows * t.cols && !hit; c++)
+                    hit = RunsShowChanged(d.cells[t.cellOff + c].runOff, d.cells[t.cellOff + c].runCount);
+            }
+            if (!hit) continue;
+            if (g.cache[i]) { delete g.cache[i]; g.cache[i] = nullptr; g.cachedCount--; }
+            if (b.kind == BK_IMAGE)
+                g.H[i] = ImageDisplayHeight(d.images[b.aux], LayoutWidthFor(b, g.textW, g.wideW) - b.indent);
+        }
+        RecomputeY();
+    });
+    ResolveRestore();
+    Invalidate();
+}
+
+// Pixels the document no longer shows (an edit took their source away) are kept for a while - an undo brings the source
+// back - but not beyond 64 MB: past that the least recently shown go. StartImages has just stamped every entry the
+// document shows with a use from `shownFrom` on, so the others are exactly the older stamps.
+static void EvictRenders(uint64_t shownFrom) {
+    const size_t budget = 64u << 20;
+    auto bytes = [](const RenderEntry& e) -> size_t { return e.pix ? e.pix->px.size() * 4 + e.pix->svg.size() : 0; };
+    size_t spare = 0;
+    for (const auto& kv : g.renders)
+        if (kv.second.lastUse < shownFrom) spare += bytes(kv.second);
+    while (spare > budget) {
+        auto old = g.renders.end();
+        for (auto it = g.renders.begin(); it != g.renders.end(); ++it)
+            if (it->second.lastUse < shownFrom && it->second.pix &&
+                (old == g.renders.end() || it->second.lastUse < old->second.lastUse))
+                old = it;
+        spare -= bytes(old->second);
+        g.renders.erase(old);
+    }
+}
+
+void StartImages() {
+    if (g.doc.images.empty() || g.closing) return;
+    const uint64_t shownFrom = g_useTick + 1;
+    const uint32_t mctx = MathContext();
+    const std::vector<std::wstring>& keys = ImageKeys(mctx);
+    const float fontPx = (float)g.cfg.fontSize;
+    const uint32_t rgb = g_pal[P_TEXT];
+    const bool dark = PaletteIsDark(), remoteOk = RemoteImagesAllowed();
+    std::vector<ImageJob> jobs;
+    std::vector<uint8_t> changed(keys.size(), 0);
+    bool any = false;
+    for (size_t i = 0; i < keys.size(); i++) {
+        Image& im = g.doc.images[i];
+        auto it = g.renders.find(keys[i]);
+        if (it == g.renders.end()) {  // a source not seen yet (whatever state a known one is in, it is not queued again)
+            RenderEntry e;
+            bool remote = !im.mathKind && !im.url.empty();
+            // a picture that may not be fetched (the setting says ask or never), or that has no file: nothing to render
+            if (remote ? !remoteOk : !im.mathKind && im.path.empty()) e.state = RS_FAILED;
+            else jobs.push_back(ImageJob{keys[i], im.mathKind ? mctx : 0, g.loadGen.load(), im.mathKind, im.math, im.path,
+                                         im.url, fontPx, rgb, dark});
+            it = g.renders.emplace(keys[i], std::move(e)).first;
+        }
+        it->second.lastUse = ++g_useTick;
+        if (ShowEntry(im, it->second, keys[i])) changed[i] = any = true;
+    }
+    if (!jobs.empty()) QueueImageJobs(jobs);
+    if (any) RefreshImageBlocks(changed);
+    EvictRenders(shownFrom);
+}
+
+void OnImagesLoaded(std::vector<RenderResult>* batch) {
+    if (!batch) return;
+    if (g.closing) { delete batch; return; }
+    const uint32_t mctx = MathContext();
+    const std::vector<std::wstring>& keys = ImageKeys(mctx);
+    std::vector<uint8_t> changed(keys.size(), 0);
+    bool any = false, again = false;
+    for (RenderResult& r : *batch) {
+        if (r.loadGen != g.loadGen) continue;  // made for a document that is not open any more
+        if (r.math && r.ctx != mctx) {
+            // typeset for another theme or text size (it changed while this was rendering): not shown; a source the
+            // document still has is rendered again for the context of now
+            g.renders.erase(r.key);
+            again = true;
+            continue;
+        }
+        auto it = g.renders.find(r.key);
+        if (it == g.renders.end()) it = g.renders.emplace(r.key, RenderEntry()).first;
+        RenderEntry& e = it->second;
+        e.state = r.ok ? RS_OK : RS_FAILED;
+        e.pix = std::move(r.pix);
+        e.sc.reset();
+        e.w = r.w;
+        e.h = r.h;
+        e.ascent = r.ascent;
+        e.cachePath = std::move(r.cachePath);
+        e.failTime = r.failTime;
+        e.failSize = r.failSize;
+        e.error = std::move(r.error);
+        for (size_t i = 0; i < keys.size(); i++)
+            if (keys[i] == r.key && ShowEntry(g.doc.images[i], e, r.key)) changed[i] = any = true;
+    }
+    delete batch;
+    if (any) RefreshImageBlocks(changed);
+    if (again) StartImages();
+}
+
+void RetryChangedPictures() {
+    bool any = false;
+    for (auto it = g.renders.begin(); it != g.renders.end();) {
+        const std::wstring& k = it->first;
+        if (it->second.state == RS_FAILED && k.compare(0, 2, L"p:") == 0) {
+            std::wstring path = k.substr(2, k.rfind(L'\x1f') - 2);
+            FILETIME t{};
+            uint64_t size = 0;
+            if (!path.empty() && GetFileStamp(path.c_str(), &t, &size) &&
+                (CompareFileTime(&t, &it->second.failTime) != 0 || size != it->second.failSize)) {
+                it = g.renders.erase(it);
+                any = true;
+                continue;
+            }
+        }
+        ++it;
+    }
+    if (any) StartImages();
 }
 
 bool RemoteImagesAllowed() { return g.cfg.remoteImages == 0 || (g.cfg.remoteImages == 1 && g.remoteAllowedOnce); }
@@ -420,7 +767,8 @@ bool DocHasRemoteImages() {
 void LoadRemoteImages() {  // "ask": the reader said yes for this document
     if (!DocHasRemoteImages()) return;
     g.remoteAllowedOnce = true;
-    g.imagesStarted = false;
+    for (auto it = g.renders.begin(); it != g.renders.end();)  // what was not fetched is fetched now
+        it = it->second.state == RS_FAILED && it->first.compare(0, 2, L"u:") == 0 ? g.renders.erase(it) : std::next(it);
     StartImages();
 }
 
@@ -429,65 +777,93 @@ void LoadRemoteImages() {  // "ask": the reader said yes for this document
 // neighbour: slow while scrolling and visibly jagged when the picture is bigger than its column. So the canvas
 // records the size it drew at, and this thread makes a copy at exactly that size with a real filter; after that a
 // frame only copies rows. A copy is remade when the size changes (zoom, column width, window resize).
+// The jobs hold their own reference to the pixels, and the copies come back keyed by the pixels' serial, so the
+// scaler never needs the document: replacing it (or a picture in it) neither waits for the scaler nor gets a copy of
+// the wrong picture (EDIT-MODE.md §5.3).
 static const size_t kScaledBudget = 48u << 20;  // bytes of display-size copies kept outside the viewport
 
+namespace {
+struct ScaleJob { std::wstring key; std::shared_ptr<const Pixels> pix; int w, h; };
+}  // namespace
+
 static DWORD WINAPI ScaleThread(void* p) {
-    uint32_t myGen = (uint32_t)(uintptr_t)p;
+    auto* jobs = (std::vector<ScaleJob>*)p;
     HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IWICImagingFactory* wic = nullptr;
     CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
     auto* out = new std::vector<ScaledImage>();
-    auto& imgs = g.doc.images;
-    for (size_t i = 0; wic && i < imgs.size() && !g.closing && g.docGen == myGen; i++) {
-        Image& im = imgs[i];
-        if (im.canon >= 0 && im.canon != (int)i) continue;  // only the entry that holds the pixels
-        if (im.state.load() != 2 || im.pxW <= 0 || im.pxH <= 0) continue;
-        int w = im.wantW.load(), h = im.wantH.load();
-        if (w <= 0 || h <= 0 || (w == im.scW.load() && h == im.scH.load())) continue;
-        if (w == im.pxW && h == im.pxH) continue;  // drawn 1:1: the decoded pixels are already the right size
+    for (ScaleJob& j : *jobs) {
+        if (g.closing) break;
+        if (DWORD ms = TestSlowMs().scale) Sleep(ms);
+        const Pixels& im = *j.pix;
+        std::vector<uint32_t> px;
+        bool ok = false;
         if (!im.svg.empty()) {  // vector art: drawn again at the new size instead of scaling pixels
-            std::vector<uint32_t> px;
-            bool done = SvgRender(im.svg.data(), im.svg.size(), w, h, px);
-            out->push_back(ScaledImage{(uint32_t)i, w, h, done ? std::move(px) : std::vector<uint32_t>()});
-            continue;
+            ok = SvgRender(im.svg.data(), im.svg.size(), j.w, j.h, px);
+        } else if (wic) {
+            IWICBitmap* src = nullptr;
+            IWICBitmapScaler* scaler = nullptr;
+            px.resize((size_t)j.w * j.h);
+            ok = SUCCEEDED(wic->CreateBitmapFromMemory((UINT)im.pxW, (UINT)im.pxH, GUID_WICPixelFormat32bppPBGRA,
+                                                       (UINT)im.pxW * 4, (UINT)(im.px.size() * 4), (BYTE*)im.px.data(), &src)) &&
+                 SUCCEEDED(wic->CreateBitmapScaler(&scaler)) &&
+                 SUCCEEDED(scaler->Initialize(src, (UINT)j.w, (UINT)j.h, WICBitmapInterpolationModeFant)) &&
+                 SUCCEEDED(scaler->CopyPixels(nullptr, (UINT)j.w * 4, (UINT)(px.size() * 4), (BYTE*)px.data()));
+            SafeRelease(scaler);
+            SafeRelease(src);
         }
-        IWICBitmap* src = nullptr;
-        IWICBitmapScaler* scaler = nullptr;
-        std::vector<uint32_t> px((size_t)w * h);
-        bool ok = SUCCEEDED(wic->CreateBitmapFromMemory((UINT)im.pxW, (UINT)im.pxH, GUID_WICPixelFormat32bppPBGRA,
-                                                        (UINT)im.pxW * 4, (UINT)(im.px.size() * 4), (BYTE*)im.px.data(), &src)) &&
-                  SUCCEEDED(wic->CreateBitmapScaler(&scaler)) &&
-                  SUCCEEDED(scaler->Initialize(src, (UINT)w, (UINT)h, WICBitmapInterpolationModeFant)) &&
-                  SUCCEEDED(scaler->CopyPixels(nullptr, (UINT)w * 4, (UINT)(px.size() * 4), (BYTE*)px.data()));
-        SafeRelease(scaler);
-        SafeRelease(src);
         // a failure is reported too (empty pixels): the size is then known to be unusable and is not retried
-        out->push_back(ScaledImage{(uint32_t)i, w, h, ok ? std::move(px) : std::vector<uint32_t>()});
+        out->push_back(ScaledImage{std::move(j.key), im.serial, j.w, j.h, ok ? std::move(px) : std::vector<uint32_t>()});
     }
     SafeRelease(wic);
-    if (SUCCEEDED(hrCo) ) CoUninitialize();
-    if (g.closing || g.docGen != myGen || !g.hwnd || !PostMessageW(g.hwnd, WM_APP_SCALED, myGen, (LPARAM)out)) delete out;
+    if (SUCCEEDED(hrCo)) CoUninitialize();
+    delete jobs;
+    // always handed back, even after stopping early: that is how the UI thread learns that no scaler runs any more
+    if (g.closing || !g.hwnd || !PostMessageW(g.hwnd, WM_APP_SCALED, 0, (LPARAM)out)) delete out;
     return 0;
 }
 
 void ScheduleImageScaling() {
     if (g.scalingImages || g.firstFrame || !g.hwnd || g.closing) return;
-    for (size_t i = 0; i < g.doc.images.size(); i++) {
-        Image& im = g.doc.images[i];
-        if (im.canon >= 0 && im.canon != (int)i) continue;
-        int w = im.wantW.load(), h = im.wantH.load();
-        if (w <= 0 || h <= 0 || (w == im.scW.load() && h == im.scH.load()) || (w == im.pxW && h == im.pxH)) continue;
-        if (im.state.load() != 2) continue;
-        g.scalingImages = true;
-        Spawn(ScaleThread, (void*)(uintptr_t)(uint32_t)g.docGen, THREAD_PRIORITY_BELOW_NORMAL);
-        return;
+    std::vector<ScaleJob>* jobs = nullptr;
+    bool shared = false;
+    for (Image& im : g.doc.images) {
+        const Pixels* p = im.pix.get();
+        int w = im.wantW, h = im.wantH;
+        if (im.state != RS_OK || !p || w <= 0 || h <= 0 || (w == p->pxW && h == p->pxH)) continue;
+        if (im.sc && im.sc->serial == p->serial && im.sc->w == w && im.sc->h == h) continue;
+        // the same picture elsewhere in the document may have been given that copy already
+        auto it = g.renders.find(im.pxFor);
+        if (it != g.renders.end()) {
+            const Scaled* s = it->second.sc.get();
+            if (s && s->serial == p->serial && s->w == w && s->h == h) {
+                im.sc = it->second.sc;
+                shared = true;
+                continue;
+            }
+        }
+        if (!jobs) jobs = new std::vector<ScaleJob>();
+        bool queued = false;
+        for (const ScaleJob& j : *jobs) queued |= j.pix.get() == p && j.w == w && j.h == h;
+        if (!queued) jobs->push_back(ScaleJob{im.pxFor, im.pix, w, h});
+    }
+    if (shared) {
+        g.pixelSerial++;
+        Invalidate();
+    }
+    if (!jobs) return;
+    g.scalingImages = true;
+    if (!Spawn(ScaleThread, jobs, THREAD_PRIORITY_BELOW_NORMAL, 0, WK_SCALE)) {
+        g.scalingImages = false;
+        delete jobs;
     }
 }
 
 // keep the display-size copies of the pictures around the viewport; drop the rest once they add up (a long gallery)
 static void TrimScaledImages() {
-    size_t total = 0;
-    for (const Image& im : g.doc.images) total += im.sc.size() * 4;
+    size_t total = 0;  // (a copy two entries share counts twice: trimmed a little early, which does no harm)
+    for (const Image& im : g.doc.images)
+        if (im.sc) total += im.sc->px.size() * 4;
     if (total <= kScaledBudget) return;
     std::vector<uint8_t> keep(g.doc.images.size(), 0);
     float top = g.scrollY - ViewH(), bottom = g.scrollY + 2 * ViewH();
@@ -495,31 +871,39 @@ static void TrimScaledImages() {
         const Block& b = g.doc.blocks[i];
         if (b.kind != BK_IMAGE || b.aux >= keep.size() || g.Y[i] + g.H[i] < top || g.Y[i] > bottom) continue;
         keep[b.aux] = 1;
-        int c = g.doc.images[b.aux].canon;
-        if (c >= 0 && (size_t)c < keep.size()) keep[c] = 1;
     }
     for (size_t i = 0; i < g.doc.images.size(); i++) {
         Image& im = g.doc.images[i];
-        if (keep[i] || im.sc.empty()) continue;
-        im.scW = 0;  // the canvas checks the size before it reads the pixels
-        im.scH = 0;
+        if (keep[i] || !im.sc) continue;
+        auto it = g.renders.find(im.pxFor);
+        if (it != g.renders.end() && it->second.sc == im.sc) it->second.sc.reset();
+        im.sc.reset();
         im.wantW = 0;
         im.wantH = 0;
-        std::vector<uint32_t>().swap(im.sc);
     }
 }
 
-void OnScaledImages(std::vector<ScaledImage>* list, uint32_t gen) {
-    g.scalingImages = false;
-    if (gen == g.docGen && !g.closing) {
+void OnScaledImages(std::vector<ScaledImage>* list) {
+    g.scalingImages = false;  // always: a scaler posts even when it stopped early, so the flag can never stick
+    if (!list) return;
+    if (!g.closing) {
+        bool any = false;
         for (ScaledImage& s : *list) {
-            if (s.index >= g.doc.images.size()) continue;
-            Image& im = g.doc.images[s.index];
-            im.sc.swap(s.px);
-            im.scW = s.w;
-            im.scH = s.h;
+            auto sc = std::make_shared<Scaled>();
+            sc->px = std::move(s.px);
+            sc->w = s.w;
+            sc->h = s.h;
+            sc->serial = s.pxSerial;
+            // only for the pixels it was made from: a picture replaced meanwhile has another serial
+            auto it = g.renders.find(s.key);
+            if (it != g.renders.end() && it->second.pix && it->second.pix->serial == s.pxSerial) it->second.sc = sc;
+            for (Image& im : g.doc.images)
+                if (im.pix && im.pix->serial == s.pxSerial && im.wantW == s.w && im.wantH == s.h) {
+                    im.sc = sc;
+                    any = true;
+                }
         }
-        if (!list->empty()) {
+        if (any) {
             g.pixelSerial++;
             TrimScaledImages();
             Invalidate();
@@ -527,25 +911,6 @@ void OnScaledImages(std::vector<ScaledImage>* list, uint32_t gen) {
         ScheduleImageScaling();  // the size may have changed again while this batch was being made
     }
     delete list;
-}
-
-void OnImagesLoaded() {
-    g.pixelSerial++;  // the same layout now draws differently: a scrolled frame must not reuse the old pixels
-    WithAnchor([] {
-        for (size_t i = 0; i < g.doc.blocks.size(); i++) {
-            const Block& b = g.doc.blocks[i];
-            bool inlineImg = false;  // a badge inside a line changes the line's height once it is known
-            for (uint32_t k = 0; k < b.runCount && !inlineImg; k++)
-                inlineImg = (g.doc.runs[b.runOff + k].flags & F_IMAGE) != 0;
-            if (b.kind != BK_IMAGE && !inlineImg) continue;
-            if (g.cache[i]) { delete g.cache[i]; g.cache[i] = nullptr; g.cachedCount--; }
-            if (b.kind == BK_IMAGE)
-                g.H[i] = ImageDisplayHeight(g.doc.images[b.aux], LayoutWidthFor(b, g.textW, g.wideW) - b.indent);
-        }
-        RecomputeY();
-    });
-    ResolveRestore();
-    Invalidate();
 }
 
 // ------------------------------------------------------------------------------------------------ after first frame

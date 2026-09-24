@@ -19,12 +19,12 @@
 
 enum : UINT {
     WM_APP_MEASURED = WM_APP + 1,  // lParam = MeasureJob*
-    WM_APP_IMAGES,                 // image thread finished
+    WM_APP_IMAGES,                 // picture worker: lParam = std::vector<RenderResult>* (a batch; the receiver deletes it)
     WM_APP_FULLDOC,                // full parse of a big document ready (first screen came from a prefix)
     WM_APP_FILECHANGED,            // watcher: the open file changed on disk
     WM_APP_POSITIONS,              // positions.bin read after the first frame (lParam = std::vector<PosEntry>*)
     WM_APP_FINDINPUT,              // find input box → UI thread: wParam = FI_*, lParam = event data
-    WM_APP_SCALED,                 // images re-scaled to display size (wParam = docGen, lParam = std::vector<ScaledImage>*)
+    WM_APP_SCALED,                 // images re-scaled to display size (lParam = std::vector<ScaledImage>*)
     WM_APP_UPDATE,                 // updater (update.cpp): wParam = what happened, lParam = its data
     // edit mode (docs/EDIT-MODE.md §13.4; the ids are frozen now, the handlers arrive with their phases)
     WM_APP_PREVIEW = WM_APP + 9,   // preview worker → UI: lParam = PreviewResult*
@@ -126,8 +126,47 @@ struct Config {
 struct MeasureJob {
     uint32_t gen, from, to;
     float textW, wideW;
-    std::vector<float> h;
+    std::vector<float> h;          // one height per measured block, in the order below
+    std::vector<uint32_t> idx;     // the blocks to measure; empty = from .. to
 };
+
+// Worker threads that read the document are joined by kind (EDIT-MODE.md §5.1): an edit waits only for the measure
+// jobs, which stop within one block; opening a document waits for everything Spawn started.
+enum WorkerKind : uint8_t { WK_OTHER, WK_MEASURE, WK_SCALE, WK_FULLPARSE };
+struct Worker { HANDLE h; WorkerKind kind; };
+
+// The render table (EDIT-MODE.md §5.2, UI thread only): one entry per picture, formula or diagram source and render
+// context, so the same source is rendered once however often it appears, is not rendered again while it is pending,
+// and a failure is remembered instead of retried.
+struct RenderEntry {
+    uint8_t state = RS_PENDING;              // RenderState
+    std::shared_ptr<const Pixels> pix;
+    int w = 0, h = 0;                        // layout size (a picture's decoded size; a formula's rendered size)
+    float ascent = 0;
+    std::shared_ptr<const Scaled> sc;        // the last display-size copy made from pix
+    std::wstring cachePath;                  // a remote picture: its file in the download cache
+    FILETIME failTime{};                     // a local picture that failed: its file's stamp then (retried when it
+    uint64_t failSize = 0;                   // changes)
+    std::string error;
+    uint64_t lastUse = 0;                    // for evicting what the document no longer shows
+};
+// what the picture worker hands back for one job (WM_APP_IMAGES)
+struct RenderResult {
+    std::wstring key;                        // render-table key (source key + context)
+    uint32_t ctx = 0, loadGen = 0;
+    bool math = false, ok = false;
+    std::shared_ptr<const Pixels> pix;
+    int w = 0, h = 0;
+    float ascent = 0;
+    std::wstring cachePath;
+    FILETIME failTime{};
+    uint64_t failSize = 0;
+    std::string error;
+};
+
+// FASTMD_TEST_SLOW=images:<ms>,scale:<ms>,preview:<ms>,fullparse:<ms>,save:<ms> (tests: every job of that worker
+// sleeps this long, so races that are too quick to happen on their own can be forced; §13.5)
+struct TestSlow { DWORD images = 0, scale = 0, preview = 0, fullparse = 0, save = 0; };
 
 struct HistoryEntry { std::wstring path; float scrollY; };
 
@@ -143,8 +182,9 @@ struct PosEntry {
 
 struct TocItem { uint32_t block; uint8_t level; std::wstring text; IDWriteTextLayout* layout = nullptr; };
 
-// one image scaled to its display size on a worker thread, handed to the UI thread (WM_APP_SCALED)
-struct ScaledImage { uint32_t index; int w, h; std::vector<uint32_t> px; };
+// one picture scaled to its display size on a worker thread, handed to the UI thread (WM_APP_SCALED): it belongs to
+// every entry showing the pixels with that serial, whatever their index is by then
+struct ScaledImage { std::wstring key; uint32_t pxSerial; int w, h; std::vector<uint32_t> px; };
 
 struct App {
     Config cfg;
@@ -158,8 +198,12 @@ struct App {
     std::wstring src;              // UTF-16 source (immutable while workers run)
     Doc doc;
     std::atomic<Doc*> fullDoc{nullptr};
-    bool fullPending = false, imagesStarted = false, loadFailed = false;
+    bool fullPending = false, loadFailed = false;
     bool scalingImages = false;    // a scaler thread is making display-size copies right now
+    bool editing = false;          // edit mode (docs/EDIT-MODE.md; entered from Phase 2a on)
+    std::unordered_map<std::wstring, RenderEntry> renders;  // the render table (loader.cpp), UI thread only
+    std::atomic<uint32_t> loadGen{0};         // bumped by every load: queued picture jobs of the old document are skipped
+    std::atomic<uint32_t> rendersStarted{0};  // renders and decodes the workers started (Q_RENDERS)
     bool remoteAllowedOnce = false;  // "ask": the reader allowed the network pictures of this document
     FILETIME fileTime{};
     uint64_t fileSize = 0;
@@ -188,10 +232,10 @@ struct App {
 
     // ---- threads
     HANDLE docThread = nullptr;
-    std::vector<HANDLE> workers;
+    std::vector<Worker> workers;      // Spawn: measure, scale, full parse (the picture worker and the updater are detached)
     SRWLOCK workersLock = SRWLOCK_INIT;
     std::atomic<uint32_t> gen{0};     // layout generation: bumped whenever the document / widths change → measure jobs stop
-    std::atomic<uint32_t> docGen{0};  // document generation: bumped only when the document changes → full parse / images stop
+    std::atomic<uint32_t> docGen{0};  // document generation: bumped when the document changes → a full parse is dropped
     std::atomic<bool> closing{false};
     int jobsPending = 0;
     HANDLE watchThread = nullptr, watchStop = nullptr;
@@ -398,18 +442,26 @@ void NavigateForward();
 void StartBackgroundWork();          // after the first frame: measure, images, full doc, watcher
 void OnMeasured(MeasureJob* job);
 void OnFullDoc();
-void OnImagesLoaded();
+// Pictures, formulas and diagrams through the render table: what the table has is shown at once, the rest is queued
+// for the picture worker (once per source and context). Runs after every load and every model swap.
+void StartImages();
+void OnImagesLoaded(std::vector<RenderResult>* batch);  // WM_APP_IMAGES
+std::wstring ImageRenderKey(const Image& im);  // the render-table key of an entry in the current render context
+void RetryChangedPictures();         // the window was activated: retry pictures whose failed file has changed since
 bool RemoteImagesAllowed();          // the privacy setting, plus a one-off allowance for this document
 bool DocHasRemoteImages();           // something is waiting to be fetched
 void LoadRemoteImages();             // allow them for this document and start fetching
 void ScheduleImageScaling();         // after a frame: start the scaler if an image was drawn at a size we have no copy of
-void OnScaledImages(std::vector<ScaledImage>* list, uint32_t gen);
+void OnScaledImages(std::vector<ScaledImage>* list);
 void StartMeasure();
-void JoinWorkers();
+void JoinWorkers();                  // open / reload: stop and wait for every worker that reads the document
+void JoinDocReaders();               // an edit swap: stop the measure jobs and wait for them only (§5.1)
 void StartWatcher();
 void StopWatcher();
 void OnFileChanged();                // the watcher saw the file change: reload unless the disk holds what is shown
-HANDLE Spawn(LPTHREAD_START_ROUTINE fn, void* arg, int prio = THREAD_PRIORITY_NORMAL, SIZE_T stack = 0);
+HANDLE Spawn(LPTHREAD_START_ROUTINE fn, void* arg, int prio = THREAD_PRIORITY_NORMAL, SIZE_T stack = 0,
+             WorkerKind kind = WK_OTHER);
+const TestSlow& TestSlowMs();        // FASTMD_TEST_SLOW, read once
 std::wstring WindowTitle();
 void LoadPositionsAsync();           // after the first frame
 void OnPositionsLoaded(std::vector<PosEntry>* list);

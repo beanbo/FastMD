@@ -345,10 +345,9 @@ static void ContextMenu(int sx, int sy, bool keyboard) {
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     }
     if (g.ctxImage >= 0) {
-        const Image& im0 = g.doc.images[g.doc.blocks[g.ctxImage].aux];
-        const Image& im = im0.canon >= 0 ? g.doc.images[im0.canon] : im0;
-        AppendMenuW(m, MF_STRING | (im.state.load() == 2 ? 0 : MF_GRAYED), CMD_IMG_COPY, Tr(S_IMG_COPY));
-        AppendMenuW(m, MF_STRING | (im0.path.empty() ? MF_GRAYED : 0), CMD_IMG_OPEN, Tr(S_IMG_OPEN));
+        const Image& im = g.doc.images[g.doc.blocks[g.ctxImage].aux];
+        AppendMenuW(m, MF_STRING | (im.state == RS_OK ? 0 : MF_GRAYED), CMD_IMG_COPY, Tr(S_IMG_COPY));
+        AppendMenuW(m, MF_STRING | (im.path.empty() ? MF_GRAYED : 0), CMD_IMG_OPEN, Tr(S_IMG_OPEN));
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     }
     AppendMenuW(m, MF_STRING | (HasSelection() ? 0 : MF_GRAYED), CMD_COPY, Tr(S_MENU_COPY));
@@ -467,9 +466,10 @@ static void ScrollTest() {  // steady-state cost of a scrolling frame, logged to
 static void AfterFirstFrame() {
     g.firstFrame = false;
     Invalidate();  // the icon buttons (settings, outline, its close icon) were left out of the first frame
-    // COM has to outlive the workers. The image and scaling threads CoInitialize around their WIC work and
-    // CoUninitialize when they are done (loader.cpp); with no other apartment in the process, the last of those calls
-    // tears COM down for the whole process while SHAddToRecentDocs below is still inside urlmon and Windows.Storage,
+    // COM has to outlive the workers. The scaling threads CoInitialize around their WIC work and CoUninitialize when
+    // they are done (loader.cpp; the picture worker keeps its apartment); with no other apartment in the process, the
+    // last of those calls tears COM down for the whole process while SHAddToRecentDocs below is still inside urlmon
+    // and Windows.Storage,
     // and the shell call goes on with state that has just been freed. So this thread takes an apartment before any
     // worker starts and never releases it; after the first frame, so start-up pays nothing.
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -918,7 +918,7 @@ static LRESULT Query(WPARAM q, LPARAM lp) {
     }
     case Q_IMG_SCALED:
         for (const Image& im : g.doc.images)
-            if (!im.sc.empty()) return im.scW.load();
+            if (im.sc && !im.sc->px.empty()) return im.sc->w;
         return 0;
     case Q_FULL_REDRAW:
         ForceFullRedraw();
@@ -926,12 +926,14 @@ static LRESULT Query(WPARAM q, LPARAM lp) {
         return 1;
     case Q_SEL_ANCHOR: return g.selAnchor;
     case Q_SEL_FOCUS: return g.selFocus;
-    case Q_MATH: {  // formulas and diagrams: how many there are, how many are drawn, how many could not be
+    case Q_MATH: {  // formulas and diagrams: how many there are, how many are drawn, how many could not be, and how
+                    // many show a picture that is not their current source's (stale or failed, EDIT-MODE.md §13.2)
         LRESULT n = 0;
         for (const Image& im : g.doc.images) {
             if (!im.mathKind) continue;
-            int st = im.canon >= 0 ? g.doc.images[im.canon].state.load() : im.state.load();
-            if (lp == 0 || (lp == 1 && st == 2) || (lp == 2 && st == 3)) n++;
+            if (lp == 0 || (lp == 1 && im.state == RS_OK) || (lp == 2 && im.state == RS_FAILED) ||
+                (lp == 3 && im.state == RS_OK && (im.renderFailed || im.pxFor != ImageRenderKey(im))))
+                n++;
         }
         return n;
     }
@@ -961,6 +963,7 @@ static LRESULT Query(WPARAM q, LPARAM lp) {
     case Q_DOC_SERIAL: return g.docSerial;
     case Q_EDITING: return 0;
     case Q_BLOCK_COUNT: return (LRESULT)n;
+    case Q_RENDERS: return (LRESULT)g.rendersStarted.load();
     case Q_MAP_SELFCHECK: {  // edit mode's map (EDIT-MODE.md §4.5), on a map parse of the whole source made just for this
         if (lp == 1) return 0;  // failures counted after edit swaps under FASTMD_EDIT_SELFCHECK: there are none yet
         if (g.path.empty() || g.loadFailed) return -1;
@@ -1047,7 +1050,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_ACTIVATE:
         if (LOWORD(wp) == WA_INACTIVE) g_findHadFocus = FindInputFocused();
-        else if (g.findOpen && g_findHadFocus) { FindFocusInput(); return 0; }
+        else {
+            // back from another program: a picture that could not be read is tried again if its file changed
+            if (g.ready && !g.firstFrame) RetryChangedPictures();
+            if (g.findOpen && g_findHadFocus) { FindFocusInput(); return 0; }
+        }
         break;
     case WM_LBUTTONDOWN:
         if (!g.ready || g.firstFrame) return 0;
@@ -1130,9 +1137,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP_QUERY: return (g.ready && !g.firstFrame) ? Query(wp, lp) : 0;
     case WM_APP_MEASURED: OnMeasured((MeasureJob*)lp); return 0;
     case WM_APP_FULLDOC: if (!g.firstFrame) OnFullDoc(); return 0;
-    case WM_APP_IMAGES: OnImagesLoaded(); return 0;
+    case WM_APP_IMAGES: OnImagesLoaded((std::vector<RenderResult>*)lp); return 0;
     case WM_APP_UPDATE: OnUpdateMessage(wp, lp); return 0;
-    case WM_APP_SCALED: OnScaledImages((std::vector<ScaledImage>*)lp, (uint32_t)wp); return 0;
+    case WM_APP_SCALED: OnScaledImages((std::vector<ScaledImage>*)lp); return 0;
     case WM_APP_FILECHANGED: SetTimer(hwnd, TIMER_RELOAD, 120, nullptr); return 0;  // debounce editor save bursts
     case WM_APP_POSITIONS: OnPositionsLoaded((std::vector<PosEntry>*)lp); return 0;
     case WM_APP_FINDINPUT: if (g.ready) FindOnInput(wp, lp); return 0;

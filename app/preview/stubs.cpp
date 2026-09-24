@@ -67,6 +67,6 @@ bool DocHasRemoteImages() { return false; }
 void ScheduleImageScaling() {}
 void StartMeasure() {}
 void StartBackgroundWork() {}
-HANDLE Spawn(LPTHREAD_START_ROUTINE, void*, int, SIZE_T) { return nullptr; }
+HANDLE Spawn(LPTHREAD_START_ROUTINE, void*, int, SIZE_T, WorkerKind) { return nullptr; }
 void OpenDocument(const std::wstring&, bool, float, bool) {}
 void ReloadDocument() {}

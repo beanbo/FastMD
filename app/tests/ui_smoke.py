@@ -1759,6 +1759,117 @@ def test_copy_md_exact():
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ edit mode, phase 1b
+def test_image_race():
+    """the picture worker keeps going while the document changes under it (EDIT-MODE.md §5.2): a theme switch (which
+    reloads a document with formulas), reloads and a zoom while renders are still queued. Every render is slowed to
+    300 ms (FASTMD_TEST_SLOW), so they really are pending; results made for an older load are dropped, and each source
+    is rendered a bounded number of times"""
+    ok = True
+    doc = OUT / "race-math.md"
+    doc.write_text(MATH_DOC, encoding="utf-8")
+    ENV["FASTMD_TEST_SLOW"] = "images:300"
+    try:
+        proc, hwnd = launch(doc, size="--size=900x900")
+        try:
+            pending = q(hwnd, "MATH", 1) < 3
+            cmd(hwnd, "THEME_DARK", 0.1)
+            cmd(hwnd, "RELOAD", 0.1)
+            cmd(hwnd, "ZOOM_IN", 0.1)
+            cmd(hwnd, "THEME_LIGHT", 0.1)
+            cmd(hwnd, "RELOAD", 0.1)
+            done = wait_for(lambda: q(hwnd, "MATH", 1) == 3 and q(hwnd, "MATH", 2) == 1, 10.0, 0.2)
+            renders = q(hwnd, "RENDERS")
+            ok &= check("edit 1b: a theme switch, reloads and a zoom while renders are pending: the window lives",
+                        pending and proc.poll() is None, f"pending at the switch: {pending}")
+            ok &= check("edit 1b: ... and the three pictures of the last load are drawn, the broken one failed", done,
+                        f'drawn {q(hwnd, "MATH", 1)}, failed {q(hwnd, "MATH", 2)}')
+            # 4 sources in 2 contexts (light, dark); a job queued for an older load is skipped, not rendered
+            ok &= check("edit 1b: ... after a bounded number of renders", 0 < renders <= 2 * 4 * 2, f"{renders} (at most 16)")
+            q(hwnd, "FULL_REDRAW")
+            time.sleep(0.4)
+            img = shot(hwnd, "80-image-race")
+            left, y1, y2 = q(hwnd, "TEXT_LEFT"), q(hwnd, "BLOCK_Y", 2), q(hwnd, "BLOCK_Y", 3)
+            ok &= check("edit 1b: ... and the formula of its own is really drawn",
+                        ink(img, (left, y1, left + 300, y2 - 8)) > 200, f"{ink(img, (left, y1, left + 300, y2 - 8))}")
+            cmd(hwnd, "ZOOM_RESET", 0.3)
+        finally:
+            close_and_wait(proc, hwnd)
+    finally:
+        ENV.pop("FASTMD_TEST_SLOW", None)
+    return ok
+
+
+def test_reload_during_update():
+    """a reload waits for no network: not for the update check (detached) and not for a picture being downloaded
+    (the picture worker is detached too, and a reload only skips what it had queued). GitHub and the picture server
+    both answer after 5 s here, and a reload in the middle returns at once"""
+    import http.server
+    import socketserver
+    import threading
+    ok = True
+    png = (REPO / "bench" / "corpus" / "img" / "diagram0.png").read_bytes()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        latest = 0
+        pictures = 0
+
+        def do_GET(self):
+            if self.path.endswith("/latest"):
+                Handler.latest += 1
+                body, kind = b'{"tag_name": "v0.0.1", "name": "FastMD", "assets": []}', "application/json"
+            else:
+                Handler.pictures += 1
+                body, kind = png, "image/png"
+            time.sleep(5.0)
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", kind)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except OSError:
+                pass  # the window was closed meanwhile
+
+        def log_message(self, *a):
+            pass
+
+    class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
+        daemon_threads = True
+        block_on_close = False
+
+    srv = Server(("127.0.0.1", 0), Handler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    doc = OUT / "slow-picture.md"
+    doc.write_text(f"# Медленная картинка\n\n![картинка](http://127.0.0.1:{port}/slow.png)\n\nКонец.\n", encoding="utf-8")
+    ENV["FASTMD_UPDATE_URL"] = f"http://127.0.0.1:{port}/releases/latest"
+    try:
+        set_reg("UpdateSeenLo", 0)  # "checked today" is remembered in the profile: forget it
+        set_reg("UpdateSeenHi", 0)
+        proc, hwnd = launch(doc)
+        try:
+            asked = wait_for(lambda: Handler.latest >= 1 and Handler.pictures >= 1, 5.0)
+            waiting = q(hwnd, "UPDATE", 3) == US_CHECKING
+            serial = q(hwnd, "DOC_SERIAL")
+            t0 = time.perf_counter()
+            u32.SendMessageW(hwnd, WM_COMMAND, CMD["RELOAD"], 0)
+            dt = time.perf_counter() - t0
+            ok &= check("edit 1b: the update check and the picture are both waiting for their servers",
+                        asked and waiting, f"latest {Handler.latest}, pictures {Handler.pictures}, checking {waiting}")
+            ok &= check("edit 1b: a reload meanwhile returns at once", dt < 0.5 and q(hwnd, "DOC_SERIAL") != serial,
+                        f"{dt * 1000:.0f} ms")
+            drawn = wait_for(lambda: q(hwnd, "DRAG", (2 << 16) | 0xFFFF) & DF_DIB, 12.0, 0.25)
+            ok &= check("edit 1b: the picture still arrives, from one download", drawn and Handler.pictures == 1,
+                        f"downloads {Handler.pictures}")
+        finally:
+            close_and_wait(proc, hwnd)
+    finally:
+        ENV.pop("FASTMD_UPDATE_URL", None)
+        srv.shutdown()
+    return ok
+
+
 def main():
     OUT.mkdir(exist_ok=True)
     reset_profile()
@@ -1778,7 +1889,8 @@ def main():
              ("scroll_frames", test_scroll_frames), ("image_scaling", lambda: test_image_scaling(doc)),
              ("columns", lambda: test_columns(doc)), ("settings", lambda: test_settings(doc)),
              ("placement", lambda: test_placement(doc)), ("map_selfcheck", test_map_selfcheck),
-             ("copy_md_exact", test_copy_md_exact)]
+             ("copy_md_exact", test_copy_md_exact), ("image_race", test_image_race),
+             ("reload_during_update", test_reload_during_update)]
     only = [n for n in os.environ.get("FASTMD_ONLY", "").split(",") if n]  # e.g. FASTMD_ONLY=update,settings
     for name, t in tests:
         if not only or name in only:

@@ -158,8 +158,7 @@ DataObject* Build(int kind, int arg) {
         }
         d->Add(CF_DIB, ImageAsDib((uint32_t)arg));
         const Image& im = g.doc.images[g.doc.blocks[arg].aux];
-        const Image& src = im.canon >= 0 ? g.doc.images[im.canon] : im;
-        if (!src.path.empty()) d->Add(CF_HDROP, DropFiles(src.path));
+        if (!im.path.empty()) d->Add(CF_HDROP, DropFiles(im.path));
     }
     if (d->fmt.empty()) { d->Release(); return nullptr; }
     return d;

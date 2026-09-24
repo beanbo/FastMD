@@ -18,19 +18,18 @@ void CopyToClipboard(const std::wstring& text) {
     CloseClipboard();
 }
 
-static Image* DecodedImage(uint32_t bi, Image** entry) {
+static const Pixels* DecodedImage(uint32_t bi, Image** entry) {
     if (bi >= g.doc.blocks.size() || g.doc.blocks[bi].kind != BK_IMAGE) return nullptr;
-    Image& im0 = g.doc.images[g.doc.blocks[bi].aux];
-    if (entry) *entry = &im0;
-    Image& im = im0.canon >= 0 ? g.doc.images[im0.canon] : im0;
-    bool ok = im.state.load() == 2 && im.pxW > 0 && im.pxH > 0 && im.px.size() >= (size_t)im.pxW * im.pxH;
-    return ok ? &im : nullptr;
+    Image& im = g.doc.images[g.doc.blocks[bi].aux];
+    if (entry) *entry = &im;
+    const Pixels* p = im.pix.get();
+    bool ok = im.state == RS_OK && p && p->pxW > 0 && p->pxH > 0 && p->px.size() >= (size_t)p->pxW * p->pxH;
+    return ok ? p : nullptr;
 }
 
 // 32-bit DIB of a picture block, composed over white: what both the clipboard and a drag hand out
 HGLOBAL ImageAsDib(uint32_t bi) {
-    Image* entry = nullptr;
-    Image* im = DecodedImage(bi, &entry);
+    const Pixels* im = DecodedImage(bi, nullptr);
     if (!im) return nullptr;
     size_t w = (size_t)im->pxW, h = (size_t)im->pxH;  // the decoded buffer, not the header size
     HGLOBAL dib = GlobalAlloc(GMEM_MOVEABLE, sizeof(BITMAPINFOHEADER) + w * h * 4);

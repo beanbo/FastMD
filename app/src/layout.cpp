@@ -137,6 +137,11 @@ void Typography::Release() {
 // ------------------------------------------------------------------------------------------------ images
 static SRWLOCK g_imgLock = SRWLOCK_INIT;
 
+uint32_t NewPixelSerial() {
+    static std::atomic<uint32_t> serial{0};
+    return ++serial;
+}
+
 static bool ReadImageHeader(const wchar_t* path, int* w, int* h) {
     HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
     if (f == INVALID_HANDLE_VALUE) return false;
@@ -275,11 +280,10 @@ struct InlineImage final : IDWriteInlineObject {
                                    IUnknown*) override {
         Canvas* c = CanvasOfRenderer(renderer);
         if (!c || index >= doc->images.size()) return S_OK;
-        Image& im0 = const_cast<Doc*>(doc)->images[index];
-        Image& im = im0.canon >= 0 ? const_cast<Doc*>(doc)->images[im0.canon] : im0;
-        if (im.state.load() == 2) {
+        Image& im = const_cast<Doc*>(doc)->images[index];
+        if (im.state == RS_OK) {
             c->DrawImage(im, x, y, x + w, y + h);
-        } else if (im.state.load() == 3 && im.mathKind && !im.alt.empty() && factory && fmt) {
+        } else if (im.state == RS_FAILED && im.mathKind && !im.alt.empty() && factory && fmt) {
             // a formula the engine could not typeset: its source, as the author wrote it
             IDWriteTextLayout* L = nullptr;
             if (SUCCEEDED(factory->CreateTextLayout(im.alt.c_str(), (UINT32)im.alt.size(), fmt,
