@@ -32,10 +32,9 @@ configure_file(src/version.h.in ${CMAKE_BINARY_DIR}/generated/version.h @ONLY)
 
 add_executable(FastMD WIN32
     src/view.cpp src/window.cpp src/loader.cpp src/parse.cpp src/html.cpp src/net.cpp src/svg.cpp src/formulas.cpp
-    src/layout.cpp src/canvas_gdi.cpp src/canvas_print.cpp src/print.cpp
+    src/layout.cpp src/canvas_gdi.cpp
     src/highlight.cpp src/theme.cpp src/util.cpp
-    src/find.cpp src/toc.cpp src/home.cpp src/store.cpp src/shell.cpp src/settings_ui.cpp src/strings.cpp
-    src/copy.cpp src/drag.cpp src/crash.cpp src/update.cpp src/tasks.cpp
+    src/find.cpp src/toc.cpp src/home.cpp src/store.cpp src/strings.cpp src/tasks.cpp
     third_party/md4c/md4c.c
     res/fastmd.rc)
 
@@ -51,12 +50,20 @@ set_source_files_properties(third_party/md4c/md4c.c PROPERTIES COMPILE_OPTIONS "
 # are compiled on their own with /O1 (the rest of the program keeps /O2) and linked into the exe with everything else.
 # The screen-reader provider joins them: it runs only while a screen reader asks, one call at a time.
 add_library(fastmd_edit OBJECT src/editcore.cpp src/editfile.cpp src/edit.cpp src/editbar.cpp src/uia.cpp)
-target_include_directories(fastmd_edit PRIVATE ${CMAKE_BINARY_DIR}/generated)
-target_compile_definitions(fastmd_edit PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS
-    MD4C_USE_UTF16)
-target_compile_options(fastmd_edit PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus /EHsc
-    $<$<CONFIG:Release>:/O1 /Oi /GL /Gy /DNDEBUG> ${FASTMD_SEC_C})
-target_sources(FastMD PRIVATE $<TARGET_OBJECTS:fastmd_edit>)
+# The cold half of reading mode goes the same way (Phase 3a): the updater, the settings window, the shell's dialogs,
+# links and clipboard, printing and its canvas, the crash handler, dragging out and copying run on a click or after the
+# first frame - never on the way to it, never while scrolling (the gear is one icon a frame). The parser, layout, view,
+# canvas, window, loader, start screen, highlighter, theme and strings keep /O2.
+add_library(fastmd_cold OBJECT src/update.cpp src/settings_ui.cpp src/shell.cpp src/print.cpp src/canvas_print.cpp
+    src/crash.cpp src/drag.cpp src/copy.cpp)
+foreach(lib fastmd_edit fastmd_cold)
+    target_include_directories(${lib} PRIVATE ${CMAKE_BINARY_DIR}/generated)
+    target_compile_definitions(${lib} PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS
+        MD4C_USE_UTF16)
+    target_compile_options(${lib} PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus /EHsc
+        $<$<CONFIG:Release>:/O1 /Oi /GL /Gy /DNDEBUG> ${FASTMD_SEC_C})
+    target_sources(FastMD PRIVATE $<TARGET_OBJECTS:${lib}>)
+endforeach()
 # the version resource is generated from version.h, and the resource compiler's dependencies are not scanned:
 # without this a version bump left the old number inside the exe
 set_source_files_properties(res/fastmd.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_BINARY_DIR}/generated/version.h)
