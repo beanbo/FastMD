@@ -85,12 +85,17 @@ SegSpan SegsIn(const Doc& d, int32_t block, TRange r) {
     e = std::lower_bound(b, e, r.end, [](const SrcSeg& s, uint32_t t) { return s.t < t; });
     return SegSpan{b, e};
 }
-// the spans of a block inside [r.beg, r.end] (all of them outside tables)
-template <class F> void ForSpans(const Doc& d, int32_t block, TRange r, F f) {
-    const BlockSrc& bs = d.blockSrc[block];
+// the spans of a position's block inside [r.beg, r.end] (all of them outside tables). In a table the text range is not
+// enough: a cell whose text is empty (`| <kbd> | c |`) shares its offset with the next cell's start, so a span must
+// also open inside the position's own cell.
+template <class F> void ForSpans(const Doc& d, const TextPos& p, TRange r, F f) {
+    const BlockSrc& bs = d.blockSrc[p.block];
+    const CellSrc* cs = nullptr;
+    if (const Table* tb = TableOf(d, p.block); tb && p.cell >= 0 && tb->cellOff + (uint32_t)p.cell < d.cellSrc.size())
+        cs = &d.cellSrc[tb->cellOff + p.cell];
     for (uint32_t k = bs.spanOff; k < bs.spanOff + bs.spanCount && k < d.spans.size(); k++) {
         const SpanSrc& sp = d.spans[k];
-        if (sp.tBeg >= r.beg && sp.tEnd <= r.end) f(sp);
+        if (sp.tBeg >= r.beg && sp.tEnd <= r.end && (!cs || (sp.openBeg >= cs->beg && sp.openBeg <= cs->end))) f(sp);
     }
 }
 
@@ -401,7 +406,7 @@ uint32_t SrcOfText(const Doc& d, const std::wstring& src, const TextPos& p, MapM
             // Typing continues the formatting of the character before the caret - but never inside a link, code or
             // formula from its right edge: past the closer of the outermost such span that ends here (F12).
             const SpanSrc* out = nullptr;
-            ForSpans(d, p.block, r, [&](const SpanSrc& sp) {
+            ForSpans(d, p, r, [&](const SpanSrc& sp) {
                 if (sp.tBeg < t && sp.tEnd == t && !(sp.flags & (SF_ENTERABLE | SF_UNCLOSED)) &&
                     (!out || sp.closeEnd > out->closeEnd))
                     out = &sp;
@@ -410,7 +415,7 @@ uint32_t SrcOfText(const Doc& d, const std::wstring& src, const TextPos& p, MapM
         }
         if (R) {  // block or cell start: inside enterable openers, outside the outermost non-enterable one
             const SpanSrc* out = nullptr;
-            ForSpans(d, p.block, r, [&](const SpanSrc& sp) {
+            ForSpans(d, p, r, [&](const SpanSrc& sp) {
                 if (sp.tBeg == t && !(sp.flags & SF_ENTERABLE) && (!out || sp.openBeg < out->openBeg)) out = &sp;
             });
             return out ? std::min(R->s, out->openBeg) : R->s;
@@ -418,14 +423,14 @@ uint32_t SrcOfText(const Doc& d, const std::wstring& src, const TextPos& p, MapM
         return InsertionPoint(d, src, TextPos{t, p.block, p.cell});
     case MAP_OUTER_START: {
         uint32_t s = R ? R->s : L ? lEnd : InsertionPoint(d, src, TextPos{t, p.block, p.cell});
-        ForSpans(d, p.block, r, [&](const SpanSrc& sp) {
+        ForSpans(d, p, r, [&](const SpanSrc& sp) {
             if (sp.tBeg == t) s = std::min(s, sp.openBeg);
         });
         return s;
     }
     case MAP_OUTER_END: {
         uint32_t s = L ? lEnd : R ? R->s : InsertionPoint(d, src, TextPos{t, p.block, p.cell});
-        ForSpans(d, p.block, r, [&](const SpanSrc& sp) {
+        ForSpans(d, p, r, [&](const SpanSrc& sp) {
             if (sp.tEnd == t && !(sp.flags & SF_UNCLOSED)) s = std::max(s, sp.closeEnd);
         });
         return s;
@@ -433,7 +438,7 @@ uint32_t SrcOfText(const Doc& d, const std::wstring& src, const TextPos& p, MapM
     case MAP_INNER_START: {
         if (R) return R->s;
         uint32_t s = L ? lEnd : InsertionPoint(d, src, TextPos{t, p.block, p.cell});
-        ForSpans(d, p.block, r, [&](const SpanSrc& sp) {
+        ForSpans(d, p, r, [&](const SpanSrc& sp) {
             if (sp.tBeg == t) s = std::max(s, sp.openEnd);
         });
         return s;

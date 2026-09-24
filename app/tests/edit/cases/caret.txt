@@ -133,6 +133,18 @@ do: caret
 want: | a | b |\n|---|---|\n| x |‸|\n
 flags: nolist
 
+=== caret_cell_after_empty_span (§6.3 the cell before has no text but an unclosed tag: its span is not this cell's)
+src: | a | b |\n|---|---|\n| <kbd> | ‸c |\n
+do: caret
+want: | a | b |\n|---|---|\n| <kbd> | ‸c |\n
+flags: nolist
+
+=== caret_cell_after_empty_link (§6.3 the same with an empty link in the cell before)
+src: | a | b |\n|---|---|\n| [](u) | ‸c |\n
+do: caret
+want: | a | b |\n|---|---|\n| [](u) | ‸c |\n
+flags: nolist
+
 === caret_empty_atx_closing (§6.3.1 an empty heading with a closing sequence: beg, before the "##" - the op adds "x ")
 src: ## #‸#\n
 do: caret

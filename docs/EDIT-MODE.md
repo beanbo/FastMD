@@ -1004,7 +1004,8 @@ neighbouring stop. Atom ids: inline = image index; block = `0x40000000 | block i
 1. `t` strictly inside a `SEG_PLAIN` → `s + (t − seg.t)`.
 2. `t` inside an atom or a cluster cannot happen (stops exclude it); callers snap first.
 3. Otherwise `t` is a boundary. Let **L** be the segment ending at `t` in the same block/cell, **R** the one starting
-   there, and the **format context** the spans (`spans` of the block) covering the character `t − 1`.
+   there, and the **format context** the spans (`spans` of the block; in a table only those opening in the cell's
+   own source, since a cell with no text shares its offset with the next one) covering the character `t − 1`.
    - **L exists**: start at `L.s + L.sLen`. Walk the closers that follow in the source (spans of the context that end
      at `t`, innermost first). If the context contains a span that is *not enterable* (A, IMG, CODE, LATEXMATH,
      FOOTNOTE_REF, autolinks, `ST_HTML_CODE/KBD/A`), advance past the closer of the **outermost** such span (and hence
