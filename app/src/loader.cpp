@@ -121,12 +121,28 @@ static void LoadSource(bool startup) {
     uint64_t tRead = 0;
     g.src.clear();
     g.loadFailed = false;
-    if (!ReadFileUtf16(g.path.c_str(), g.src, &tRead, &g.fileTime)) {
+    if (!startup) g.reloads++;  // Q_RELOADS: how a test tells an edit or our own write from a reload
+    // A baseline for saving is taken only when something is to be written (edit.cpp), from bytes read and checked
+    // then; the load keeps what it learns for free: the encoding, the identity and the stamp, from the one handle.
+    g.disk = DiskState();
+    DiskBytes info;
+    if (!ReadFileUtf16(g.path.c_str(), g.src, &tRead, &g.fileTime, &info)) {
         g.loadFailed = true;
         g.src = std::wstring(L"# ") + Tr(S_LOAD_FAILED) + L"\n\n`" + g.path + L"`\n";
         tRead = NowTicks();
+        GetFileStamp(g.path.c_str(), nullptr, &g.fileSize);
+    } else {
+        static const char* kBom[] = {"", "", "\xFF\xFE", "\xEF\xBB\xBF", "", "\xEF\xBB\xBF\xFF\xFE"};
+        g.fileSize = info.size;
+        g.disk.cp = info.enc.cp;
+        g.disk.header = info.enc.header < std::size(kBom) ? kBom[info.enc.header] : "";
+        g.disk.volume = info.volume;
+        g.disk.index = info.index;
+        g.disk.mtime = info.mtime;
+        g.disk.size = info.size;
+        g.disk.attributes = info.attributes;
     }
-    GetFileStamp(g.path.c_str(), nullptr, &g.fileSize);
+    if (!startup) EditOnLoad();  // a new document session: its history and banners start over
     if (startup) MarkAt("file_read", tRead);
     g.doc = Doc();
     g.doc.baseDir = DirOf(g.path);
@@ -302,8 +318,11 @@ static DWORD WINAPI MeasureThread(void* p) {
 
 // Edit mode (EDIT-MODE.md §5.4): after a pause in typing only the blocks whose height is still a guess are measured,
 // nearest to the viewport first, at most 64 at a time on one thread - the next edit stops the job within one block,
-// and the next batch follows when this one is in.
+// and the next batch follows when this one is in. Reading mode does the same after a model swap (a ticked task box).
+static bool g_measureUnknown = false;  // the batches in flight measure guessed heights only
+
 static void StartMeasureUnknown() {
+    g_measureUnknown = true;
     size_t n = g.doc.blocks.size();
     if (g.jobsPending || !n) return;
     uint32_t a = std::min<uint32_t>(FirstVisible(g.scrollY), (uint32_t)n - 1);
@@ -318,8 +337,11 @@ static void StartMeasureUnknown() {
     if (!Spawn(MeasureThread, job, THREAD_PRIORITY_BELOW_NORMAL, 256 * 1024, WK_MEASURE)) { g.jobsPending--; delete job; }
 }
 
+void MeasureUnknown() { StartMeasureUnknown(); }
+
 void StartMeasure() {
     if (g.editing) { StartMeasureUnknown(); return; }
+    g_measureUnknown = false;
     size_t n = g.doc.blocks.size();
     size_t unknown = 0;
     for (size_t i = 0; i < n; i++) unknown += !g.known[i];
@@ -354,7 +376,7 @@ void OnMeasured(MeasureJob* job) {
         if (g.jobsPending == 0) {
             Mark("measured_all");
             DebugFlush();
-            if (g.editing) StartMeasureUnknown();  // the next batch of guessed heights
+            if (g_measureUnknown) StartMeasureUnknown();  // the next batch of guessed heights
         }
         Invalidate();
     }
@@ -668,6 +690,55 @@ static void EvictRenders(uint64_t shownFrom) {
     }
 }
 
+// An edit replaces the model (EDIT-MODE.md §5.5 step 4). Before the new one is installed it gets what is known about its
+// pictures: what the render table holds (so an unchanged formula keeps its real size and the block diff sees nothing
+// changed), the header size and display-size copy the old model had for the same source, and - for a formula or a
+// diagram whose source is being typed, which the table does not know yet - the picture of the one it replaces, until
+// its own render arrives. That borrowed picture is never stored under the new key (R15).
+void CarryRenders(const Doc& oldD, Doc& nd, uint32_t editBeg, uint32_t oldEnd, uint32_t newEnd) {
+    if (nd.images.empty()) return;
+    const uint32_t mctx = MathContext();
+    std::unordered_map<std::wstring, uint32_t> before;
+    for (uint32_t i = 0; i < oldD.images.size(); i++) before.emplace(RenderKey(oldD.images[i], mctx), i);
+    for (Image& im : nd.images) {
+        std::wstring key = RenderKey(im, mctx);
+        auto o = before.find(key);
+        const Image* oi = o != before.end() ? &oldD.images[o->second] : nullptr;
+        if (oi && !im.mathKind && im.w < 0) {  // the header the old model already read (layout reads it lazily)
+            im.w = oi->w;
+            im.h = oi->h;
+        }
+        auto it = g.renders.find(key);
+        if (it != g.renders.end()) {
+            ShowEntry(im, it->second, key);
+            if (oi && oi->pix == im.pix && oi->sc) {  // its own display-size copy, not the one the table kept last
+                im.sc = oi->sc;
+                im.wantW = oi->wantW;
+                im.wantH = oi->wantH;
+            }
+            continue;
+        }
+        if (!im.mathKind || editBeg == UINT32_MAX || im.outerBeg == UINT32_MAX || im.outerBeg > newEnd || im.outerEnd < editBeg)
+            continue;
+        for (const Image& was : oldD.images) {
+            if (was.mathKind != im.mathKind || !was.pix || was.outerBeg == UINT32_MAX || was.outerBeg > oldEnd ||
+                was.outerEnd < editBeg)
+                continue;
+            im.pix = was.pix;
+            im.sc = was.sc;
+            im.w = was.w;
+            im.h = was.h;
+            im.ascent = was.ascent;
+            im.pxFor = was.pxFor;
+            im.state = RS_OK;
+            im.renderFailed = was.renderFailed;
+            im.wantW = was.wantW;
+            im.wantH = was.wantH;
+            break;
+        }
+    }
+}
+
 void StartImages() {
     if (g.doc.images.empty() || g.closing) return;
     const uint64_t shownFrom = g_useTick + 1;
@@ -940,6 +1011,7 @@ void OnFullDoc() {
 
 void StartBackgroundWork() {
     if (!g.path.empty()) StartWatcher();
+    EditAfterOpen();  // a save of this file was interrupted: the recovery strip (a directory listing, after the frame)
     if (g.fullPending) {  // the full model is (or will be) posted; measure/images start after the swap
         if (g.fullDoc.load()) PostMessageW(g.hwnd, WM_APP_FULLDOC, 0, 0);
         return;
@@ -949,30 +1021,52 @@ void StartBackgroundWork() {
 }
 
 // ------------------------------------------------------------------------------------------------ file watcher
+// The watcher reports when the file's stamp moves away from the one it last reported - at first the load's own, so a
+// change between the load and the watcher's start is not lost - and when the file cannot be looked at any more
+// (wParam 1: deleted, renamed, its share gone). What that means is decided on the UI thread (OnFileChanged). When the
+// folder's notification handle fails (the folder went away, the network dropped) it starts again after a pause of 1,
+// 2, 4 ... 30 s (EDIT-MODE.md §10.7).
+namespace {
+struct WatchArgs { std::wstring path; FILETIME t0; uint64_t s0; };
+}  // namespace
+
 static DWORD WINAPI WatchThread(void* p) {
-    std::wstring* path = (std::wstring*)p;
-    std::wstring dir = DirOf(*path);
-    HANDLE ch = FindFirstChangeNotificationW(dir.c_str(), FALSE,
-                                             FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE);
-    if (ch == INVALID_HANDLE_VALUE) { delete path; return 0; }
-    FILETIME t0{};
-    uint64_t s0 = 0;
-    GetFileStamp(path->c_str(), &t0, &s0);
-    HANDLE hs[2] = {g.watchStop, ch};
-    for (;;) {
-        DWORD r = WaitForMultipleObjects(2, hs, FALSE, INFINITE);
-        if (r != WAIT_OBJECT_0 + 1) break;
+    auto* a = (WatchArgs*)p;
+    std::wstring dir = DirOf(a->path);
+    bool avail = true;
+    auto look = [&] {
         FILETIME t1{};
         uint64_t s1 = 0;
-        if (GetFileStamp(path->c_str(), &t1, &s1) && (CompareFileTime(&t0, &t1) != 0 || s0 != s1)) {
-            t0 = t1;
-            s0 = s1;
+        if (!GetFileStamp(a->path.c_str(), &t1, &s1)) {
+            if (avail) PostMessageW(g.hwnd, WM_APP_FILECHANGED, 1, 0);
+            avail = false;
+        } else if (!avail || CompareFileTime(&a->t0, &t1) != 0 || a->s0 != s1) {
+            avail = true;
+            a->t0 = t1;
+            a->s0 = s1;
             PostMessageW(g.hwnd, WM_APP_FILECHANGED, 0, 0);
         }
-        if (!FindNextChangeNotification(ch)) break;
+    };
+    DWORD pause = 1000;
+    for (;;) {
+        HANDLE ch = FindFirstChangeNotificationW(dir.c_str(), FALSE,
+                                                 FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE);
+        look();  // whatever happened before there was a handle
+        bool stop = false;
+        if (ch != INVALID_HANDLE_VALUE) {
+            pause = 1000;
+            HANDLE hs[2] = {g.watchStop, ch};
+            for (;;) {
+                if (WaitForMultipleObjects(2, hs, FALSE, INFINITE) != WAIT_OBJECT_0 + 1) { stop = true; break; }
+                look();
+                if (!FindNextChangeNotification(ch)) break;
+            }
+            FindCloseChangeNotification(ch);
+        }
+        if (stop || WaitForSingleObject(g.watchStop, pause) != WAIT_TIMEOUT) break;
+        pause = std::min<DWORD>(pause * 2, 30000);
     }
-    FindCloseChangeNotification(ch);
-    delete path;
+    delete a;
     return 0;
 }
 
@@ -980,7 +1074,7 @@ void StartWatcher() {
     StopWatcher();
     if (!g.watchStop) g.watchStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     ResetEvent(g.watchStop);
-    g.watchThread = CreateThread(nullptr, 64 * 1024, WatchThread, new std::wstring(g.path), 0, nullptr);
+    g.watchThread = CreateThread(nullptr, 64 * 1024, WatchThread, new WatchArgs{g.path, g.fileTime, g.fileSize}, 0, nullptr);
 }
 
 void StopWatcher() {
@@ -991,14 +1085,44 @@ void StopWatcher() {
     g.watchThread = nullptr;
 }
 
-// The file is what the window shows when its stamp is the one taken at load, or after our own write (a ticked task
-// box, tasks.cpp): then there is nothing to reload, and the reader keeps the pictures and the layout as they are.
+// Reading mode (EDIT-MODE.md §10.7). The file is what the window shows when its stamp is the one taken at load or left by
+// our own write (a ticked task box) - or, whatever its stamp, when it still holds the same text (touched, or saved
+// unchanged by another program): then only the stamp is taken, and the reader keeps the pictures, the layout and the
+// history. Other text is reloaded. A file that cannot be read now is not taken for an empty or a changed one: it is
+// read again a little later (250 ms, doubling to 4 s), and a file that is gone waits for the watcher to see it again.
+static DWORD g_rereadMs = 0;
+
 void OnFileChanged() {
     FILETIME t{};
     uint64_t size = 0;
-    if (!g.loadFailed && GetFileStamp(g.path.c_str(), &t, &size) && size == g.fileSize &&
-        CompareFileTime(&t, &g.fileTime) == 0)
+    bool there = GetFileStamp(g.path.c_str(), &t, &size);
+    if (!g.loadFailed && there && size == g.fileSize && CompareFileTime(&t, &g.fileTime) == 0) {
+        g_rereadMs = 0;
         return;
+    }
+    if (g.loadFailed) {  // the error document: the file is back
+        if (there) ReloadDocument();
+        return;
+    }
+    std::string bytes;
+    DWORD e = 0;
+    DiskState now;
+    SaveState st = there ? ReadDisk(g.path.c_str(), bytes, &now, &e) : SS_MISSING;
+    if (st != SS_SAVED) {
+        if (st != SS_MISSING) {
+            g_rereadMs = g_rereadMs ? std::min<DWORD>(g_rereadMs * 2, 4000) : 250;
+            SetTimer(g.hwnd, TIMER_RELOAD, g_rereadMs, nullptr);
+        }
+        return;
+    }
+    g_rereadMs = 0;
+    std::wstring text;
+    DecodeText(bytes.data(), (int)bytes.size(), text, nullptr);
+    if (text == (g.disk.valid ? g.disk.text : g.src)) {
+        g.fileTime = now.mtime;
+        g.fileSize = now.size;
+        return;
+    }
     ReloadDocument();
 }
 

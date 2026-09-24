@@ -713,3 +713,109 @@ const wchar_t* LineEol(const std::wstring& src, uint32_t s, const wchar_t* fallb
     if (src[e] == L'\n') return L"\n";
     return e + 1 < n && src[e + 1] == L'\n' ? L"\r\n" : L"\r";
 }
+
+// ------------------------------------------------------------------------------------------------ splices (§7.1, §11)
+bool SpliceSplits(const std::wstring& src, uint32_t at, uint32_t len) {
+    auto cut = [&](size_t i) {
+        return i > 0 && i < src.size() && ((HighSur(src[i - 1]) && LowSur(src[i])) || (src[i - 1] == L'\r' && src[i] == L'\n'));
+    };
+    return cut(at) || cut((size_t)at + len);
+}
+
+bool ApplySplices(std::wstring& src, const std::vector<Splice>& sps, bool inverse, std::string* why) {
+    const size_t n = sps.size();
+    auto nth = [&](size_t k) -> const Splice& { return sps[inverse ? n - 1 - k : k]; };
+    for (size_t k = 0; k < n; k++) {
+        const Splice& s = nth(k);
+        const std::wstring& there = inverse ? s.inserted : s.removed;
+        if (s.at > src.size() || src.size() - s.at < there.size() || src.compare(s.at, there.size(), there) != 0) {
+            for (size_t j = k; j-- > 0;) {  // put back what was applied: all or nothing
+                const Splice& t = nth(j);
+                src.replace(t.at, (inverse ? t.removed : t.inserted).size(), inverse ? t.inserted : t.removed);
+            }
+            if (why) {
+                char b[96];
+                snprintf(b, sizeof b, "splice %zu of %zu at %u: the text it replaces is not there", k + 1, n, s.at);
+                *why = b;
+            }
+            return false;
+        }
+        src.replace(s.at, there.size(), inverse ? s.removed : s.inserted);
+    }
+    return true;
+}
+
+namespace {
+size_t StepBytes(const EditStep& s) {
+    size_t b = sizeof(EditStep);
+    for (const Splice& sp : s.splices) b += sizeof(Splice) + (sp.removed.size() + sp.inserted.size()) * sizeof(wchar_t);
+    return b;
+}
+}  // namespace
+
+void UndoStack::Push(EditStep st, uint64_t nowMs) {
+    if (!st.t0) st.t0 = nowMs;
+    st.t1 = nowMs;
+    for (const EditStep& r : redo_) bytes_ -= StepBytes(r);  // a new step ends the redo history
+    redo_.clear();
+    EditStep* top = undo_.empty() ? nullptr : &undo_.back();
+    bool merge = top && !broken_ && top->kind == st.kind &&
+                 (st.kind == EK_TYPE || st.kind == EK_DEL_BACK || st.kind == EK_DEL_FWD) &&
+                 top->after.focus == st.before.focus && nowMs >= top->t1 && nowMs - top->t1 < 1500;
+    if (merge && st.kind == EK_TYPE && !top->splices.empty() && !top->splices.back().inserted.empty() &&
+        !st.splices.empty() && !st.splices[0].inserted.empty()) {
+        // a word typed after a blank is a step of its own: one undo takes back a word, not the whole sentence
+        if (Blank(top->splices.back().inserted.back()) && !Blank(st.splices[0].inserted[0])) merge = false;
+    }
+    if (!merge) {
+        bytes_ += StepBytes(st);
+        undo_.push_back(std::move(st));
+    } else {
+        bytes_ -= StepBytes(*top);
+        for (Splice& sp : st.splices) {
+            Splice* last = top->splices.empty() ? nullptr : &top->splices.back();
+            if (last && sp.removed.empty() && last->removed.empty() && sp.at == last->at + last->inserted.size()) {
+                last->inserted += sp.inserted;  // typing on where the last character went
+            } else if (last && sp.inserted.empty() && last->inserted.empty() && sp.at + sp.removed.size() == last->at) {
+                last->at = sp.at;  // Backspace on from where the last one stopped
+                last->removed.insert(0, sp.removed);
+            } else if (last && sp.inserted.empty() && last->inserted.empty() && sp.at == last->at) {
+                last->removed += sp.removed;  // Delete on at the same place
+            } else {
+                top->splices.push_back(std::move(sp));
+            }
+        }
+        top->after = st.after;
+        top->t1 = nowMs;
+        bytes_ += StepBytes(*top);
+    }
+    broken_ = false;
+    Trim();
+}
+
+void UndoStack::Trim() {
+    size_t drop = 0;
+    while (drop < undo_.size() && (undo_.size() - drop > kMaxSteps || bytes_ > kMaxBytes)) bytes_ -= StepBytes(undo_[drop++]);
+    if (drop) undo_.erase(undo_.begin(), undo_.begin() + drop);
+}
+
+void UndoStack::DidUndo() {
+    if (undo_.empty()) return;
+    redo_.push_back(std::move(undo_.back()));
+    undo_.pop_back();
+    broken_ = true;
+}
+
+void UndoStack::DidRedo() {
+    if (redo_.empty()) return;
+    undo_.push_back(std::move(redo_.back()));
+    redo_.pop_back();
+    broken_ = true;
+}
+
+void UndoStack::Clear() {
+    undo_.clear();
+    redo_.clear();
+    bytes_ = 0;
+    broken_ = true;
+}

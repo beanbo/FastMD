@@ -150,6 +150,14 @@ const Pair kStr[] = {
     {L"Документ PDF (*.pdf)", L"PDF document (*.pdf)"},
     {L"Markdown-документ", L"Markdown document"},
     {L"Мгновенный просмотр Markdown", L"Instant Markdown reader"},
+    // edit mode
+    {L"Правка отклонена", L"Edit refused"},
+    {L"Прошлое сохранение прервалось", L"The last save was interrupted"},
+    {L"Открыть копию", L"Open the copy"},
+    {L"Восстановить", L"Restore"},
+    {L"Удалить", L"Delete"},
+    {L"Не удалось восстановить файл", L"The file could not be restored"},
+    {L" (восстановлено)", L" (recovered)"},
 };
 static_assert(std::size(kStr) == S_COUNT, "one entry per StrId");
 UiLang g_lang = UL_RU;

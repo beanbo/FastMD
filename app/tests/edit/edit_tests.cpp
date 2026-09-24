@@ -36,6 +36,7 @@
 
 #include "doc.h"
 #include "editcore.h"
+#include "editfile.h"
 #include "../third_party/md4c/md4c.h"  // span type names in the dump
 
 // The formula and diagram libraries are "there" or not per parse: a formula is a picture (an object atom) with them,
@@ -794,6 +795,331 @@ void UnitTests() {
         if (m.first <= okT) exact = m.second + (okT - m.first) == es.find(L"ok");
     Check(okT != UINT32_MAX && exact, "srcMap maps the text after an emoji exactly");
 }
+
+// ------------------------------------------------------------------------------------------------ undo (§11)
+void UndoTests() {
+    UndoStack u;
+    std::wstring src;
+    std::string why;
+    auto step = [](EditKind k, uint32_t at, const std::wstring& removed, const std::wstring& inserted, uint32_t focusBefore,
+                   uint32_t focusAfter) {
+        EditStep s;
+        s.kind = k;
+        s.splices.push_back(Splice{at, removed, inserted});
+        s.before.focus = s.before.anchor = focusBefore;
+        s.after.focus = s.after.anchor = focusAfter;
+        return s;
+    };
+    auto type = [&](const std::wstring& text, uint64_t& t, uint64_t dt) {
+        for (wchar_t c : text) {
+            uint32_t at = (uint32_t)src.size();
+            src += c;
+            u.Push(step(EK_TYPE, at, L"", std::wstring(1, c), at, at + 1), t += dt);
+        }
+    };
+    auto undo = [&] {
+        bool ok = u.PeekUndo() && ApplySplices(src, u.PeekUndo()->splices, true, &why);
+        if (ok) u.DidUndo();
+        return ok;
+    };
+    auto redo = [&] {
+        bool ok = u.PeekRedo() && ApplySplices(src, u.PeekRedo()->splices, false, &why);
+        if (ok) u.DidRedo();
+        return ok;
+    };
+    uint64_t t = 10000;
+    type(L"Новый мир", t, 120);  // T19: a word after a blank is a step of its own
+    Check(u.Depth() == 2, "undo: «Новый мир» typed in one go is 2 steps, got %zu", u.Depth());
+    Check(undo() && src == L"Новый ", "undo: one undo leaves «Новый », got \"%s\"", Esc(src).c_str());
+    Check(u.Depth() == 1 && u.RedoDepth() == 1, "undo: depths after one undo %zu/%zu", u.Depth(), u.RedoDepth());
+    Check(redo() && src == L"Новый мир", "undo: redo gives the text back");
+    Check(undo() && undo() && src.empty() && !undo(), "undo: two undos empty the text, a third does nothing");
+    Check(redo() && redo() && src == L"Новый мир" && !redo(), "undo: two redos give it all back");
+
+    u.Clear();
+    src.clear();
+    type(L"ab", t, 1499);  // < 1.5 s apart: one step
+    Check(u.Depth() == 1, "undo: typing 1499 ms apart coalesces");
+    type(L"c", t, 1500);   // 1.5 s: a new one
+    Check(u.Depth() == 2, "undo: a pause of 1.5 s starts a new step, depth %zu", u.Depth());
+    u.BreakCoalescing();   // a click, a command, a caret move in between
+    type(L"d", t, 10);
+    Check(u.Depth() == 3, "undo: BreakCoalescing starts a new step");
+    uint32_t at = (uint32_t)src.size();  // the caret went elsewhere: typing there is a new step too
+    src.insert(0, L"x");
+    u.Push(step(EK_TYPE, 0, L"", L"x", 0, 1), t += 10);
+    Check(u.Depth() == 4 && at == 4, "undo: typing where the last step did not leave the caret starts a new step");
+    u.Push(step(EK_STRUCT, 1, L"", L"\n", 1, 2), t += 10);
+    src.insert(1, L"\n");
+    u.Push(step(EK_STRUCT, 2, L"", L"\n", 2, 3), t += 10);
+    src.insert(2, L"\n");
+    Check(u.Depth() == 6, "undo: structural steps never coalesce");
+    Check(undo() && undo() && src == L"xabcd", "undo: structural steps undone one by one, got \"%s\"", Esc(src).c_str());
+    Check(u.RedoDepth() == 2, "undo: two steps to redo");
+    type(L"e", t, 10);
+    Check(u.RedoDepth() == 0, "undo: a new step clears the redo stack");
+
+    // Backspace and Delete coalesce into one splice each; undo puts the characters back where they were
+    u.Clear();
+    src = L"0123456789";
+    for (uint32_t k = 0; k < 3; k++) {  // Backspace at 6, 5, 4
+        uint32_t p = 6 - k - 1;
+        std::wstring r = src.substr(p, 1);
+        src.erase(p, 1);
+        u.Push(step(EK_DEL_BACK, p, r, L"", p + 1, p), t += 50);
+    }
+    Check(u.Depth() == 1 && u.PeekUndo()->splices.size() == 1 && u.PeekUndo()->splices[0].removed == L"345",
+          "undo: three Backspaces are one step of one splice");
+    for (int k = 0; k < 2; k++) {  // Delete at 3, twice (a different kind: its own step)
+        std::wstring r = src.substr(3, 1);
+        src.erase(3, 1);
+        u.Push(step(EK_DEL_FWD, 3, r, L"", 3, 3), t += 50);
+    }
+    Check(u.Depth() == 2 && u.PeekUndo()->splices.size() == 1 && u.PeekUndo()->splices[0].removed == L"67",
+          "undo: two Deletes are one step of one splice");
+    Check(undo() && src == L"0126789" && undo() && src == L"0123456789", "undo: deletions undone, got \"%s\"",
+          Esc(src).c_str());
+
+    // the history is bounded: the oldest steps go
+    u.Clear();
+    src.clear();
+    for (int k = 0; k < 1005; k++) {
+        u.BreakCoalescing();
+        u.Push(step(EK_TYPE, (uint32_t)src.size(), L"", L"a", (uint32_t)src.size(), (uint32_t)src.size() + 1), t += 10);
+        src += L'a';
+    }
+    Check(u.Depth() == UndoStack::kMaxSteps, "undo: at most %zu steps, got %zu", UndoStack::kMaxSteps, u.Depth());
+
+    // ApplySplices verifies before it changes anything: all or nothing
+    std::wstring s = L"hello world";
+    std::vector<Splice> sp = {{0, L"hello", L"HELLO"}, {6, L"world", L"there"}};
+    Check(ApplySplices(s, sp, false, &why) && s == L"HELLO there", "ApplySplices forward");
+    Check(ApplySplices(s, sp, true, &why) && s == L"hello world", "ApplySplices inverse restores the text");
+    std::vector<Splice> bad = {{0, L"hello", L"HELLO"}, {6, L"earth", L"there"}};
+    why.clear();
+    Check(!ApplySplices(s, bad, false, &why) && s == L"hello world" && !why.empty(),
+          "ApplySplices refuses a splice whose text is not there and leaves the text as it was");
+    // a splice may not cut a surrogate pair or a CRLF in two (§7.1)
+    std::wstring e = L"a\r\nb\U0001F600c";
+    Check(SpliceSplits(e, 2, 0) && SpliceSplits(e, 1, 1) && !SpliceSplits(e, 1, 2) && SpliceSplits(e, 5, 0) &&
+              !SpliceSplits(e, 4, 2) && !SpliceSplits(e, 0, 0),
+          "SpliceSplits: CRLF and surrogate pair boundaries");
+}
+
+// ------------------------------------------------------------------------------------------------ editfile (§10)
+std::string EncodeAs(UINT cp, const std::wstring& t) {
+    if (cp == 1200) return std::string((const char*)t.data(), t.size() * 2);
+    int n = WideCharToMultiByte(cp, 0, t.data(), (int)t.size(), nullptr, 0, nullptr, nullptr);
+    std::string s(n > 0 ? n : 0, '\0');
+    if (n > 0) WideCharToMultiByte(cp, 0, t.data(), (int)t.size(), s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+struct FileFixture {
+    std::wstring dir, rec, path;
+    FileFixture() {
+        wchar_t tmp[MAX_PATH];
+        GetTempPathW(MAX_PATH, tmp);
+        dir = std::wstring(tmp) + L"fastmd-edit-tests-" + std::to_wstring(GetCurrentProcessId()) + L"\\";
+        rec = dir + L"recovery\\";
+        path = dir + L"doc.md";
+        CreateDirectoryW(dir.c_str(), nullptr);
+    }
+    ~FileFixture() {
+        for (const std::wstring& f : ListFiles(rec.substr(0, rec.size() - 1), L"*")) DeleteFileW(f.c_str());
+        RemoveDirectoryW(rec.c_str());
+        DeleteFileW(path.c_str());
+        RemoveDirectoryW(dir.c_str());
+    }
+    size_t RecoveryFiles() { return ListFiles(rec.substr(0, rec.size() - 1), L"*.rec").size(); }
+    // the file holds `bytes`; the baseline from it, read and checked as edit mode takes it
+    DiskRefusal Baseline(const std::string& bytes, UINT acp, DiskState& d) {
+        WriteBytes(path, bytes);
+        std::string b;
+        DWORD e = 0;
+        d = DiskState();
+        if (ReadDisk(path.c_str(), b, &d, &e) != SS_SAVED) return DR_BINARY;
+        DiskRefusal r = DecodeDisk(b, acp, d);
+        d.valid = r == DR_OK;
+        return r;
+    }
+    SaveResult Save(const std::wstring& text, const DiskState& d, bool flushPoint = false) {
+        SaveRequest rq;
+        rq.path = path.c_str();
+        rq.text = &text;
+        rq.disk = &d;
+        rq.recoveryDir = rec;
+        rq.flushPoint = flushPoint;
+        rq.fullProof = true;
+        return SaveSource(rq);
+    }
+    std::string Bytes() {
+        std::string b;
+        ReadBytes(path, b);
+        return b;
+    }
+};
+
+const char* StateName(SaveState s) {
+    static const char* n[] = {"SAVED", "PENDING", "SAVING", "BUSY", "DENIED", "READONLY", "MISSING", "CONFLICT",
+                              "UNENCODABLE", "FAILED", "UNKNOWN", "OFF"};
+    return s < std::size(n) ? n[s] : "?";
+}
+
+void EditFileTests() {
+    FileFixture fx;
+    DiskState d;
+    const std::wstring ru = L"# Привет\n\nТекст и ещё строка.\n";
+    // ---- the byte-exact entry check (§10.1, D1, D14)
+    Check(fx.Baseline(EncodeAs(1251, ru), 65001, d) == DR_LOSSY, "entry: a CP1251 file under FASTMD_ACP=65001 is refused");
+    Check(fx.Baseline(EncodeAs(1251, ru), 1251, d) == DR_OK && d.cp == 1251 && d.text == ru,
+          "entry: the same file under 1251 is taken, cp %u", d.cp);
+    Check(fx.Baseline(std::string("abc\x81\n", 5), 932, d) == DR_LOSSY, "entry: a stray byte under 932 is refused");
+    Check(fx.Baseline(std::string("a\0b\n", 4), 1252, d) == DR_BINARY, "entry: NUL bytes outside UTF-16 are refused");
+    Check(fx.Baseline(std::string("\xFE\xFF\0a", 4), 1252, d) == DR_UTF16BE, "entry: UTF-16 BE is refused");
+    Check(fx.Baseline(std::string("\xFF\xFE" "a\0b", 5), 1252, d) == DR_UTF16ODD, "entry: UTF-16 LE of odd length is refused");
+    Check(fx.Baseline(std::string("\xA4\xA2\xA4\xA4\n", 5), 50220, d) == DR_STATEFUL, "entry: a stateful code page is refused");
+    Check(fx.Baseline(std::string("\xEF\xBB\xBF" "a\r\nb\r\nc\n", 11), 1252, d) == DR_OK && d.header == "\xEF\xBB\xBF" &&
+              d.cp == CP_UTF8 && d.crlf == 2 && d.lf == 1 && !wcscmp(DiskEol(d), L"\r\n"),
+          "entry: UTF-8 with BOM, line ends counted (2 CRLF, 1 LF → CRLF)");
+    Check(fx.Baseline("plain ascii\n", 1251, d) == DR_OK && d.cp == CP_UTF8, "entry: pure ASCII reads as UTF-8");
+
+    // ---- splice-local output == the full encode, in every encoding (§10.3 step 3)
+    struct Enc { const char* name; UINT cp; std::string header; const wchar_t* eol; };
+    const Enc encs[] = {{"utf8", CP_UTF8, "", L"\n"},
+                        {"utf8-bom-crlf", CP_UTF8, "\xEF\xBB\xBF", L"\r\n"},
+                        {"utf16", 1200, "\xFF\xFE", L"\r\n"},
+                        {"cp1251", 1251, "", L"\n"}};
+    const std::wstring base = L"# Заголовок\n\nПервый абзац с текстом.\n\n- [ ] задача\n- [x] вторая\n\nПоследняя строка.\n";
+    struct Edit { const wchar_t* what; size_t at, len; const wchar_t* text; };
+    const Edit edits[] = {{L"tick", 0, 1, L"x"},       {L"insert", 20, 0, L"новое "}, {L"delete", 14, 6, L""},
+                          {L"start", 0, 1, L"##"},    {L"end", SIZE_MAX, 0, L"Хвост."}, {L"grow", 30, 0, L"очень длинная вставка "},
+                          {L"shrink", 5, 40, L"-"},   {L"line end", 11, 0, L"\n\nновая строка"}};
+    for (const Enc& en : encs) {
+        std::wstring text0 = base;
+        if (wcscmp(en.eol, L"\n")) {  // CRLF files
+            std::wstring t;
+            for (wchar_t c : text0) { if (c == L'\n') t += L'\r'; t += c; }
+            text0 = t;
+        }
+        SetAnsiCodePageForTests(en.cp == 1251 ? 1251 : GetACP());
+        std::wstring cur = text0;
+        if (!Check(fx.Baseline(en.header + EncodeAs(en.cp, cur), en.cp == 1251 ? 1251 : GetACP(), d) == DR_OK,
+                   "save %s: baseline", en.name))
+            continue;
+        for (const Edit& ed : edits) {
+            std::wstring next = cur;
+            size_t at = ed.at == SIZE_MAX ? next.size() : std::min(ed.at, next.size());
+            if (!wcscmp(ed.what, L"tick")) at = next.find(L"[ ]") + 1;
+            while (at > 0 && at < next.size() && next[at - 1] == L'\r' && next[at] == L'\n') at++;
+            size_t len = std::min(ed.len, next.size() - at);
+            if (at + len < next.size() && at + len > 0 && next[at + len - 1] == L'\r' && next[at + len] == L'\n') len++;
+            next.replace(at, len, ed.text);
+            SaveResult r = fx.Save(next, d);
+            std::string want = en.header + EncodeAs(en.cp, next), got = fx.Bytes();
+            if (!Check(r.state == SS_SAVED && got == want, "save %s, %s: state %s (%s), %zu bytes vs the full encode's %zu",
+                       en.name, Narrow(ed.what).c_str(), StateName(r.state), r.reason, got.size(), want.size()))
+                break;
+            Check(r.disk.valid && r.disk.text == next && r.disk.length == got.size() &&
+                      r.disk.hash == Fnv64(got.data(), got.size()) && r.disk.cp == en.cp && r.disk.header == en.header,
+                  "save %s, %s: the new baseline is what the file holds", en.name, Narrow(ed.what).c_str());
+            Check(fx.RecoveryFiles() == 0, "save %s, %s: no recovery file left after a save", en.name, Narrow(ed.what).c_str());
+            d = r.disk;
+            cur = next;
+        }
+    }
+    SetAnsiCodePageForTests(GetACP());
+
+    // ---- what cannot be saved: nothing is written, the reason says why (§10.3, D12)
+    std::string orig = EncodeAs(CP_UTF8, ru);
+    fx.Baseline(orig, 1252, d);
+    std::wstring lone = ru;
+    lone.insert(3, 1, (wchar_t)0xD83D);
+    SaveResult r = fx.Save(lone, d);
+    Check(r.state == SS_UNENCODABLE && !strcmp(r.reason, "LONE_SURROGATE") && r.bad == 3 && fx.Bytes() == orig,
+          "save: a lone surrogate in UTF-8 → LONE_SURROGATE at 3, file untouched (%s %s %u)", StateName(r.state), r.reason, r.bad);
+    r = fx.Save(L"\xFEFF" + ru, d);
+    Check(r.state == SS_UNENCODABLE && !strcmp(r.reason, "BOM_LOOKALIKE") && fx.Bytes() == orig,
+          "save: U+FEFF at the start of a UTF-8 file without a BOM → BOM_LOOKALIKE (%s %s)", StateName(r.state), r.reason);
+    SetAnsiCodePageForTests(1251);
+    std::string orig1251 = EncodeAs(1251, ru);
+    fx.Baseline(orig1251, 1251, d);
+    r = fx.Save(L"яю" + ru, d);  // FF FE: the next read would take it for UTF-16
+    Check(r.state == SS_UNENCODABLE && !strcmp(r.reason, "BOM_LOOKALIKE") && fx.Bytes() == orig1251,
+          "save: 1251 bytes starting FF FE → BOM_LOOKALIKE (%s %s)", StateName(r.state), r.reason);
+    std::wstring check = ru;
+    check.insert(5, L"\x2713");  // ✓ has no byte in 1251
+    r = fx.Save(check, d);
+    Check(r.state == SS_UNENCODABLE && !strcmp(r.reason, "UNENCODABLE") && r.bad == 5 && fx.Bytes() == orig1251,
+          "save: ✓ in a 1251 file → UNENCODABLE at 5 (%s %s %u)", StateName(r.state), r.reason, r.bad);
+    SetAnsiCodePageForTests(GetACP());
+
+    // ---- the file moved on: other text is a conflict; the same text in other bytes is adopted (D13)
+    fx.Baseline(orig, 1252, d);
+    WriteBytes(fx.path, orig + "снаружи\n");
+    std::wstring mine = ru + L"моё\n";
+    r = fx.Save(mine, d);
+    Check(r.state == SS_CONFLICT && fx.Bytes() == orig + "снаружи\n", "save: a file changed outside → CONFLICT, untouched");
+    WriteBytes(fx.path, "\xEF\xBB\xBF" + orig);  // re-encoded outside: a BOM now, the same text
+    r = fx.Save(mine, d);
+    Check(r.state == SS_SAVED && r.adopted && fx.Bytes() == "\xEF\xBB\xBF" + EncodeAs(CP_UTF8, mine) && r.disk.header == "\xEF\xBB\xBF",
+          "save: the same text re-encoded outside is adopted (its BOM kept) and saved (%s)", StateName(r.state));
+
+    // ---- every fault leaves the original bytes, and nothing behind (§13.5, D24)
+    const wchar_t* faults[] = {L"partial:3", L"busy", L"denied", L"missing", L"short_read", L"flush", L"close",
+                               L"recovery", L"diskfull"};
+    const SaveState expect[] = {SS_FAILED, SS_BUSY, SS_DENIED, SS_MISSING, SS_UNKNOWN, SS_FAILED, SS_FAILED, SS_FAILED,
+                                SS_FAILED};
+    std::wstring grown = ru + L"Дописано в конце, файл растёт.\n";
+    for (size_t k = 0; k < std::size(faults); k++) {
+        fx.Baseline(orig, 1252, d);
+        SetFailWriteForTests(faults[k]);
+        r = fx.Save(grown, d);
+        Check(r.state == expect[k] && fx.Bytes() == orig && fx.RecoveryFiles() == 0 && r.recoveryKept.empty(),
+              "fault %s: %s (want %s), original bytes %s, recovery files %zu", Narrow(faults[k]).c_str(),
+              StateName(r.state), StateName(expect[k]), fx.Bytes() == orig ? "kept" : "CHANGED", fx.RecoveryFiles());
+        r = fx.Save(grown, d);  // once by default: the next save goes through
+        Check(r.state == SS_SAVED && fx.Bytes() == EncodeAs(CP_UTF8, grown), "fault %s: the next save succeeds (%s)",
+              Narrow(faults[k]).c_str(), StateName(r.state));
+    }
+    // ",norollback": the torn file stays and so does the recovery file, which restores the original
+    fx.Baseline(orig, 1252, d);
+    SetFailWriteForTests(L"partial:10,norollback");
+    r = fx.Save(grown, d);
+    std::string torn = fx.Bytes();
+    Check(r.state == SS_FAILED && torn != orig && !r.recoveryKept.empty() && fx.RecoveryFiles() == 1,
+          "fault partial:10,norollback: a torn file and its recovery file (%s)", StateName(r.state));
+    std::vector<RecoveryInfo> found = FindRecovery(fx.rec, d.volume, d.index);
+    Check(found.size() == 1 && found[0].path == fx.path && found[0].preSize == orig.size() && found[0].pid == GetCurrentProcessId(),
+          "recovery: found for the file's identity, %zu", found.size());
+    if (found.size() == 1) {
+        std::wstring copy = fx.dir + L"copy.md";
+        Check(RecoveryRebuild(found[0], fx.path.c_str(), copy.c_str()), "recovery: the copy is rebuilt");
+        std::string cb;
+        ReadBytes(copy, cb);
+        Check(cb == orig, "recovery: the rebuilt copy is the file before the save");
+        DeleteFileW(copy.c_str());
+        DWORD e = 0;
+        Check(RecoveryRestore(found[0], fx.path.c_str(), &e) && fx.Bytes() == orig, "recovery: restore gives the original bytes");
+        DeleteFileW(found[0].file.c_str());
+    }
+    SetFailWriteForTests(L"");
+
+    // ---- the local flush cost (§10.3 step 7): every save at a flush point flushes; the median goes into the report
+    fx.Baseline(orig, 1252, d);
+    std::vector<double> ms;
+    std::wstring t = ru;
+    for (int k = 0; k < 9; k++) {
+        t += L"строка\n";
+        r = fx.Save(t, d, true);
+        if (r.state != SS_SAVED) break;
+        d = r.disk;
+        if (r.flushMs >= 0) ms.push_back(r.flushMs);
+    }
+    std::sort(ms.begin(), ms.end());
+    Check(ms.size() == 9, "flush: every save at a flush point flushes (%zu)", ms.size());
+    if (!ms.empty()) printf("  local flush (temp folder): median %.2f ms, max %.2f ms over %zu saves\n", ms[ms.size() / 2], ms.back(), ms.size());
+}
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -840,6 +1166,8 @@ int wmain(int argc, wchar_t** argv) {
     DWORD t0 = GetTickCount();
     printf("fastmd-edit-tests\n");
     UnitTests();
+    UndoTests();
+    EditFileTests();
     for (const std::wstring& f : ListFiles(cases, L"*.txt")) RunCaseFile(f);
     if (sweep) Sweep(corpus);
     printf("%s: %d checks, %d failures, %.2f s\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures,

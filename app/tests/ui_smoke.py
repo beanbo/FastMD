@@ -1101,17 +1101,18 @@ def task_text(marks):
 
 
 def test_tasks():
-    """a click on a task box ticks the item in the file: one character changes, in the file's own encoding"""
+    """a click on a task box ticks the item in the file: one character changes, in the file's own encoding. Since edit
+    mode's phase 1c the tick is a splice, a save and a model swap (EDIT-MODE.md T2): "no reload" is Q_RELOADS"""
     ok = True
     acp = k32.GetACP()
-    variants = [  # name, how the text becomes the file's bytes
-        ("utf8", lambda t: t.encode("utf-8")),
-        ("bom-crlf", lambda t: b"\xef\xbb\xbf" + t.replace("\n", "\r\n").encode("utf-8")),
-        ("utf16", lambda t: b"\xff\xfe" + t.replace("\n", "\r\n").encode("utf-16-le")),
-        ("ansi", lambda t: t.encode(f"cp{acp}", errors="replace")),  # not UTF-8: read in the ANSI code page
+    variants = [  # name, how the text becomes the file's bytes, Q_EDIT_ENC (code page | BOM bytes << 24), Q_EDIT_EOL
+        ("utf8", lambda t: t.encode("utf-8"), 65001, 0),
+        ("bom-crlf", lambda t: b"\xef\xbb\xbf" + t.replace("\n", "\r\n").encode("utf-8"), 65001 | 3 << 24, 1),
+        ("utf16", lambda t: b"\xff\xfe" + t.replace("\n", "\r\n").encode("utf-16-le"), 1200 | 2 << 24, 1),
+        ("ansi", lambda t: t.encode(f"cp{acp}", errors="replace"), acp, 0),  # not UTF-8: read in the ANSI code page
     ]
     start = " xX   "
-    for name, encode in variants:
+    for name, encode, enc, eol in variants:
         doc = OUT / f"tasks-{name}.md"
         doc.write_bytes(encode(TASKS_MD))
         proc, hwnd = launch(doc, size="--size=900x800")
@@ -1119,7 +1120,10 @@ def test_tasks():
             states = [q(hwnd, "TASK", k) for k in range(7)]
             ok &= check(f"tasks ({name}): six boxes, the code block has none, [X] counts as ticked",
                         states == [0, 1, 1, 0, 0, 0, -1], str(states))
-            serial = q(hwnd, "DOC_SERIAL")
+            ok &= check(f"tasks ({name}): the encoding and the line end are known (Q_EDIT_ENC, Q_EDIT_EOL)",
+                        q(hwnd, "EDIT_ENC") == enc and q(hwnd, "EDIT_EOL") == eol,
+                        f'{q(hwnd, "EDIT_ENC"):#x} / {q(hwnd, "EDIT_EOL")}, want {enc:#x} / {eol}')
+            reloads = q(hwnd, "RELOADS")
             marks = list(start)
             for k in (0, 2, 5, 0, 3):  # tick, untick the capital X, the quoted one, the first one back, the nested
                 box = task_box(hwnd, k)
@@ -1137,7 +1141,11 @@ def test_tasks():
                         f"{states} for {marks!r}")
             time.sleep(0.4)  # the watcher saw our own writes: they must not reload the document
             ok &= check(f"tasks ({name}): our own write does not reload the document",
-                        q(hwnd, "DOC_SERIAL") == serial, f"{serial} → {q(hwnd, 'DOC_SERIAL')}")
+                        q(hwnd, "RELOADS") == reloads and q(hwnd, "SAVES") == 5,
+                        f'reloads {reloads} → {q(hwnd, "RELOADS")}, saves {q(hwnd, "SAVES")}')
+            ok &= check(f"tasks ({name}): the source in memory is the file (Q_SRC_HASH), nothing unsaved",
+                        q(hwnd, "SRC_HASH", 0) == q(hwnd, "SRC_HASH", 1) and q(hwnd, "EDIT_DIRTY") == 0 and
+                        q(hwnd, "EDIT_ENC") == enc)
             if name != "utf8":
                 continue
             # the Markdown source in memory follows too: "copy as Markdown" gives the new mark
@@ -1176,14 +1184,14 @@ def test_tasks():
                 k32.CloseHandle(h)
             shot(hwnd, "59-tasks-busy-toast")
             # changed on disk behind the window's back: the click must not write into a file it has not seen
-            serial = q(hwnd, "DOC_SERIAL")
+            reloads = q(hwnd, "RELOADS")
             changed = before + "\nДописано снаружи.\n".encode("utf-8")
             doc.write_bytes(changed)
             post(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp(*box), 0)  # before the watcher's reload (120 ms debounce)
             post(hwnd, WM_LBUTTONUP, 0, lp(*box), 0.8)
             ok &= check("tasks: a file changed on disk is reloaded, not written",
-                        doc.read_bytes() == changed and q(hwnd, "DOC_SERIAL") != serial and q(hwnd, "TASK", 4) == 0,
-                        f"serial {serial} → {q(hwnd, 'DOC_SERIAL')}")
+                        doc.read_bytes() == changed and q(hwnd, "RELOADS") > reloads and q(hwnd, "TASK", 4) == 0,
+                        f'reloads {reloads} → {q(hwnd, "RELOADS")}')
             click(hwnd, box[0], box[1], 0.5)  # and after the reload the same click works
             ok &= check("tasks: after the reload the box can be ticked",
                         doc.read_bytes() == changed.replace("[ ] Нумерованная".encode("utf-8"),
@@ -1870,6 +1878,356 @@ def test_reload_during_update():
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ edit mode, phase 1c
+WM_COPYDATA = 0x004A
+
+
+class COPYDATASTRUCT(ctypes.Structure):
+    _fields_ = [("dwData", ctypes.c_size_t), ("cbData", wt.DWORD), ("lpData", ctypes.c_void_p)]
+
+
+def src_hash(text):
+    """FNV-1a-32 over the UTF-16LE bytes of the text: what Q_SRC_HASH answers for the app's source"""
+    h = 2166136261
+    for b in text.encode("utf-16-le"):
+        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
+    return h
+
+
+def copydata(hwnd, kind, payload=""):
+    """FASTMD_TEST_HOOKS: kind 1 = splice "at\\tlen\\ttext" (UTF-16 offsets), 2 = save now → 1 + the save state"""
+    data = ctypes.create_unicode_buffer(payload, len(payload) + 1)
+    cds = COPYDATASTRUCT(kind, len(payload.encode("utf-16-le")), ctypes.cast(data, ctypes.c_void_p))
+    return u32.SendMessageW(hwnd, WM_COPYDATA, 0, ctypes.addressof(cds))
+
+
+WM_APP_TESTKEY = 0x8000 + 12
+KM_CTRL, KM_SHIFT, KM_ALT = 1, 2, 4
+
+
+def testkey(hwnd, vk, mods=0, wait=0.3):
+    """FASTMD_TEST_HOOKS: a key press with exactly these modifiers (the app does not read the keyboard state for it)"""
+    u32.SendMessageW(hwnd, WM_APP_TESTKEY, vk, mods)
+    time.sleep(wait)
+
+
+def u16(s):
+    return len(s.encode("utf-16-le")) // 2
+
+
+def splice(hwnd, src, at, length, text):
+    """the same splice on the app's source (through the hook) and on the test's copy; at / length in UTF-16 units of
+    a BMP-only text, so they are Python indices too"""
+    r = copydata(hwnd, 1, f"{at}\t{length}\t{text}")
+    return r, src[:at] + text + src[at + length:]
+
+
+def settle(hwnd, timeout=5.0):
+    """nothing on its way any more: no glide, no measuring, no picture pending (Q_EDIT_BUSY), and a frame drawn"""
+    done = wait_for(lambda: q(hwnd, "TARGETY") == q(hwnd, "SCROLLY") and q(hwnd, "EDIT_BUSY") == 0, timeout, 0.05)
+    time.sleep(0.25)
+    return done
+
+
+def relayout_same(hwnd, name):
+    """the oracle of the model swap (T7): the frame now == the frame after every layout was made anew"""
+    q(hwnd, "FULL_REDRAW")
+    time.sleep(0.3)
+    a = shot(hwnd, f"{name}-swap")
+    y = q(hwnd, "SCROLLY")
+    q(hwnd, "RELAYOUT_ALL")
+    time.sleep(0.4)
+    b = shot(hwnd, f"{name}-relayout")
+    return same_pixels(a, b) and q(hwnd, "SCROLLY") == y
+
+
+TASK_SWAP_DOC = ("# Задачи рядом с формулами\n\n- [ ] Посчитать $a^2 + b^2$ до обеда\n- [x] Готово: $\\sqrt{x}$\n\n"
+                 "$$\\int_0^1 x\\,dx$$\n\n" +
+                 "".join(f"## Раздел {k}\n\nАбзац {k}: достаточно текста, чтобы документ прокручивался, и строка "
+                         f"переносилась хотя бы один раз в узкой колонке окна.\n\n" +
+                         (f"- [ ] Задача в середине {k}\n- [ ] Ещё одна {k}\n\n" if k in (8, 9, 10) else "")
+                         for k in range(1, 21)) + "Конец.\n")
+
+
+def test_task_swap():
+    """a tick is a model swap, not a reload (EDIT-MODE.md §5.5, T2): the formulas beside it are not typeset again,
+    and in the middle of the document the view stays put and draws exactly what a fresh layout draws"""
+    ok = True
+    doc = OUT / "task-swap.md"
+    doc.write_bytes(TASK_SWAP_DOC.encode("utf-8"))
+    proc, hwnd = launch(doc, size="--size=900x700")
+    try:
+        drawn = wait_for(lambda: q(hwnd, "MATH", 1) == 3, 8.0)
+        settle(hwnd)
+        renders, reloads = q(hwnd, "RENDERS"), q(hwnd, "RELOADS")
+        box = task_box(hwnd, 0)
+        if box:
+            click(hwnd, box[0], box[1], 0.6)
+        settle(hwnd)
+        ok &= check("edit 1c: a tick next to a formula: saved, nothing typeset again, no reload",
+                    drawn and box and q(hwnd, "TASK", 0) == 1 and q(hwnd, "RENDERS") == renders and
+                    q(hwnd, "RELOADS") == reloads and q(hwnd, "MATH", 1) == 3 and "- [x] Посчитать" in doc.read_text("utf-8"),
+                    f'drawn {drawn}, renders {renders} → {q(hwnd, "RENDERS")}, math {q(hwnd, "MATH", 1)}')
+        ok &= check("edit 1c: ... and the frame is what a fresh layout draws", relayout_same(hwnd, "81-task-formula"))
+        # the middle of the document: the ticked box is on screen, the view must not move
+        mid = 2  # the first task of section 8
+        for _ in range(40):
+            b = task_box(hwnd, mid)
+            if b and 150 < b[1] < 500:
+                break
+            wheel(hwnd, 450, 350, -1, wait=0.25)
+        settle(hwnd)
+        b = task_box(hwnd, mid)
+        y = q(hwnd, "SCROLLY")
+        if b:
+            click(hwnd, b[0], b[1], 0.6)
+        settle(hwnd)
+        ok &= check("edit 1c: a tick in the middle of the document leaves the scroll position alone",
+                    b is not None and y > 0 and q(hwnd, "SCROLLY") == y and q(hwnd, "TASK", mid) == 1 and
+                    q(hwnd, "RELOADS") == reloads, f'{y} → {q(hwnd, "SCROLLY")}, box {b}')
+        ok &= check("edit 1c: ... and the frame is what a fresh layout draws", relayout_same(hwnd, "82-task-middle"))
+        ok &= check("edit 1c: ... the file and the source in memory agree",
+                    q(hwnd, "SRC_HASH", 0) == src_hash(doc.read_bytes().decode("utf-8")) and q(hwnd, "EDIT_DIRTY") == 0)
+    finally:
+        close_and_wait(proc, hwnd)
+    return ok
+
+
+SPLICE_DOC = ("# Документ для правок\n\nПервый абзац с **жирным** словом и [ссылкой](other.md).\n\n"
+              "Бейдж в строке: <img src=\"img/diagram0.png\" width=\"40\"> и текст после него.\n\n"
+              "1. Первый пункт\n2. Второй пункт\n3. Третий пункт\n\n"
+              "| Колонка | Значение |\n|---|---|\n| а | 1 |\n| б | 2 |\n\n"
+              "Формула: $x^2$ в строке.\n\nПоследний абзац.\n")
+
+
+def test_splice_hook():
+    """20 scripted splices through the test hook (reading mode, nothing saved): after each the app's source is the
+    expected text, the map passes its self-check, and at checkpoints the frame is what a fresh layout draws"""
+    ok = True
+    doc = OUT / "splice-hook.md"
+    doc.write_bytes(SPLICE_DOC.encode("utf-8"))
+    original = doc.read_bytes()
+    ENV.update(FASTMD_TEST_HOOKS="1", FASTMD_EDIT_SELFCHECK="1")
+    try:
+        proc, hwnd = launch(doc, size="--size=900x800")
+        try:
+            wait_for(lambda: q(hwnd, "MATH", 1) == 1, 8.0)
+            settle(hwnd)
+            src = SPLICE_DOC
+            reloads = q(hwnd, "RELOADS")
+            para = src.index("Первый абзац")
+            steps = [  # (what, at, length, text); each applied to the source as it is after the ones before
+                ("type in a paragraph", para + 7, 0, "новый "),
+                ("type more", para + 13, 0, "текст "),
+                ("a heading appears", para, 0, "## "),
+                ("the heading goes", para, 3, ""),
+                ("a picture before the badge", src.index("Бейдж"), 0, "![](img/diagram0.png)\n\n"),
+                ("the badge's text", None, None, "Значок"),
+                ("a list item in front", None, None, "1. Нулевой пункт\n"),
+                ("renumber", None, None, "5"),
+                ("a table row", None, None, "| в | 3 |\n"),
+                ("a cell", None, None, "42"),
+                ("the formula", None, None, "y^3"),
+                ("a new formula", None, None, " и $z$"),
+                ("a block goes", None, None, ""),
+                ("a paragraph at the end", None, None, "\nНовый конец.\n"),
+                ("a quote", None, None, "> Цитата\n\n"),
+                ("into the quote", None, None, " длиннее"),
+                ("a code block", None, None, "```\nкод\n```\n\n"),
+                ("into the code", None, None, "ещё "),
+                ("the first line", 0, 1, "###"),
+                ("the picture goes", None, None, ""),
+            ]
+            for k, (what, at, length, text) in enumerate(steps):
+                # where the later steps go is found in the text as it is by then
+                if at is None:
+                    at, length = {
+                        "the badge's text": lambda: (src.index("Бейдж"), len("Бейдж")),
+                        "a list item in front": lambda: (src.index("1. Первый"), 0),
+                        "renumber": lambda: (src.index("3. Третий"), 1),
+                        "a table row": lambda: (src.index("| б | 2 |\n") + len("| б | 2 |\n"), 0),
+                        "a cell": lambda: (src.index("| а | 1 |") + 6, 1),
+                        "the formula": lambda: (src.index("$x^2$") + 1, 3),
+                        "a new formula": lambda: (src.index(" в строке."), 0),
+                        "a block goes": lambda: (src.index("Последний абзац.\n"), len("Последний абзац.\n")),
+                        "a paragraph at the end": lambda: (len(src), 0),
+                        "a quote": lambda: (src.index("| Колонка"), 0),
+                        "into the quote": lambda: (src.index("> Цитата") + len("> Цитата"), 0),
+                        "a code block": lambda: (src.index("Формула:"), 0),
+                        "into the code": lambda: (src.index("код\n```"), 0),
+                        "the picture goes": lambda: (src.index("![](img/diagram0.png)\n\n"), len("![](img/diagram0.png)\n\n")),
+                    }[what]()
+                r, src = splice(hwnd, src, at, length, text)
+                okk = r == 1 and q(hwnd, "SRC_HASH", 0) == src_hash(src) and q(hwnd, "SRC_LEN", 0) == u16(src)
+                okk = okk and q(hwnd, "MAP_SELFCHECK", 0) == 1
+                if k % 4 == 3 or k == len(steps) - 1:
+                    settle(hwnd)
+                    okk = okk and relayout_same(hwnd, f"83-splice-{k:02d}")
+                ok &= check(f"edit 1c: splice {k + 1:2d} ({what}): the source is right, the map holds"
+                            + (", the frame is a fresh layout's" if k % 4 == 3 or k == len(steps) - 1 else ""), okk,
+                            f"hook {r}, hash {q(hwnd, 'SRC_HASH', 0):#x} vs {src_hash(src):#x}")
+            ok &= check("edit 1c: 20 splices: no reload, nothing saved, the file untouched, no self-check failure",
+                        q(hwnd, "RELOADS") == reloads and q(hwnd, "SAVES") == 0 and doc.read_bytes() == original and
+                        q(hwnd, "MAP_SELFCHECK", 1) == 0 and q(hwnd, "EDIT_DIRTY") == 1 and
+                        q(hwnd, "SRC_HASH", 1) == src_hash(SPLICE_DOC),
+                        f'reloads {q(hwnd, "RELOADS")}, saves {q(hwnd, "SAVES")}, failures {q(hwnd, "MAP_SELFCHECK", 1)}')
+            stats = [q(hwnd, "EDIT_STATS", k) for k in range(7)]
+            print(f"       swap cost over {stats[3]} swaps: median {stats[0]} µs, p95 {stats[1]} µs, max {stats[2]} µs "
+                  f"(parse {stats[4]}, carry+diff {stats[5]}, install+layout {stats[6]})")
+            r, src = splice(hwnd, src, len(src), 0, "Строка с CRLF\r\n")
+            ok &= check("edit 1c: a splice that would cut a CRLF in two, or run past the end, is refused",
+                        r == 1 and copydata(hwnd, 1, f"{len(src) - 1}\t0\tx") == 0 and
+                        copydata(hwnd, 1, f"{len(src)}\t1\tx") == 0 and q(hwnd, "SRC_HASH", 0) == src_hash(src))
+            # the hook's save: the whole edit in one go, byte for byte
+            r = copydata(hwnd, 2)
+            ok &= check("edit 1c: the save hook writes the edits, byte for byte",
+                        r == 1 and doc.read_bytes() == src.encode("utf-8") and q(hwnd, "SAVES") == 1 and
+                        q(hwnd, "EDIT_DIRTY") == 0, f"hook {r}")
+            time.sleep(0.5)
+            ok &= check("edit 1c: ... and the watcher does not reload our own write", q(hwnd, "RELOADS") == reloads)
+            testkey(hwnd, ord("F"), KM_CTRL)  # a chord with its modifiers named, whatever the keyboard says (T5)
+            opened = q(hwnd, "FIND_OPEN") == 1
+            testkey(hwnd, VK["esc"])
+            ok &= check("edit 1c: WM_APP_TESTKEY delivers Ctrl+F and Esc", opened and q(hwnd, "FIND_OPEN") == 0)
+        finally:
+            close_and_wait(proc, hwnd)
+    finally:
+        ENV.pop("FASTMD_TEST_HOOKS", None)
+        ENV.pop("FASTMD_EDIT_SELFCHECK", None)
+    return ok
+
+
+def recovery_files():
+    d = DATA / "recovery"
+    return sorted(d.glob("*.rec")) if d.exists() else []
+
+
+def test_save_fault():
+    """FASTMD_TEST_FAIL_WRITE (§13.5): a write that fails half-way is rolled back - the original bytes, no recovery
+    file - and the next save goes through; with ",norollback" the torn file and its recovery file stay, and the next
+    open offers the recovery strip, whose Restore gives the original bytes back"""
+    ok = True
+    doc = OUT / "save-fault.md"
+    text = "# Сбой записи\n\nАбзац, который будет дописан.\n\nВторой абзац.\n"
+    doc.write_bytes(text.encode("utf-8"))
+    original = doc.read_bytes()
+    for f in recovery_files():
+        f.unlink()
+    ENV.update(FASTMD_TEST_HOOKS="1", FASTMD_TEST_FAIL_WRITE="partial:10")
+    try:
+        proc, hwnd = launch(doc)
+        try:
+            at = text.index("дописан.") + len("дописан")
+            r, new = splice(hwnd, text, at, 0, " и расширен до длинного текста")
+            s1 = copydata(hwnd, 2)
+            ok &= check("edit 1c: a write that fails after 10 bytes: FAILED, the original bytes, still dirty, "
+                        "no recovery file", r == 1 and s1 == 1 + 9 and doc.read_bytes() == original and
+                        q(hwnd, "EDIT_SAVE_STATE") == 9 and q(hwnd, "EDIT_DIRTY") == 1 and not recovery_files(),
+                        f"hook {r}/{s1}, state {q(hwnd, 'EDIT_SAVE_STATE')}, recovery {recovery_files()}")
+            s2 = copydata(hwnd, 2)
+            ok &= check("edit 1c: ... the next save goes through", s2 == 1 and doc.read_bytes() == new.encode("utf-8") and
+                        q(hwnd, "EDIT_SAVE_STATE") == 0 and q(hwnd, "SAVES") == 1, f"hook {s2}")
+        finally:
+            close_and_wait(proc, hwnd)
+        doc.write_bytes(original)
+        ENV["FASTMD_TEST_FAIL_WRITE"] = "partial:10,norollback"
+        proc, hwnd = launch(doc)
+        try:
+            r, new = splice(hwnd, text, at, 0, " и расширен до длинного текста")
+            s1 = copydata(hwnd, 2)
+            torn = doc.read_bytes()
+            ok &= check("edit 1c: partial:10,norollback: a torn file and its recovery file",
+                        s1 == 1 + 9 and torn != original and torn != new.encode("utf-8") and len(recovery_files()) == 1,
+                        f"hook {s1}, recovery {recovery_files()}")
+        finally:
+            close_and_wait(proc, hwnd)
+    finally:
+        ENV.pop("FASTMD_TEST_HOOKS", None)
+        ENV.pop("FASTMD_TEST_FAIL_WRITE", None)
+    proc, hwnd = launch(doc)
+    try:
+        shown = wait_for(lambda: q(hwnd, "EDIT_STRIP") == 6, 3.0)
+        shot(hwnd, "84-recovery-strip")
+        c = q(hwnd, "EDIT_TOOL", CMD["RECOVERY_RESTORE"])
+        ok &= check("edit 1c: reopening shows the recovery strip with its buttons", shown and c > 0,
+                    f'strip {q(hwnd, "EDIT_STRIP")}, restore at {c}')
+        # Open the copy: the file as it was before that save, rebuilt in %TEMP%\FastMD and opened in a window of its own
+        tmp = pathlib.Path(os.environ["TEMP"]) / "FastMD"
+        for f in tmp.glob("save-fault (*).md"):
+            f.unlink()
+        cmd(hwnd, "RECOVERY_OPEN", 1.5)
+        copies = list(tmp.glob("save-fault (*).md"))
+        others = []
+        cb_t = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+
+        def cb(h, _):
+            if u32.IsWindowVisible(h) and title_of(h).startswith("save-fault ("):
+                others.append(h)
+            return True
+
+        u32.EnumWindows(cb_t(cb), 0)
+        ok &= check("edit 1c: Open the copy rebuilds the file before the save and opens it in a new window",
+                    len(copies) == 1 and copies[0].read_bytes() == original and len(others) == 1 and
+                    q(hwnd, "EDIT_STRIP") == 6, f"copies {copies}, windows {len(others)}")
+        for h in others:
+            post(h, WM_CLOSE, 0, 0, 0.5)
+        reloads = q(hwnd, "RELOADS")
+        if c > 0:
+            click(hwnd, c & 0xFFFF, c >> 16, 0.8)  # the real button (its command is CMD_RECOVERY_RESTORE)
+        ok &= check("edit 1c: Restore gives the original bytes back, reloads, and the strip and the recovery file go",
+                    doc.read_bytes() == original and q(hwnd, "EDIT_STRIP") == 0 and not recovery_files() and
+                    q(hwnd, "RELOADS") == reloads + 1 and q(hwnd, "SRC_HASH", 0) == src_hash(text),
+                    f'strip {q(hwnd, "EDIT_STRIP")}, recovery {recovery_files()}')
+    finally:
+        close_and_wait(proc, hwnd)
+    return ok
+
+
+def test_reading_touch():
+    """reading mode (§10.7): a file touched without a change is not reloaded, a changed one is; a file that is gone
+    for a moment is not replaced by the error page; a file locked while it changes is read once it is free"""
+    ok = True
+    doc = OUT / "touch.md"
+    text = "# Касание\n\nТекст не меняется, меняется только время файла.\n"
+    doc.write_bytes(text.encode("utf-8"))
+    proc, hwnd = launch(doc)
+    try:
+        reloads = q(hwnd, "RELOADS")
+        st = doc.stat()
+        os.utime(doc, (st.st_atime + 60, st.st_mtime + 60))
+        time.sleep(0.6)
+        ok &= check("edit 1c: a touched file with the same text is not reloaded", q(hwnd, "RELOADS") == reloads)
+        moved = OUT / "touch-moved.md"
+        doc.rename(moved)
+        time.sleep(0.6)
+        gone = q(hwnd, "RELOADS") == reloads and q(hwnd, "SRC_HASH", 0) == src_hash(text)
+        moved.rename(doc)
+        time.sleep(0.6)
+        ok &= check("edit 1c: a file gone for a moment is not replaced by the error page, nor reloaded when it is back",
+                    gone and q(hwnd, "RELOADS") == reloads, f'reloads {q(hwnd, "RELOADS")}')
+        text2 = text.replace("не меняется", "меняется")
+        doc.write_bytes(text2.encode("utf-8"))
+        ok &= check("edit 1c: a changed file is reloaded",
+                    wait_for(lambda: q(hwnd, "RELOADS") == reloads + 1 and q(hwnd, "SRC_HASH", 0) == src_hash(text2), 3.0))
+        # changed and locked at once: not read while locked, read (once) when free
+        k32.CreateFileW.restype = wt.HANDLE
+        k32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p, wt.DWORD, wt.DWORD, wt.HANDLE]
+        k32.CloseHandle.argtypes = [wt.HANDLE]
+        text3 = text2 + "\nЕщё строка.\n"
+        doc.write_bytes(text3.encode("utf-8"))
+        h = k32.CreateFileW(str(doc), 0x80000000, 0, None, 3, 0, None)  # GENERIC_READ, no sharing at all
+        time.sleep(1.0)
+        locked = q(hwnd, "RELOADS") == reloads + 1
+        k32.CloseHandle(h)
+        ok &= check("edit 1c: a file locked while it changed is read once it is free",
+                    locked and wait_for(lambda: q(hwnd, "RELOADS") == reloads + 2 and
+                                        q(hwnd, "SRC_HASH", 0) == src_hash(text3), 6.0),
+                    f'locked {locked}, reloads {q(hwnd, "RELOADS")}')
+    finally:
+        close_and_wait(proc, hwnd)
+    return ok
+
+
 def main():
     OUT.mkdir(exist_ok=True)
     reset_profile()
@@ -1890,7 +2248,8 @@ def main():
              ("columns", lambda: test_columns(doc)), ("settings", lambda: test_settings(doc)),
              ("placement", lambda: test_placement(doc)), ("map_selfcheck", test_map_selfcheck),
              ("copy_md_exact", test_copy_md_exact), ("image_race", test_image_race),
-             ("reload_during_update", test_reload_during_update)]
+             ("reload_during_update", test_reload_during_update), ("task_swap", test_task_swap),
+             ("splice_hook", test_splice_hook), ("save_fault", test_save_fault), ("reading_touch", test_reading_touch)]
     only = [n for n in os.environ.get("FASTMD_ONLY", "").split(",") if n]  # e.g. FASTMD_ONLY=update,settings
     for name, t in tests:
         if not only or name in only:

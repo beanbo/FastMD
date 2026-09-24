@@ -32,7 +32,7 @@ add_executable(FastMD WIN32
     src/highlight.cpp src/theme.cpp src/util.cpp
     src/find.cpp src/toc.cpp src/home.cpp src/store.cpp src/shell.cpp src/settings_ui.cpp src/strings.cpp
     src/copy.cpp src/drag.cpp src/crash.cpp src/update.cpp src/uia.cpp src/tasks.cpp
-    src/editcore.cpp
+    src/editcore.cpp src/editfile.cpp src/edit.cpp src/editbar.cpp
     third_party/md4c/md4c.c
     res/fastmd.rc)
 
@@ -174,7 +174,7 @@ endif()
 #   pwsh -File tests/edit/run.ps1
 option(FASTMD_TESTS "Build the edit-mode unit tests" ON)
 if(FASTMD_TESTS)
-    add_executable(fastmd-edit-tests tests/edit/edit_tests.cpp src/editcore.cpp src/parse.cpp src/html.cpp
+    add_executable(fastmd-edit-tests tests/edit/edit_tests.cpp src/editcore.cpp src/editfile.cpp src/parse.cpp src/html.cpp
         src/highlight.cpp src/util.cpp src/theme.cpp third_party/md4c/md4c.c)
     target_include_directories(fastmd-edit-tests PRIVATE ${CMAKE_BINARY_DIR}/generated src)
     target_compile_definitions(fastmd-edit-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX

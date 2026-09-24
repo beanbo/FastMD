@@ -99,7 +99,28 @@ std::wstring DirOf(const std::wstring& path) {
 }
 
 // ------------------------------------------------------------------------------------------------ files
+// Bytes that are not UTF-8 are read in the ANSI code page, and edit mode writes them back in the same one - so it is
+// resolved to its number once (CP_ACP could mean another page by the time of the write), FASTMD_ACP standing in for
+// the system's in tests (EDIT-MODE.md §10.1).
+static UINT g_acp = 0;
+
+UINT AnsiCodePage() {
+    if (!g_acp) {
+        wchar_t v[16];
+        DWORD n = GetEnvironmentVariableW(L"FASTMD_ACP", v, 16);
+        UINT cp = n && n < 16 ? (UINT)wcstoul(v, nullptr, 10) : 0;
+        g_acp = cp ? cp : GetACP();
+    }
+    return g_acp;
+}
+
+void SetAnsiCodePageForTests(UINT cp) { g_acp = cp; }
+
 void DecodeText(const char* p, int len, std::wstring& out, TextEncoding* enc) {
+    DecodeTextCp(p, len, 0, out, enc);  // 0: resolved only for bytes that are not UTF-8 (no env lookup at start-up)
+}
+
+void DecodeTextCp(const char* p, int len, UINT acp, std::wstring& out, TextEncoding* enc) {
     uint32_t header = 0;
     if (len >= 3 && (uint8_t)p[0] == 0xEF && (uint8_t)p[1] == 0xBB && (uint8_t)p[2] == 0xBF) {  // UTF-8 BOM
         p += 3;
@@ -114,19 +135,30 @@ void DecodeText(const char* p, int len, std::wstring& out, TextEncoding* enc) {
     int wn = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, p, len, nullptr, 0);
     UINT cp = CP_UTF8;
     DWORD flags = MB_ERR_INVALID_CHARS;
-    if (wn == 0 && len > 0) { cp = CP_ACP; flags = 0; wn = MultiByteToWideChar(cp, 0, p, len, nullptr, 0); }
+    if (wn == 0 && len > 0) { cp = acp ? acp : AnsiCodePage(); flags = 0; wn = MultiByteToWideChar(cp, 0, p, len, nullptr, 0); }
     out.resize(wn);
     out.resize(MultiByteToWideChar(cp, flags, p, len, out.data(), wn));
     if (enc) *enc = TextEncoding{header, cp};
 }
 
-bool ReadFileUtf16(const wchar_t* path, std::wstring& out, uint64_t* ticksRead, FILETIME* writeTime) {
+bool ReadFileUtf16(const wchar_t* path, std::wstring& out, uint64_t* ticksRead, FILETIME* writeTime, DiskBytes* info) {
     HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                            OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     if (f == INVALID_HANDLE_VALUE) return false;
     LARGE_INTEGER sz{};
-    GetFileSizeEx(f, &sz);
-    if (writeTime) GetFileTime(f, nullptr, nullptr, writeTime);
+    BY_HANDLE_FILE_INFORMATION fi{};
+    if (info && GetFileInformationByHandle(f, &fi)) {  // size, time and identity in one call, from this very handle
+        sz.QuadPart = (LONGLONG)(((uint64_t)fi.nFileSizeHigh << 32) | fi.nFileSizeLow);
+        if (writeTime) *writeTime = fi.ftLastWriteTime;
+        info->volume = fi.dwVolumeSerialNumber;
+        info->index = ((uint64_t)fi.nFileIndexHigh << 32) | fi.nFileIndexLow;
+        info->mtime = fi.ftLastWriteTime;
+        info->size = (uint64_t)sz.QuadPart;
+        info->attributes = fi.dwFileAttributes;
+    } else {
+        GetFileSizeEx(f, &sz);
+        if (writeTime) GetFileTime(f, nullptr, nullptr, writeTime);
+    }
     if (sz.QuadPart > (1ll << 30)) { CloseHandle(f); return false; }
     DWORD n = (DWORD)sz.QuadPart, got = 0;
     char* buf = (char*)VirtualAlloc(nullptr, n + 16, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -134,7 +166,7 @@ bool ReadFileUtf16(const wchar_t* path, std::wstring& out, uint64_t* ticksRead, 
     CloseHandle(f);
     if (!ok) { if (buf) VirtualFree(buf, 0, MEM_RELEASE); return false; }
     if (ticksRead) *ticksRead = NowTicks();
-    DecodeText(buf, (int)got, out, nullptr);
+    DecodeText(buf, (int)got, out, info ? &info->enc : nullptr);
     VirtualFree(buf, 0, MEM_RELEASE);
     return true;
 }

@@ -205,10 +205,18 @@ uint32_t AlertColor(uint8_t alert);  // 0xRRGGBB for the current palette
 void Highlight(Doc& d, const wchar_t* lang, uint32_t langLen, uint32_t textOff, uint32_t textLen, uint8_t& langId);
 
 // util.cpp
-// How a file's bytes became the UTF-16 text: a byte-order mark (header bytes) and a code page — CP_UTF8, CP_ACP for
-// bytes that are not UTF-8, or 1200 for UTF-16 LE. A ticked task box is written back in the same encoding.
+// How a file's bytes became the UTF-16 text: a byte-order mark (header bytes) and a code page — CP_UTF8, the ANSI code
+// page's number (AnsiCodePage()) for bytes that are not UTF-8, or 1200 for UTF-16 LE. Edits are written back in it.
 struct TextEncoding { uint32_t header = 0; UINT cp = CP_UTF8; };
+UINT AnsiCodePage();                    // GetACP(), or FASTMD_ACP (tests); read once
+void SetAnsiCodePageForTests(UINT cp);  // the unit tests switch it per case
 void DecodeText(const char* p, int len, std::wstring& out, TextEncoding* enc);
-bool ReadFileUtf16(const wchar_t* path, std::wstring& out, uint64_t* ticksRead, FILETIME* writeTime);
+// acp: the code page for bytes that are not UTF-8 (0 = AnsiCodePage())
+void DecodeTextCp(const char* p, int len, UINT acp, std::wstring& out, TextEncoding* enc);
+// what the read learned besides the text, all from the handle it read through (edit mode's baseline, §10.1)
+struct DiskBytes { TextEncoding enc; uint32_t volume = 0; uint64_t index = 0; FILETIME mtime{}; uint64_t size = 0;
+                   DWORD attributes = 0; };
+bool ReadFileUtf16(const wchar_t* path, std::wstring& out, uint64_t* ticksRead, FILETIME* writeTime,
+                   DiskBytes* info = nullptr);
 bool ReadFileBytes(const wchar_t* path, std::vector<uint8_t>& out, size_t maxBytes);
 bool GetFileStamp(const wchar_t* path, FILETIME* writeTime, uint64_t* size);

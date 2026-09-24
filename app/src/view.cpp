@@ -820,6 +820,7 @@ static void DrawChrome() {
     if (!g.path.empty()) DrawScrollbar();
     DrawSettingsButton();  // under the outline drawer: in a narrow window the drawer may cover it (and takes the click)
     DrawToc();
+    DrawEditChrome();      // a strip over the top of the document (it covers the buttons in the corners)
     if (g.findOpen) DrawFindBar();
     const std::wstring* pill = nullptr;
     if (!g.tip.empty()) pill = &g.tip;
@@ -892,7 +893,7 @@ FrameKey CurrentKey() {
     // things drawn over the text: they would have to be repaired pixel by pixel, so those frames are drawn in full
     bool pill = !g.tip.empty() || (g.hoverLink >= 0 && !g.selecting) || g.focusLink >= 0;
     bool toast = !g.toast.empty() && GetTickCount() < g.toastUntil;
-    k.overText = g.findOpen || TocOverlayOpen() || pill || toast;
+    k.overText = g.findOpen || TocOverlayOpen() || pill || toast || g.stripH > 0;
     return k;
 }
 

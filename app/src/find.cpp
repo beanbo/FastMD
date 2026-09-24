@@ -289,11 +289,13 @@ float CountAreaW() {  // fixed width: the text box does not move while the count
 }  // namespace
 
 // ------------------------------------------------------------------------------------------------ matching
-void FindUpdate(bool keepCurrent) {
+// The matches of the query in the current text. true = there are some and g.curMatch is set: the one at or after the
+// previous current match (keepCurrent), else the first at or below the top of the viewport.
+static bool FindMatches(bool keepCurrent) {
     uint32_t prev = (g.curMatch >= 0 && (size_t)g.curMatch < g.matches.size()) ? g.matches[g.curMatch] : UINT32_MAX;
     g.matches.clear();
     g.curMatch = -1;
-    if (g.findQuery.empty() || g.doc.text.empty()) { Invalidate(); return; }
+    if (g.findQuery.empty() || g.doc.text.empty()) return false;
     const std::wstring* hay = &g.doc.text;
     std::wstring needle = g.findQuery;
     if (!g.cfg.findCase) {
@@ -312,7 +314,7 @@ void FindUpdate(bool keepCurrent) {
         pos += needle.size();
         if (g.matches.size() >= 100000) break;
     }
-    if (g.matches.empty()) { Invalidate(); return; }
+    if (g.matches.empty()) return false;
     if (keepCurrent && prev != UINT32_MAX) {
         auto it = std::lower_bound(g.matches.begin(), g.matches.end(), prev);
         g.curMatch = it == g.matches.end() ? 0 : (int)(it - g.matches.begin());
@@ -321,7 +323,18 @@ void FindUpdate(bool keepCurrent) {
         auto it = std::lower_bound(g.matches.begin(), g.matches.end(), top);
         g.curMatch = it == g.matches.end() ? 0 : (int)(it - g.matches.begin());
     }
-    FindStep(0);
+    return true;
+}
+
+void FindUpdate(bool keepCurrent) {
+    if (FindMatches(keepCurrent)) FindStep(0);
+    else Invalidate();
+}
+
+// An edit changed the text: the marks follow it, but the view stays where the reader is working (§12.6).
+void FindRefresh() {
+    FindMatches(true);
+    Invalidate();
 }
 
 void FindStep(int dir) {

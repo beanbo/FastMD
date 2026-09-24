@@ -266,7 +266,6 @@ static int FirstVisibleImage() {  // automation: the image commands without a co
 }
 
 void Command(UINT id, UINT arg) {
-    (void)arg;  // the edit commands that take one (a table's size, a diagram template) arrive with their phases
     int li = g.ctxLink >= 0 ? g.ctxLink : g.focusLink;
     switch (id) {
     case CMD_COPY: CopySelection(); break;
@@ -328,6 +327,7 @@ void Command(UINT id, UINT arg) {
     case CMD_FIND_CLOSE: FindClose(); break;
     case CMD_LINK_NEXT: FocusLinkStep(1); break;
     case CMD_LINK_PREV: FocusLinkStep(-1); break;
+    case CMD_RECOVERY_OPEN: case CMD_RECOVERY_RESTORE: case CMD_RECOVERY_DELETE: EditCommand(id, arg); break;
     }
 }
 
@@ -579,8 +579,16 @@ static void OnMouseMove(int mx, int my) {
     }
     TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, g.hwnd, 0};
     TrackMouseEvent(&tme);
-    // overlays first: find bar, outline panel, outline button, settings button
+    // overlays first: find bar, the strip over the document, outline panel, outline button, settings button
     int fpart = FindPartAt(x, y);
+    if (fpart == FP_NONE && StripMouse(x, y, false)) {
+        if (g.hoverLink >= 0 || g.hoverTask >= 0 || g.hoverHeading >= 0 || g.hoverCode >= 0 || !g.tip.empty()) {
+            g.hoverLink = g.hoverTask = g.hoverHeading = g.hoverCode = -1;
+            g.tip.clear();
+            Invalidate();
+        }
+        return;
+    }
     int tocItem = -1;
     bool inToc = fpart == FP_NONE && TocHit(x, y, &tocItem);
     bool tocBtn = fpart == FP_NONE && !inToc && TocButtonHit(x, y);
@@ -641,6 +649,7 @@ static void OnLButtonDown(int mx, int my, WPARAM keys) {
     g.downTask = -1;  // a press whose button-up never came (capture lost) must not tick a box later
     int fpart = FindPartAt(x, y);
     if (fpart != FP_NONE) { FindClick(fpart); return; }
+    if (StripMouse(x, y, true)) return;  // a strip's button, or the strip itself over the document
     int item;
     if (TocHit(x, y, &item)) { TocClick(item); return; }
     if (TocButtonHit(x, y)) { TocSetOpen(true); return; }
@@ -837,8 +846,7 @@ bool KeyCommand(WPARAM vk, bool ctrl, bool shift, bool alt) {
     return false;
 }
 
-static bool OnKeyDown(WPARAM vk) {
-    bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0, alt = GetKeyState(VK_MENU) < 0;
+static bool OnKeyDown(WPARAM vk, bool ctrl, bool shift, bool alt) {
     if (g.path.empty() && !ctrl && !alt && HomeKey(vk)) return true;
     if (shift && !alt && KeySelect((unsigned)vk, ctrl, shift)) return true;  // Shift+arrows select (plan 3.3)
     if (!ctrl && !alt) {
@@ -872,6 +880,8 @@ static bool OnKeyDown(WPARAM vk) {
 static LRESULT Query(WPARAM q, LPARAM lp) {
     float s = Scale();
     size_t n = g.doc.blocks.size();
+    LRESULT edit = 0;
+    if (EditQuery((UINT)q, lp, &edit)) return edit;
     switch (q) {
     case Q_SCROLLY: return std::lround(g.scrollY);
     case Q_TARGETY: return std::lround(g.targetY);
@@ -965,8 +975,7 @@ static LRESULT Query(WPARAM q, LPARAM lp) {
     case Q_BLOCK_COUNT: return (LRESULT)n;
     case Q_RENDERS: return (LRESULT)g.rendersStarted.load();
     case Q_MAP_SELFCHECK: {  // edit mode's map (EDIT-MODE.md §4.5), on a map parse of the whole source made just for this
-        if (lp == 1) return 0;  // failures counted after edit swaps under FASTMD_EDIT_SELFCHECK: there are none yet
-        if (g.path.empty() || g.loadFailed) return -1;
+        if (g.path.empty() || g.loadFailed) return -1;  // (lp 1, the failures after swaps, is edit.cpp's)
         Doc m;
         m.baseDir = g.doc.baseDir;
         ParseOptions opt;
@@ -1031,7 +1040,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return msg == WM_MOUSEHWHEEL ? TRUE : 0;
     case WM_KEYDOWN:
         if (!g.ready || g.firstFrame) return 0;
-        if (OnKeyDown(wp)) return 0;
+        if (OnKeyDown(wp, GetKeyState(VK_CONTROL) < 0, GetKeyState(VK_SHIFT) < 0, GetKeyState(VK_MENU) < 0)) return 0;
         break;
     case WM_SYSKEYDOWN: {
         if (!g.ready || g.firstFrame) break;
@@ -1107,6 +1116,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == TIMER_HBAR) { KillTimer(hwnd, TIMER_HBAR); Invalidate(); }
         else if (wp == TIMER_RELOAD) { KillTimer(hwnd, TIMER_RELOAD); OnFileChanged(); }
         else if (wp == TIMER_UPDATE) UpdateCheckAsync();  // hourly: asks GitHub only once a day has passed
+        else if (wp >= TIMER_CARET && wp <= TIMER_EDIT_UI) EditTimer(wp);
         else if (wp == TIMER_AUTOSCROLL && g.selecting) {
             POINT p;
             GetCursorPos(&p);
@@ -1143,6 +1153,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP_FILECHANGED: SetTimer(hwnd, TIMER_RELOAD, 120, nullptr); return 0;  // debounce editor save bursts
     case WM_APP_POSITIONS: OnPositionsLoaded((std::vector<PosEntry>*)lp); return 0;
     case WM_APP_FINDINPUT: if (g.ready) FindOnInput(wp, lp); return 0;
+    case WM_COPYDATA: return EditCopyData((const COPYDATASTRUCT*)lp);  // FASTMD_TEST_HOOKS only
+    case WM_APP_TESTKEY:  // FASTMD_TEST_HOOKS: a key with the modifiers it names, whatever the keyboard's state (T5)
+        if (EditTestHooks() && g.ready && !g.firstFrame) OnKeyDown(wp, (lp & 1) != 0, (lp & 2) != 0, (lp & 4) != 0);
+        return 0;
     case WM_CLOSE:
         g.closing = true;
         if (HWND s = SettingsHwnd()) DestroyWindow(s);

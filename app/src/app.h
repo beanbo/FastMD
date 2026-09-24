@@ -9,10 +9,14 @@
 //   shell.cpp       — links, clipboard, editor / Explorer / dialogs, .md association
 //   settings_ui.cpp — settings window and the gear button that opens it
 //   tasks.cpp       — task lists: a click on a box ticks the item in the file itself
+//   edit.cpp        — edit mode's glue: the model swap after a change, saving, recovery, test hooks (docs/EDIT-MODE.md)
+//   editbar.cpp     — edit mode's chrome on the canvas: the strip (the toolbar follows)
 //   strings.cpp     — UI strings (ru / en)
 //   window.cpp      — Win32 window, input, commands, menus, wWinMain
 #pragma once
 #include "canvas.h"
+#include "editcore.h"
+#include "editfile.h"
 #include "layout.h"
 #include "strings.h"
 #include <unordered_map>
@@ -201,6 +205,13 @@ struct App {
     bool fullPending = false, loadFailed = false;
     bool scalingImages = false;    // a scaler thread is making display-size copies right now
     bool editing = false;          // edit mode (docs/EDIT-MODE.md; entered from Phase 2a on)
+    int editModal = 0;             // modal depth (§10.10): no model swap inside a menu, a dialog or a print job
+    uint32_t editSerial = 0;       // bumped by every model swap after an edit (edit.cpp)
+    uint32_t reloads = 0, saves = 0;  // loads after start-up (Q_RELOADS), successful saves (Q_SAVES)
+    std::wstring eol = L"\n";      // the line end the editor writes where a line has none (§7.2)
+    DiskState disk;                // what the disk holds (§10.2): encoding and identity from the load, the rest once
+                                   // something is to be written
+    float stripH = 0;              // the strip over the top of the document (editbar.cpp), 0 = none
     std::unordered_map<std::wstring, RenderEntry> renders;  // the render table (loader.cpp), UI thread only
     std::atomic<uint32_t> loadGen{0};         // bumped by every load: queued picture jobs of the old document are skipped
     std::atomic<uint32_t> rendersStarted{0};  // renders and decodes the workers started (Q_RENDERS)
@@ -393,6 +404,7 @@ enum FindInputEvent : WPARAM { FI_TEXT = 1, FI_KEY, FI_FOCUS };
 void FindOpen();
 void FindClose();
 void FindUpdate(bool keepCurrent);
+void FindRefresh();                  // the text changed under the matches: find them again without scrolling
 void FindStep(int dir);
 void FindToggleCase();
 void FindToggleWord();
@@ -456,6 +468,10 @@ void OnScaledImages(std::vector<ScaledImage>* list);
 void StartMeasure();
 void JoinWorkers();                  // open / reload: stop and wait for every worker that reads the document
 void JoinDocReaders();               // an edit swap: stop the measure jobs and wait for them only (§5.1)
+void MeasureUnknown();               // measure only the blocks whose height is still a guess (after an edit swap)
+// §5.5 step 4: what the render table (and the old model) know about the pictures of a new model, put on it before it
+// is installed; a formula whose source is being typed in [editBeg, newEnd) keeps the old one's picture meanwhile
+void CarryRenders(const Doc& oldD, Doc& nd, uint32_t editBeg, uint32_t oldEnd, uint32_t newEnd);
 void StartWatcher();
 void StopWatcher();
 void OnFileChanged();                // the watcher saw the file change: reload unless the disk holds what is shown
@@ -546,6 +562,35 @@ std::wstring UrlDecode(const std::wstring& s);
 
 // ------------------------------------------------------------------------------------------------ tasks.cpp
 bool ToggleTask(uint32_t block);     // tick or untick a task list item in the file, then on screen
+
+// ------------------------------------------------------------------------------------------------ edit.cpp
+// The model swap (§5.5): g.src changed in [at, at + oldLen) → [at, at + newLen) (at = UINT32_MAX: nothing changed).
+void EditReparse(uint32_t at = UINT32_MAX, uint32_t oldLen = 0, uint32_t newLen = 0);
+bool EditSplice(uint32_t at, uint32_t len, std::wstring text);  // the one way g.src changes (§7.1); false = refused
+bool EditDirty();                    // g.src != the baseline's text (compared, not flagged)
+enum BaselineResult { BL_OK, BL_CHANGED, BL_UNREADABLE, BL_REFUSED };
+// Takes the baseline from the disk when there is none (§10.1): the file must hold exactly the text on screen, in bytes
+// that can be written back byte for byte. BL_CHANGED: it holds something else; BL_UNREADABLE: *st says why.
+BaselineResult EditBaseline(SaveState* st);
+SaveState EditSave(bool flushPoint); // g.src into the file (§10.3); flushPoint: leave, close, Ctrl+S
+void EditPushStep(EditStep step);    // an undo step for a change made outside edit mode, if a history exists
+void EditOnLoad();                   // a document was (re)loaded: a new session
+void EditAfterOpen();                // after the first frame of an open: an interrupted save's recovery file?
+void EditCommand(UINT id, UINT arg); // the recovery strip's commands
+LRESULT EditCopyData(const COPYDATASTRUCT* cd);  // FASTMD_TEST_HOOKS: splice / save
+bool EditTestHooks();                // FASTMD_TEST_HOOKS=1 (read once)
+void EditTimer(UINT_PTR id);
+bool EditQuery(UINT q, LPARAM lp, LRESULT* out);  // edit mode's queries; false = not one of them
+
+// ------------------------------------------------------------------------------------------------ editbar.cpp
+enum StripId : int { STRIP_NONE, STRIP_CONFLICT, STRIP_ENCODING, STRIP_LEAVE, STRIP_READONLY, STRIP_MISSING,
+                     STRIP_RECOVERY, STRIP_OTHER_WINDOW };  // Q_EDIT_STRIP
+void StripShow(int kind);
+void StripHide(int kind);            // only if that one is shown
+int StripKind();
+LRESULT StripButtonCenter(UINT cmd); // Q_EDIT_TOOL: client px MAKELONG(x, y), -1 = not shown
+bool StripMouse(float x, float y, bool click);  // true = the point is on the strip (a click runs its button)
+void DrawEditChrome();               // view.cpp, over the document and under the find bar
 
 // ------------------------------------------------------------------------------------------------ settings_ui.cpp
 void SettingsOpen();

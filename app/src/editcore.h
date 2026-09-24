@@ -6,8 +6,8 @@
 // fastmd-edit-tests (tests/edit) and the fuzzer drive it without a window.
 //
 // Phase 1a implements the map queries (CaretStop, SrcOfText, TextOfSrc), MapSelfCheck, DiffBlocks, ContPrefix,
-// BlankPrefix and LineEol. The operations and the undo stack are declared in their final shape and arrive with the
-// phases that use them (1c, 2a-3b).
+// BlankPrefix and LineEol; phase 1c the undo stack and the splice helpers. The operations are declared in their final
+// shape and arrive with the phases that use them (2a-3b).
 #pragma once
 #include "doc.h"
 
@@ -101,11 +101,33 @@ EditResult OpTaskToggle(const EditCtx&, const EditState&, int task);
 EditResult OpAtomSource(const EditCtx&, const EditState&, int atom, int field, std::wstring_view text);
 
 // ---- undo (§11)
-struct EditStep { std::vector<Splice> splices; EditState before, after; EditKind kind; uint64_t t0, t1; };
-class UndoStack { public: void Push(EditStep, uint64_t nowMs); void BreakCoalescing(); const EditStep* PeekUndo() const;
-                  const EditStep* PeekRedo() const; void DidUndo(); void DidRedo(); void Clear();
-                  size_t Depth() const; size_t RedoDepth() const; };
-bool ApplySplices(std::wstring& src, const std::vector<Splice>&, bool inverse, std::string* why);  // verifies first
+struct EditStep { std::vector<Splice> splices; EditState before, after; EditKind kind = EK_OTHER; uint64_t t0 = 0, t1 = 0; };
+// The history of one document session. A step is merged into the one before it while the same kind of typing or
+// deleting goes on at the caret it left, less than 1.5 s apart and with nothing in between (BreakCoalescing); a word
+// typed after a blank starts a step of its own. Time comes in from the caller (the tests inject it).
+class UndoStack {
+public:
+    void Push(EditStep, uint64_t nowMs);
+    void BreakCoalescing() { broken_ = true; }
+    const EditStep* PeekUndo() const { return undo_.empty() ? nullptr : &undo_.back(); }
+    const EditStep* PeekRedo() const { return redo_.empty() ? nullptr : &redo_.back(); }
+    void DidUndo();                    // the top step was undone: it moves to the redo stack
+    void DidRedo();
+    void Clear();
+    size_t Depth() const { return undo_.size(); }
+    size_t RedoDepth() const { return redo_.size(); }
+    static constexpr size_t kMaxSteps = 1000, kMaxBytes = 32u << 20;  // the oldest steps go beyond either
+private:
+    std::vector<EditStep> undo_, redo_;
+    size_t bytes_ = 0;                 // text held by the undo and redo steps
+    bool broken_ = true;
+    void Trim();
+};
+// Applies splices in order (inverse: their inverses in reverse order), each only if the text it replaces is there; a
+// mismatch changes nothing and says where (the undo history no longer fits the text, §11).
+bool ApplySplices(std::wstring& src, const std::vector<Splice>&, bool inverse, std::string* why);
+// A splice may not cut a surrogate pair or a CRLF in two (§7.1).
+bool SpliceSplits(const std::wstring& src, uint32_t at, uint32_t len);
 
 // ---- keyboard (§12.5)
 unsigned EditChord(unsigned vk, bool ctrl, bool shift, bool alt);  // → CMD id or 0; ctrl && alt → always 0
