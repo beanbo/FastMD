@@ -86,6 +86,8 @@ gdi.CreateCompatibleBitmap.argtypes = [wt.HDC, ctypes.c_int, ctypes.c_int]
 gdi.SelectObject.restype = wt.HGDIOBJ
 gdi.SelectObject.argtypes = [wt.HDC, wt.HGDIOBJ]
 u32.PrintWindow.argtypes = [wt.HWND, wt.HDC, wt.UINT]
+gdi.BitBlt.argtypes = [wt.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wt.HDC, ctypes.c_int, ctypes.c_int,
+                       wt.DWORD]
 u32.ReleaseDC.argtypes = [wt.HWND, wt.HDC]
 gdi.GetDIBits.argtypes = [wt.HDC, wt.HBITMAP, wt.UINT, wt.UINT, ctypes.c_void_p, ctypes.c_void_p, wt.UINT]
 gdi.DeleteObject.argtypes = [wt.HGDIOBJ]
@@ -131,15 +133,21 @@ def title_of(h):
     return buf.value
 
 
-def shot(hwnd, name):
+def shot(hwnd, name, paint=True):
+    """the client area as an image, saved to tests/out. paint=True: PrintWindow, which makes the app render a whole
+    frame of its own; paint=False: the pixels the window shows now, copied from its DC - the only way to see a frame
+    the app produced by scrolling (a partial frame), since PrintWindow always gets a full one"""
     r = wt.RECT()
     u32.GetClientRect(hwnd, ctypes.byref(r))
     w, h = r.right, r.bottom
-    sdc = u32.GetDC(None)
+    sdc = u32.GetDC(None if paint else hwnd)
     mdc = gdi.CreateCompatibleDC(sdc)
     bmp = gdi.CreateCompatibleBitmap(sdc, w, h)
     old = gdi.SelectObject(mdc, bmp)
-    u32.PrintWindow(hwnd, mdc, 3)  # PW_CLIENTONLY | PW_RENDERFULLCONTENT
+    if paint:
+        u32.PrintWindow(hwnd, mdc, 3)  # PW_CLIENTONLY | PW_RENDERFULLCONTENT
+    else:
+        gdi.BitBlt(mdc, 0, 0, w, h, sdc, 0, 0, 0x00CC0020)  # SRCCOPY
     gdi.SelectObject(mdc, old)
 
     class BIH(ctypes.Structure):
@@ -153,7 +161,7 @@ def shot(hwnd, name):
     gdi.GetDIBits(mdc, bmp, 0, h, buf, ctypes.byref(bi), 0)
     gdi.DeleteObject(bmp)
     gdi.DeleteDC(mdc)
-    u32.ReleaseDC(None, sdc)
+    u32.ReleaseDC(None if paint else hwnd, sdc)
     img = Image.frombuffer("RGB", (w, h), buf, "raw", "BGRX", 0, 1)
     OUT.mkdir(exist_ok=True)
     img.save(OUT / f"{name}.png")
@@ -1503,19 +1511,18 @@ def test_scroll_frames():
     proc, hwnd = launch(MEDIUM, size="--size=1100x800")
     try:
         for name, notches in (("down", -5), ("up", 2), ("far", -40)):
+            q(hwnd, "FRAME_STATS", 0)
             wheel(hwnd, 500, 400, notches, wait=1.2)
             y = q(hwnd, "SCROLLY")
-            partial = shot(hwnd, f"24-scroll-{name}")
-            q(hwnd, "FULL_REDRAW")
-            time.sleep(0.5)
-            full = shot(hwnd, f"24-scroll-{name}-full")
+            partial = shot(hwnd, f"24-scroll-{name}", paint=False)  # what the scrolled frames left on screen
+            frames = q(hwnd, "FRAME_STATS", 0)
+            full = shot(hwnd, f"24-scroll-{name}-full")               # PrintWindow: a full frame drawn now
             ok &= check(f"scrolling {name}: the partial frame matches a full redraw",
-                        q(hwnd, "SCROLLY") == y and same_pixels(partial, full), f"scrollY={y}")
+                        frames > 0 and q(hwnd, "SCROLLY") == y and same_pixels(partial, full),
+                        f"scrollY={y}, partial frames {frames}")
         cmd(hwnd, "TOC", 0.6)
         wheel(hwnd, 700, 400, -4, wait=1.2)
-        partial = shot(hwnd, "25-scroll-outline")
-        q(hwnd, "FULL_REDRAW")
-        time.sleep(0.5)
+        partial = shot(hwnd, "25-scroll-outline", paint=False)
         ok &= check("the same with the outline open", same_pixels(partial, shot(hwnd, "25-scroll-outline-full")))
         cmd(hwnd, "TOC", 0.4)
     finally:
@@ -2395,15 +2402,43 @@ def launch_edit(doc, extra=None, steady=True, size="--size=1000x800"):
 
 
 SELFCHECK = []  # windows whose map failed its self-check after a swap (FASTMD_EDIT_SELFCHECK), checked by main()
+CLOSE_PROBLEMS = []  # edit windows that asked a question at close, hung, crashed or exited with an error (main())
+
+
+def note_selfcheck(hwnd):
+    """the map's self-check failures of a window about to be closed or killed some other way than close_edit"""
+    fails = q(hwnd, "MAP_SELFCHECK", 1)
+    if fails:
+        SELFCHECK.append(f"{title_of(hwnd)}: {fails}")
 
 
 def close_edit(proc, hwnd):
-    """the failures of the map's self-check after the swaps are noted; then the window closes"""
-    if proc.poll() is None:
-        fails = q(hwnd, "MAP_SELFCHECK", 1)
-        if fails:
-            SELFCHECK.append(f"{title_of(hwnd)}: {fails}")
-    close_and_wait(proc, hwnd)
+    """the failures of the map's self-check after the swaps are noted; then the window closes - without a question
+    (every edit test leaves its window with nothing unsaved), within 5 s and with exit code 0: anything else is noted
+    for main() (§13.6: an unexpected prompt fails the test instead of hanging it)"""
+    if proc.poll() is not None:
+        return
+    note_selfcheck(hwnd)
+    name, prompts = title_of(hwnd), q(hwnd, "LAST_PROMPT", 1)
+    post(hwnd, WM_CLOSE, 0, 0, 0.1)
+    try:
+        proc.wait(5)
+    except subprocess.TimeoutExpired:
+        asked = q(hwnd, "LAST_PROMPT", 1) - prompts
+        CLOSE_PROBLEMS.append(f"{name}: still open 5 s after WM_CLOSE" + (f" ({asked} question(s) asked)" if asked else ""))
+        proc.kill()
+        proc.wait(5)
+        return
+    if proc.returncode != 0:
+        CLOSE_PROBLEMS.append(f"{name}: exit code {proc.returncode:#x}")
+
+
+def shot_dark(hwnd, name, back="THEME_LIGHT"):
+    """the same view in the dark theme too (§15.1 item 9: every new visual in light and dark)"""
+    cmd(hwnd, "THEME_DARK", 0.6)
+    img = shot(hwnd, name)
+    cmd(hwnd, back, 0.5)
+    return img
 
 
 def enter_edit(hwnd, block, dx=2, dy=12, wait=True):
@@ -2448,10 +2483,19 @@ def test_edit_enter_leave():
     proc, hwnd = launch_edit(doc)
     try:
         para = EDIT_DOC.index("Первый")
-        entered = enter_edit(hwnd, 1, dx=1)
-        ok &= check("edit 2a: a double click enters edit mode at the press point, and the bar slides down",
-                    entered and q(hwnd, "EDIT_BAR") == 100 and q(hwnd, "EDIT_CARET_SRC") == para,
-                    f'editing {q(hwnd, "EDITING")}, bar {q(hwnd, "EDIT_BAR")}, caret {q(hwnd, "EDIT_CARET_SRC")} (want {para})')
+        # the press point in the middle of a word: reading mode's hit test says which character that is (T8)
+        x0, y1 = q(hwnd, "TEXT_LEFT"), q(hwnd, "BLOCK_Y", 1) + 12
+        click(hwnd, x0 + 1, y1, 0.3)
+        pos0 = q(hwnd, "SEL_FOCUS")
+        click(hwnd, x0 + 75, y1, 0.3)
+        pos1 = q(hwnd, "SEL_FOCUS")
+        time.sleep(0.7)  # (not a double click with the last one)
+        dbl_click(hwnd, x0 + 75, y1, 0.2)
+        entered = wait_for(lambda: q(hwnd, "EDITING") == 1 and q(hwnd, "EDIT_BAR") == 100, 3.0, 0.05)
+        ok &= check("edit 2a: a double click enters edit mode at the press point (mid-word), and the bar slides down",
+                    entered and pos1 > pos0 and q(hwnd, "EDIT_CARET_SRC") == para + pos1 - pos0,
+                    f'editing {q(hwnd, "EDITING")}, bar {q(hwnd, "EDIT_BAR")}, caret {q(hwnd, "EDIT_CARET_SRC")} '
+                    f'(want {para} + {pos1 - pos0})')
         shot(hwnd, "90-edit-bar-light")
         c = q(hwnd, "EDIT_TOOL", CMD["EDIT_EXIT"])
         if c > 0:
@@ -2465,6 +2509,7 @@ def test_edit_enter_leave():
         time.sleep(1.1)  # past the Esc guard
         pen = q(hwnd, "EDIT_TOOL", CMD["EDIT_TOGGLE"])
         img = shot(hwnd, "91-edit-pencil")
+        shot_dark(hwnd, "91-edit-pencil-dark")
         if pen > 0:
             click(hwnd, pen & 0xFFFF, pen >> 16, 0.5)
         ok &= check("edit 2a: the pencil (left of the gear) enters edit mode", pen > 0 and q(hwnd, "EDITING") == 1,
@@ -2496,15 +2541,46 @@ def test_edit_enter_leave():
         ok &= check("edit 2a: a triple click selects the paragraph in reading mode, nothing saved",
                     q(hwnd, "EDITING") == 0 and q(hwnd, "SAVES") == 0 and abs(f - a) >= len("Последний абзац.") and
                     doc.read_bytes() == original, f"editing {q(hwnd, 'EDITING')}, selection {a}..{f}")
-        # dark theme: the bar in its dark look
+        # At the top of a document the bar slides the page down under the pointer: a triple click at a normal pace
+        # (120 ms) must still select the paragraph that was clicked, and on a fresh profile the entry's hint is not
+        # used up by an entry that was taken back (review of 2a: UX)
+        x, y = q(hwnd, "TEXT_LEFT") + 30, q(hwnd, "BLOCK_Y", 2) + 12  # «Второй абзац…»
+        for k in range(3):
+            post(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp(x, y), 0.01)
+            post(hwnd, WM_LBUTTONUP, 0, lp(x, y), 0.01)
+        want = (q(hwnd, "SEL_ANCHOR"), q(hwnd, "SEL_FOCUS"))  # (the pace the app's own geometry cannot fool)
+        time.sleep(1.1)
+        del_reg("EditHintShown")
+        for k in range(3):
+            post(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp(x, y), 0.01)
+            post(hwnd, WM_LBUTTONUP, 0, lp(x, y), 0.11)
+        time.sleep(0.8)
+        got = (q(hwnd, "SEL_ANCHOR"), q(hwnd, "SEL_FOCUS"))
+        ok &= check("edit 2a review: a triple click at 120 ms selects the clicked paragraph; the hint stays for the next entry",
+                    q(hwnd, "EDITING") == 0 and got == want and want[0] != want[1] and reg_value("EditHintShown") is None,
+                    f"selection {got}, want {want}, hint shown {reg_value('EditHintShown')}")
+        # dark theme: the bar in its dark look (its fill, not the page's, T7)
         cmd(hwnd, "THEME_DARK", 0.5)
         time.sleep(1.1)
         post(hwnd, WM_KEYDOWN, VK["f2"], 0, 0.6)
         img = shot(hwnd, "92-edit-bar-dark")
-        ok &= check("edit 2a: the bar in the dark theme", q(hwnd, "EDITING") == 1 and sum(img.getpixel((500, 20))) < 200,
-                    str(img.getpixel((500, 20))))
+        bar = img.getpixel((500, 20))
+        ok &= check("edit 2a: the bar in the dark theme", q(hwnd, "EDITING") == 1 and
+                    all(abs(bar[i] - (0x1c, 0x21, 0x29)[i]) <= 6 for i in range(3)), f"{bar}, page {img.getpixel((500, 700))}")
+        ok &= check("edit 2a review: the first entry ever shows its hint once the double click can no longer be a triple one",
+                    wait_for(lambda: reg_value("EditHintShown") == 1, 2.0), f"{reg_value('EditHintShown')}")
         post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
         cmd(hwnd, "THEME_LIGHT", 0.4)
+        # a double click on a link: its first click opened it; the second is a click on what is there now (§2.1)
+        time.sleep(1.1)
+        img = shot(hwnd, "92b-edit-link")
+        pt = find_color(img, ACCENT, (100, q(hwnd, "BLOCK_Y", 2), 900, q(hwnd, "BLOCK_Y", 2) + 30))
+        if pt:
+            dbl_click(hwnd, pt[0] + 3, pt[1] + 2, 1.0)
+        ok &= check("edit 2a review: a double click on a link opens it and never enters edit mode",
+                    pt and title_of(hwnd).startswith("other.md") and q(hwnd, "EDITING") == 0, f"link at {pt}, title "
+                    f"{title_of(hwnd)!r}, editing {q(hwnd, 'EDITING')}")
+        cmd(hwnd, "BACK", 1.0)
     finally:
         close_edit(proc, hwnd)
     # refusals, each with a toast (UX-22)
@@ -2514,11 +2590,17 @@ def test_edit_enter_leave():
         ok &= check("edit 2a: F2 on the start screen does nothing", proc.poll() is None and q(hwnd, "EDITING") == 0)
     finally:
         close_and_wait(proc, hwnd)
-    cases = [("edit-missing.md", None, "load-failed"),
-             ("edit-utf16be.md", b"\xfe\xff" + "# BE\n\nтекст\n".encode("utf-16-be"), "UTF-16 BE"),
-             ("edit-nul.md", b"# NUL\n\nabc\x00def\n", "NUL bytes"),
-             ("edit-1251.md", "# Кодировка\n\nТекст в 1251.\n".encode("cp1251"), "1251 under FASTMD_ACP=65001")]
-    for name, data, what in cases:
+    # (the toast is told by the hash of its text, Q_LAST_PROMPT lp 2: each refusal says its own reason, T12)
+    cases = [("edit-missing.md", None, "load-failed", "Файл не загрузился — править нечего",
+              "The file did not load — nothing to edit"),
+             ("edit-utf16be.md", b"\xfe\xff" + "# BE\n\nтекст\n".encode("utf-16-be"), "UTF-16 BE",
+              "UTF-16 BE не поддерживается для правки", "UTF-16 BE files cannot be edited"),
+             ("edit-nul.md", b"# NUL\n\nabc\x00def\n", "NUL bytes", "Файл похож на двоичный — правка отключена",
+              "The file looks binary — editing is off"),
+             ("edit-1251.md", "# Кодировка\n\nТекст в 1251.\n".encode("cp1251"), "1251 under FASTMD_ACP=65001",
+              "Кодировку файла нельзя сохранить без потерь — правка отключена",
+              "This file's encoding cannot be saved without loss — editing is off")]
+    for name, data, what, ru, en in cases:
         p = OUT / name
         if data is None:
             if p.exists():
@@ -2529,8 +2611,10 @@ def test_edit_enter_leave():
         try:
             post(hwnd, WM_KEYDOWN, VK["f2"], 0, 0.15)
             img = shot(hwnd, f"93-edit-refused-{name[5:-3]}")
+            said = q(hwnd, "LAST_PROMPT", 2) & 0xFFFFFFFF
             ok &= check(f"edit 2a: {what}: edit mode is refused, and a toast says why",
-                        q(hwnd, "EDITING") == 0 and toast_shown(img, hwnd) and (data is None or p.read_bytes() == data))
+                        q(hwnd, "EDITING") == 0 and toast_shown(img, hwnd) and (data is None or p.read_bytes() == data) and
+                        said == src_hash(en if q(hwnd, "LANG") == 1 else ru), f"toast hash {said:#x}")
         finally:
             close_and_wait(proc, hwnd)
     return ok
@@ -2824,7 +2908,8 @@ def test_edit_conflict():
     doc.write_bytes(EDIT_DOC.encode("utf-8"))
     for f in (DATA / "recovery").glob("*.theirs") if (DATA / "recovery").exists() else []:
         f.unlink()
-    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    # (the test hooks keep a posted hover: the strip's cut text is looked at in its tooltip)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_TEST_HOOKS": "1"})
     try:
         enter_edit(hwnd, 1, dx=1)
         type_text(hwnd, "наше ", 0.2)
@@ -2833,6 +2918,18 @@ def test_edit_conflict():
         doc.write_bytes(theirs.encode("utf-8"))
         conflict = wait_for(lambda: q(hwnd, "EDIT_CONFLICT") == 1, 3.0)
         img = shot(hwnd, "96-edit-conflict-strip")
+        shot_dark(hwnd, "96-edit-conflict-strip-dark")
+        # at 1000 px the strip's text is cut before the sizes: the tooltip pill has it whole (review of 2a: UX)
+        r = wt.RECT()
+        u32.GetClientRect(hwnd, ctypes.byref(r))
+        pill = (20, r.bottom - 50, 280, r.bottom - 25)  # (the left end of the pill, clear of a toast in the middle)
+        before = shot(hwnd, "96-edit-conflict-tip-before")
+        post(hwnd, WM_MOUSEMOVE, 0, lp(150, 44 + 18), 0.4)
+        tip = shot(hwnd, "96-edit-conflict-tip")
+        post(hwnd, WM_MOUSEMOVE, 0, lp(450, 500), 0.3)
+        diff = ImageChops.difference(before.crop(pill), tip.crop(pill)).getbbox()
+        ok &= check("edit 2a review: the conflict strip's cut text is whole in the tooltip under the pointer", diff is not None,
+                    f"pill box {pill}")
         cmd(hwnd, "SAVE", 0.4)
         ok &= check("edit 2a: an external write under our edits: the conflict strip, and a save leaves the file alone",
                     conflict and q(hwnd, "EDIT_STRIP") == STRIP["CONFLICT"] and doc.read_bytes() == theirs.encode("utf-8") and
@@ -2851,16 +2948,18 @@ def test_edit_conflict():
         cmd(hwnd, "UNDO", 0.4)
         ok &= check("edit 2a: \"load\" takes the disk's version; undo brings our edits back",
                     loaded and q(hwnd, "SRC_HASH", 0) == src_hash(ours2), f"loaded {loaded}")
-        # a change of the same size with the old stamp: the watcher cannot see it, the save does
+        # a change of the same size with the old stamp: the watcher cannot see it, the save does ("а" → "ы": both two
+        # bytes in UTF-8, so the watcher's size compare does not give it away first - T1)
         st = doc.stat()
-        same = theirs.replace("другой программы", "другой прогрQммы")
+        same = theirs.replace("другой программы", "другой прогрыммы")
         doc.write_bytes(same.encode("utf-8"))
         os.utime(doc, ns=(st.st_atime_ns, st.st_mtime_ns))
         time.sleep(0.5)
+        unseen = q(hwnd, "EDIT_CONFLICT") == 0 and len(same.encode("utf-8")) == len(theirs.encode("utf-8"))
         cmd(hwnd, "SAVE", 0.4)
         ok &= check("edit 2a: a same-size change behind the old stamp: the save reports the conflict and writes nothing",
-                    q(hwnd, "EDIT_SAVE_STATE") == SS["CONFLICT"] and doc.read_bytes() == same.encode("utf-8"),
-                    f'state {q(hwnd, "EDIT_SAVE_STATE")}')
+                    unseen and q(hwnd, "EDIT_SAVE_STATE") == SS["CONFLICT"] and doc.read_bytes() == same.encode("utf-8"),
+                    f'unseen by the watcher {unseen}, state {q(hwnd, "EDIT_SAVE_STATE")}')
         cmd(hwnd, "CONFLICT_LOAD", 0.5)
         reloads, depth = q(hwnd, "RELOADS"), q(hwnd, "UNDO_DEPTH", 0)
         clean = same.replace("Первый", "Самый первый")
@@ -2871,6 +2970,9 @@ def test_edit_conflict():
         post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
     finally:
         close_edit(proc, hwnd)
+    left = list((DATA / "recovery").glob("*.theirs")) if (DATA / "recovery").exists() else []
+    ok &= check("edit 2a review: the other program's version kept by \"overwrite\" goes when the document is closed (§10.5)",
+                not left, f"{left}")
     return ok
 
 
@@ -2912,6 +3014,29 @@ def test_edit_readonly_missing():
     a file renamed away is MISSING, renamed back it is saved; closing with the answer "no" discards (exit code 0)"""
     ok = True
     import stat
+    # closing with unsaved edits asks (T3): with the answer "cancel" the window stays, still dirty
+    ask = OUT / "edit-close-ask.md"
+    ask_away = OUT / "edit-close-ask-away.md"
+    for p in (ask, ask_away):
+        if p.exists():
+            p.unlink()
+    ask.write_bytes(EDIT_DOC.encode("utf-8"))
+    proc, hwnd = launch_edit(ask)
+    try:
+        enter_edit(hwnd, 1, dx=1)
+        type_text(hwnd, "спросить ", 0.2)
+        ask.rename(ask_away)
+        wait_for(lambda: q(hwnd, "EDIT_STRIP") == STRIP["MISSING"], 4.0)
+        prompts = q(hwnd, "LAST_PROMPT", 1)
+        post(hwnd, WM_CLOSE, 0, 0, 1.0)
+        ok &= check("edit 2a review: WM_CLOSE with unsaved edits asks (LEAVE); \"cancel\" keeps the window and the edits",
+                    proc.poll() is None and q(hwnd, "LAST_PROMPT") == 1 and q(hwnd, "LAST_PROMPT", 1) == prompts + 1 and
+                    q(hwnd, "EDIT_DIRTY") == 1, f'prompt {q(hwnd, "LAST_PROMPT")}, count {prompts} → {q(hwnd, "LAST_PROMPT", 1)}')
+        ask_away.rename(ask)
+        wait_for(lambda: q(hwnd, "EDIT_DIRTY") == 0, 6.0)
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
     doc = OUT / "edit-readonly.md"
     other = OUT / "edit-readonly-saved-as.md"
     moved = OUT / "edit-readonly-away.md"
@@ -2927,9 +3052,17 @@ def test_edit_readonly_missing():
         img = shot(hwnd, "97-edit-readonly-strip")
         strip = q(hwnd, "EDIT_STRIP")
         type_text(hwnd, "только чтение ", 0.8)
+        shot(hwnd, "97-edit-readonly-typed")  # (the status slot says why, whole: review of 2a)
+        shot_dark(hwnd, "97-edit-readonly-typed-dark")
         ok &= check("edit 2a: a read-only file: the READONLY strip at entry, the edits are not written",
                     strip == STRIP["READONLY"] and q(hwnd, "EDIT_SAVE_STATE") == SS["READONLY"] and
                     doc.read_bytes() == EDIT_DOC.encode("utf-8"), f'strip {strip}, state {q(hwnd, "EDIT_SAVE_STATE")}')
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.5)  # leaving cannot save: the LEAVE strip says so
+        leave = q(hwnd, "EDIT_STRIP") == STRIP["LEAVE"] and q(hwnd, "EDITING") == 1
+        shot(hwnd, "97-edit-leave-strip")
+        shot_dark(hwnd, "97-edit-leave-strip-dark")
+        ok &= check("edit 2a review: Esc with edits that cannot be saved: the LEAVE strip, still editing", leave,
+                    f'strip {q(hwnd, "EDIT_STRIP")}')
         cmd(hwnd, "SAVE_AS", 0.8)
         want = EDIT_DOC.replace("Первый", "только чтение Первый")
         ok &= check("edit 2a: Save As writes the edits to the new file and moves the document there",
@@ -2940,6 +3073,7 @@ def test_edit_readonly_missing():
         type_text(hwnd, "пропал ", 0.2)
         missing = wait_for(lambda: q(hwnd, "EDIT_STRIP") == STRIP["MISSING"], 4.0)
         img = shot(hwnd, "98-edit-missing-strip")
+        shot_dark(hwnd, "98-edit-missing-strip-dark")
         moved.rename(other)
         want2 = want.replace("только чтение Первый", "только чтение пропал Первый")
         back = wait_for(lambda: other.read_bytes() == want2.encode("utf-8"), 6.0)
@@ -2948,6 +3082,7 @@ def test_edit_readonly_missing():
         other.rename(moved)
         type_text(hwnd, "лишнее ", 0.2)
         wait_for(lambda: q(hwnd, "EDIT_STRIP") == STRIP["MISSING"], 4.0)
+        note_selfcheck(hwnd)
         post(hwnd, WM_CLOSE, 0, 0, 0.1)
         try:
             proc.wait(5)
@@ -2980,13 +3115,15 @@ def test_edit_encoding_strip():
             strip = wait_for(lambda: q(hwnd, "EDIT_STRIP") == STRIP["ENCODING"], 3.0)
             if run == "utf8":
                 shot(hwnd, "99-edit-encoding-strip")
+                shot_dark(hwnd, "99-edit-encoding-strip-dark")
                 state = q(hwnd, "EDIT_SAVE_STATE")
                 cmd(hwnd, "ENC_UTF8", 0.5)
                 want = text.replace("Абзац", "✓Абзац")
                 ok &= check("edit 2a: ✓ in a 1251 file: UNENCODABLE and the strip, no dialog; Save as UTF-8 converts",
                             strip and state == SS["UNENCODABLE"] and doc.read_bytes() == b"\xef\xbb\xbf" + want.encode("utf-8")
-                            and q(hwnd, "EDIT_STRIP") == 0 and q(hwnd, "EDIT_ENC") == 65001 | 3 << 24,
-                            f'state {state}, enc {q(hwnd, "EDIT_ENC"):#x}')
+                            and q(hwnd, "EDIT_STRIP") == 0 and q(hwnd, "EDIT_ENC") == 65001 | 3 << 24 and
+                            q(hwnd, "LAST_PROMPT", 1) == 0, f'state {state}, enc {q(hwnd, "EDIT_ENC"):#x}, '
+                            f'questions {q(hwnd, "LAST_PROMPT", 1)}')
             else:
                 cmd(hwnd, "ENC_REMOVE_CHAR", 0.8)
                 ok &= check("edit 2a: Remove the character: the bytes as they were, nothing unsaved",
@@ -3009,6 +3146,7 @@ def test_edit_close_session():
     proc, hwnd = launch_edit(doc)
     enter_edit(hwnd, 1, dx=1)
     type_text(hwnd, "закрыть ", 0.1)
+    note_selfcheck(hwnd)
     post(hwnd, WM_CLOSE, 0, 0, 0.1)
     try:
         proc.wait(5)
@@ -3026,7 +3164,8 @@ def test_edit_close_session():
         want2 = want.replace("закрыть Первый", "сеанс закрыть Первый")
         journals = list(rec.glob("*.unsaved")) if rec.exists() else []
         ok &= check("edit 2a: WM_QUERYENDSESSION + WM_ENDSESSION: saved without a word, no journal left",
-                    r1 == 1 and doc.read_bytes() == want2.encode("utf-8") and not journals, f"answer {r1}, journals {journals}")
+                    r1 == 1 and doc.read_bytes() == want2.encode("utf-8") and not journals and q(hwnd, "LAST_PROMPT", 1) == 0,
+                    f'answer {r1}, journals {journals}, questions {q(hwnd, "LAST_PROMPT", 1)}')
         post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.5)
         left = list(rec.glob("*")) if rec.exists() else []
         ok &= check("edit 2a: after a clean leave the recovery folder is empty", not left, f"{left}")
@@ -3051,15 +3190,32 @@ def test_edit_recovery():
         time.sleep(3.5)
         journals = list(rec.glob("*.unsaved")) if rec.exists() else []
         state = q(hwnd, "EDIT_SAVE_STATE")
+        note_selfcheck(hwnd)
         proc.kill()
         proc.wait(5)
         ok &= check("edit 2a: autosave off: the state is OFF, and 3 s later the journal holds the edits",
                     state == SS["OFF"] and len(journals) == 1 and doc.read_bytes() == EDIT_DOC.encode("utf-8"),
                     f"state {state}, journals {journals}")
+        # the file changed since the journal was written: a copy can be opened, but Restore is not offered and does
+        # nothing (the journal fits only the text it was written against, §10.6; T13)
+        changed = EDIT_DOC.replace("Последний абзац.", "Последний абзац, изменённый потом.")
+        doc.write_bytes(changed.encode("utf-8"))
+        proc, hwnd = launch_edit(doc)
+        try:
+            shown = wait_for(lambda: q(hwnd, "EDIT_STRIP") == STRIP["RECOVERY"], 3.0)
+            restore = q(hwnd, "EDIT_TOOL", CMD["RECOVERY_RESTORE"])
+            cmd(hwnd, "RECOVERY_RESTORE", 0.8)
+            ok &= check("edit 2a review: a journal of a file changed since: no Restore on the strip, the command does nothing",
+                        shown and restore == -1 and q(hwnd, "EDITING") == 0 and q(hwnd, "SRC_HASH", 0) == src_hash(changed)
+                        and doc.read_bytes() == changed.encode("utf-8"), f"strip {shown}, restore button {restore}")
+        finally:
+            close_edit(proc, hwnd)
+        doc.write_bytes(EDIT_DOC.encode("utf-8"))
         proc, hwnd = launch_edit(doc)
         try:
             shown = wait_for(lambda: q(hwnd, "EDIT_STRIP") == STRIP["RECOVERY"], 3.0)
             shot(hwnd, "100-edit-journal-strip")
+            shot_dark(hwnd, "100-edit-journal-strip-dark")
             cmd(hwnd, "RECOVERY_RESTORE", 0.8)
             want = EDIT_DOC.replace("Первый", "журнал Первый")
             ok &= check("edit 2a: the next open offers the unsaved edits; Restore puts them back in edit mode",
@@ -3078,10 +3234,13 @@ def test_edit_recovery():
 
 
 def test_edit_two_windows():
-    """§10.11: a second window on a file another one edits cannot enter edit mode: its strip says so"""
+    """§10.11: a second window on a file another one edits cannot enter edit mode: its strip says so (and leaves the
+    corner buttons usable); it can once the first leaves, or dies; Save As never writes over a file another window edits"""
     ok = True
     doc = OUT / "edit-two.md"
     doc.write_bytes(EDIT_DOC.encode("utf-8"))
+    mine = OUT / "edit-two-mine.md"
+    mine.write_bytes(EDIT_DOC.replace("Первый", "Мой").encode("utf-8"))
     a, ha = launch_edit(doc)
     try:
         enter_edit(ha, 1, dx=1)
@@ -3089,15 +3248,57 @@ def test_edit_two_windows():
         try:
             post(hb, WM_KEYDOWN, VK["f2"], 0, 0.5)
             img = shot(hb, "101-edit-other-window-strip")
+            shot_dark(hb, "101-edit-other-window-strip-dark")
             ok &= check("edit 2a: the second window cannot enter; the OTHER WINDOW strip",
                         q(hb, "EDITING") == 0 and q(hb, "EDIT_STRIP") == STRIP["OTHER_WINDOW"] and q(ha, "EDITING") == 1)
+            # the strip stops short of the gear and the pencil: they stay drawn and clickable (review of 2a: UX)
+            gear = gear_box(hb)
+            if gear:
+                click(hb, (gear[0] + gear[2]) // 2, (gear[1] + gear[3]) // 2, 0.8)
+            sh = q(hb, "SETTINGS_HWND")
+            ok &= check("edit 2a review: beside a reading-mode strip the gear still opens the settings",
+                        gear and sh != 0 and q(hb, "EDIT_TOOL", CMD["EDIT_TOGGLE"]) > 0, f"gear {gear}, settings {sh}")
+            if sh:
+                post(sh, WM_KEYDOWN, 0x1B, 0, 0.3)
             cmd(hb, "STRIP_CLOSE", 0.3)
             ok &= check("edit 2a: [Read only] closes the strip", q(hb, "EDIT_STRIP") == 0)
+            # the first window leaves: now the second can enter
+            post(ha, WM_KEYDOWN, VK["esc"], 0, 0.5)
+            post(hb, WM_KEYDOWN, VK["f2"], 0, 0.5)
+            ok &= check("edit 2a review: once the first window leaves, the second enters",
+                        q(ha, "EDITING") == 0 and q(hb, "EDITING") == 1, f'a {q(ha, "EDITING")}, b {q(hb, "EDITING")}')
+            post(hb, WM_KEYDOWN, VK["esc"], 0, 0.5)
         finally:
-            close_and_wait(b, hb)
-        post(ha, WM_KEYDOWN, VK["esc"], 0, 0.4)
+            close_edit(b, hb)
+        # a window editing another file does Save As onto this one, which the first window edits: refused (T6)
+        time.sleep(1.1)
+        post(ha, WM_KEYDOWN, VK["f2"], 0, 0.5)
+        c, hc = launch_edit(mine, {"FASTMD_SAVE_AS": str(doc)})
+        try:
+            enter_edit(hc, 1, dx=1)
+            type_text(hc, "чужое ", 0.2)
+            cmd(hc, "SAVE_AS", 0.8)
+            ok &= check("edit 2a review: Save As onto a file another window edits is refused; both stay as they were",
+                        q(ha, "EDITING") == 1 and title_of(hc).startswith(mine.name) and
+                        doc.read_bytes() == EDIT_DOC.encode("utf-8") and q(ha, "SRC_HASH", 0) == src_hash(EDIT_DOC),
+                        f"title {title_of(hc)!r}")
+            post(hc, WM_KEYDOWN, VK["esc"], 0, 0.5)
+        finally:
+            close_edit(c, hc)
+        # the first window dies while editing: its claim on the file goes with it
+        note_selfcheck(ha)
+        a.kill()
+        a.wait(5)
+        b, hb = launch_edit(doc)
+        try:
+            post(hb, WM_KEYDOWN, VK["f2"], 0, 0.5)
+            ok &= check("edit 2a review: after the editing window was killed another one enters", q(hb, "EDITING") == 1)
+            post(hb, WM_KEYDOWN, VK["esc"], 0, 0.5)
+        finally:
+            close_edit(b, hb)
     finally:
-        close_edit(a, ha)
+        if a.poll() is None:
+            close_edit(a, ha)
     return ok
 
 
@@ -3120,16 +3321,17 @@ def test_edit_frames():
         wait_for(lambda: q(hwnd, "MATH", 1) == 1, 5.0)
         enter_edit(hwnd, 1, dx=1)
         settle(hwnd)
-        q(hwnd, "FRAME_STATS", 0)
-        wheel(hwnd, 450, 400, -3, wait=0.6)
-        settle(hwnd)
-        partial = q(hwnd, "FRAME_STATS", 0)
-        a = shot(hwnd, "102-edit-scrolled")
-        q(hwnd, "FULL_REDRAW")
-        time.sleep(0.3)
-        b = shot(hwnd, "102-edit-full")
+        same = []
+        for n in (-3, 1):  # down, then up (the frames the scroll left on screen, not a frame drawn for the shot: A2)
+            q(hwnd, "FRAME_STATS", 0)
+            wheel(hwnd, 450, 400, n, wait=0.6)
+            settle(hwnd)
+            partial = q(hwnd, "FRAME_STATS", 0)
+            a = shot(hwnd, f"102-edit-scrolled{n}", paint=False)
+            b = shot(hwnd, f"102-edit-full{n}")
+            same.append((partial, same_pixels(a, b)))
         ok &= check("edit 2a: a wheel scroll in edit mode is a partial frame, the same as a full one",
-                    partial > 0 and same_pixels(a, b), f"partial frames {partial}")
+                    all(p > 0 and s for p, s in same), f"(partial frames, same) {same}")
         wheel(hwnd, 450, 400, 10, wait=0.6)
         settle(hwnd)
         src = FRAMES_DOC
@@ -3150,17 +3352,21 @@ def test_edit_frames():
             settle(hwnd)
             ok &= check(f"edit 2a: {what}: the source is right and the frame is a fresh layout's",
                         r == 1 and q(hwnd, "SRC_HASH", 0) == src_hash(src) and relayout_same(hwnd, f"104-edit-{what[:12]}"))
-        # a tooltip under the hovered button (the test hooks keep the hover: a posted move is followed by a leave)
+        # a tooltip under the hovered button (the test hooks keep the hover: a posted move is followed by a leave); told
+        # by what changed against the same view without it, in a box clear of the scrollbar (T7)
         tips = []
         for theme in ("THEME_LIGHT", "THEME_DARK"):
             cmd(hwnd, theme, 0.6)
+            post(hwnd, WM_MOUSEMOVE, 0, lp(450, 500), 0.3)
+            plain = shot(hwnd, f"105-edit-tip-none-{theme[6:].lower()}")
             for name in ("UNDO", "FMT_BOLD", "EDIT_EXIT"):
                 c = q(hwnd, "EDIT_TOOL", CMD[name])
                 x, y = c & 0xFFFF, c >> 16
                 post(hwnd, WM_MOUSEMOVE, 0, lp(x, y), 0.3)
                 img = shot(hwnd, f"105-edit-tip-{name.lower()}-{theme[6:].lower()}")
-                bg = img.getpixel((x, y + 60))
-                tips.append(ink(img, (x - 30, y + 25, x + 30, y + 45), bg=bg, tol=60) > 20)
+                box = (x - 60, y + 25, min(x + 30, img.width - 20), y + 45)
+                d = ImageChops.difference(plain.crop(box), img.crop(box)).convert("L").point(lambda v: 255 if v > 40 else 0)
+                tips.append(sum(1 for v in d.getdata() if v) > 20)
             post(hwnd, WM_MOUSEMOVE, 0, lp(450, 500), 0.3)
         cmd(hwnd, "THEME_LIGHT", 0.6)
         ok &= check("edit 2a: a tooltip under each hovered button (undo, bold, ✕; light and dark)", all(tips), f"{tips}")
@@ -3191,14 +3397,17 @@ def test_edit_blink():
     proc, hwnd = launch_edit(doc, steady=False)
     try:
         enter_edit(hwnd, 1, dx=1)
+        u32.GetCaretBlinkTime.restype = wt.UINT
         blink = u32.GetCaretBlinkTime()
+        steady = blink in (0, 0xFFFFFFFF)  # blinking switched off in Windows: the caret must stay put (T11)
         p0 = q(hwnd, "EDIT_CARET_PHASE")
-        changed = wait_for(lambda: q(hwnd, "EDIT_CARET_PHASE") != p0, 2 * blink / 1000.0 + 0.3, 0.02)
+        changed = wait_for(lambda: q(hwnd, "EDIT_CARET_PHASE") != p0, 1.2 if steady else 2 * blink / 1000.0 + 0.3, 0.02)
         post(hwnd, WM_KILLFOCUS, 0, 0, 0.2)
         hidden = q(hwnd, "EDIT_CARET_VISIBLE") == 0
         post(hwnd, WM_SETFOCUS, 0, 0, 0.1)
-        ok &= check("edit 2a: the caret blinks; without the keyboard it hides, with it it shows",
-                    changed and hidden and q(hwnd, "EDIT_CARET_VISIBLE") == 1, f"blink {blink} ms, changed {changed}, hidden {hidden}")
+        ok &= check("edit 2a: the caret blinks (or, with blinking off in Windows, never); without the keyboard it hides",
+                    changed != steady and hidden and q(hwnd, "EDIT_CARET_VISIBLE") == 1,
+                    f"blink {blink} ms, changed {changed}, hidden {hidden}")
         post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
     finally:
         close_edit(proc, hwnd)
@@ -3214,13 +3423,14 @@ def test_edit_perf():
     proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_EDIT_SELFCHECK": "0"})
     try:
         enter_edit(hwnd, 2, dx=2)
-        n0 = q(hwnd, "EDIT_STATS", 3)
+        h0 = q(hwnd, "SRC_HASH", 0)
         type_text(hwnd, ("быстрый набор " * 20)[:200], 0.5, gap=0.01)
         stats = [q(hwnd, "EDIT_STATS", k) for k in range(7)]
         print(f"       medium.md, 200 characters: median {stats[0]} µs, p95 {stats[1]} µs, max {stats[2]} µs over {stats[3]} "
               f"swaps (parse {stats[4]}, carry+diff {stats[5]}, install+layout {stats[6]})")
-        ok &= check("edit 2a: typing into medium.md: median < 3000 µs, p95 < 8000 µs", stats[0] < 3000 and stats[1] < 8000,
-                    f"{stats[0]} / {stats[1]} µs")
+        # the ring holds the last 128 swaps: all of them typing's, and the text did change (T9)
+        ok &= check("edit 2a: typing into medium.md: median < 3000 µs, p95 < 8000 µs", stats[0] < 3000 and stats[1] < 8000 and
+                    stats[3] == 128 and q(hwnd, "SRC_HASH", 0) != h0, f"{stats[0]} / {stats[1]} µs over {stats[3]} swaps")
         cmd(hwnd, "SAVE", 0.5)
         post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.5)
     finally:
@@ -3240,6 +3450,16 @@ def test_edit_perf():
               f"(parse {stats[4]}, carry+diff {stats[5]}, install+layout {stats[6]})")
         ok &= check("edit 2a: typing into large.md is deferred: far fewer swaps than keystrokes, the tick < 100 ms",
                     0 < stats[3] - n0 < 20 and stats[1] < 100000, f"{stats[3] - n0} swaps, p95 {stats[1]} µs")
+        # appending at the end of a line - the commonest place to write - is deferred too (review of 2a: A3)
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.5)
+        settle(hwnd)
+        n1 = q(hwnd, "EDIT_STATS", 3)
+        type_text(hwnd, "конецстроки" + "x" * 9, 0.6, gap=0.01)
+        settle(hwnd)
+        swaps = q(hwnd, "EDIT_STATS", 3) - n1
+        print(f"       large.md, 20 characters at a line's end: {swaps} swaps")
+        ok &= check("edit 2a review: typing at the end of a line of large.md is deferred as well", 0 < swaps < 6,
+                    f"{swaps} swaps")
         cmd(hwnd, "SAVE", 1.0)
         post(hwnd, WM_KEYDOWN, VK["esc"], 0, 1.0)
     finally:
@@ -3269,6 +3489,20 @@ def test_edit_debounced():
         cmd(hwnd, "SAVE", 0.4)
         ok &= check("edit 2a: deferred typing: the re-parse is pending, then done within 300 ms; the text is exact",
                     busy and cleared and doc.read_bytes() == want.encode("utf-8"), f"busy {busy}, cleared {cleared}")
+        # a lone low surrogate in a burst becomes U+FFFD in the source and in the history alike: undo still fits (T4)
+        time.sleep(1.6)  # (a step of its own)
+        depth = q(hwnd, "UNDO_DEPTH", 0)
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        for _ in range(2):  # mid-line, where a burst always went on deferred
+            post(hwnd, WM_KEYDOWN, VK["right"], 0, 0.03)
+        type_text(hwnd, "z", 0.0, gap=0.005)
+        post(hwnd, WM_CHAR, 0xDC00, 0, 0.4)
+        typed = q(hwnd, "SRC_HASH", 0) == src_hash(want.replace("Смайлик", "Смz�айлик"))
+        cmd(hwnd, "UNDO", 0.4)
+        ok &= check("edit 2a review: a lone low surrogate typed in a burst: U+FFFD, and undo takes it back (history kept)",
+                    typed and q(hwnd, "SRC_HASH", 0) == src_hash(want) and q(hwnd, "UNDO_DEPTH", 0) == depth,
+                    f'typed {typed}, depth {depth} → {q(hwnd, "UNDO_DEPTH", 0)}')
+        cmd(hwnd, "SAVE", 0.4)
         post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
     finally:
         close_edit(proc, hwnd)
@@ -3310,6 +3544,599 @@ def test_settings_autosave():
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ the review of 2a
+REVIEW_DOC = ("# Проверка правки\n\n"
+              "Длинный абзац, который обязательно переносится в колонке окна на несколько строк, потому что в нём "
+              "много слов, и они никак не помещаются в одну строку ширины колонки документа, даже широкой.\n\n"
+              "Второй абзац для перехода вниз, тоже достаточно длинный, чтобы колонка переносила его хотя бы на одну "
+              "следующую строку текста.\n\n---\n\nПосле линии абзац.\n\n"
+              "<details open><summary>Сводка</summary>\n\nТело раскрытого блока.\n\n</details>\n\nКонец начала.\n\n" +
+              "".join(f"## Раздел {k}\n\nАбзац {k} для прокрутки, с текстом на пару строк в колонке окна.\n\n"
+                      for k in range(1, 26)))
+
+
+def caret_xy(hwnd):
+    c = q(hwnd, "CARET")
+    return (c & 0xFFFF, c >> 16) if c >= 0 else None
+
+
+def test_edit_review_keys():
+    """what the review of 2a found in the keys and the mouse (§2.1, §2.7, §6.2, §12.1, §12.4): End on a wrapped line,
+    ↓ after typing, the arrows after Backspace selected a rule, F2 on a selected object, folding a <details>, a right
+    click on the bar, dragging a selection over the bar, the pencil far from the old caret, an outline jump"""
+    ok = True
+    doc = OUT / "edit-review.md"
+    doc.write_bytes(REVIEW_DOC.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        enter_edit(hwnd, 1, dx=2)
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.2)
+        home = caret_xy(hwnd)
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.2)
+        end1 = caret_xy(hwnd)
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.2)
+        end2 = caret_xy(hwnd)
+        shot(hwnd, "109-edit-end-wrapped")
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.2)
+        home2 = caret_xy(hwnd)
+        ok &= check("edit 2a review: End on a wrapped line: at the end of that line (again: the same), Home: its start",
+                    home and end1 and end1[1] == home[1] and end1[0] > home[0] + 100 and end2 == end1 and home2 == home,
+                    f"home {home}, End {end1}, End {end2}, Home {home2}")
+        post(hwnd, WM_KEYDOWN, VK["down"], 0, 0.2)
+        type_text(hwnd, "0123456789", 0.3)
+        before = caret_xy(hwnd)
+        post(hwnd, WM_KEYDOWN, VK["down"], 0, 0.3)
+        after = caret_xy(hwnd)
+        ok &= check("edit 2a review: ↓ after typing goes down from where the typing left the caret",
+                    before and after and after[1] > before[1] and abs(after[0] - before[0]) < 16, f"{before} → {after}")
+        # Backspace at the start of the paragraph after the rule selects the rule; → goes on from the rule
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 1, q(hwnd, "BLOCK_Y", 4) + 10, 0.3)
+        start = q(hwnd, "EDIT_CARET_SRC")
+        post(hwnd, WM_KEYDOWN, VK["back"], 0, 0.3)
+        atom = q(hwnd, "EDIT_ATOM")
+        post(hwnd, WM_KEYDOWN, VK["right"], 0, 0.3)
+        ok &= check("edit 2a review: Backspace selects the rule before the paragraph; → goes to the paragraph after the rule",
+                    atom == 0x40000000 | 3 and q(hwnd, "EDIT_ATOM") == -1 and q(hwnd, "EDIT_CARET_SRC") == start,
+                    f'atom {atom:#x}, caret {start} → {q(hwnd, "EDIT_CARET_SRC")}')
+        # F2 with an object selected leaves edit mode (its popup is 3b's)
+        post(hwnd, WM_KEYDOWN, VK["back"], 0, 0.3)
+        selected = q(hwnd, "EDIT_ATOM") >= 0
+        post(hwnd, WM_KEYDOWN, VK["f2"], 0, 0.6)
+        ok &= check("edit 2a review: F2 with an object selected leaves edit mode", selected and q(hwnd, "EDITING") == 0)
+        time.sleep(1.1)
+        text = doc.read_bytes().decode("utf-8")  # (leaving saved the digits)
+        post(hwnd, WM_KEYDOWN, VK["f2"], 0, 0.6)
+        # a <details> folded in edit mode: the caret leaves the text it hid, onto the summary
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 1, q(hwnd, "BLOCK_Y", 6) + 10, 0.3)
+        inside = q(hwnd, "EDIT_CARET_SRC") == text.find("Тело")
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 5, q(hwnd, "BLOCK_Y", 5) + 10, 0.5)
+        folded = q(hwnd, "EDIT_CARET_SRC") == text.find("<details") and q(hwnd, "EDIT_ATOM") == 0x40000000 | 5
+        shot(hwnd, "110-edit-details-folded")
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 5, q(hwnd, "BLOCK_Y", 5) + 10, 0.5)  # open again
+        ok &= check("edit 2a review: folding a <details> takes the caret out of it, onto its summary", inside and folded,
+                    f'inside {inside}, caret {q(hwnd, "EDIT_CARET_SRC")}')
+        # a right click on the bar: the menu, but the caret and the view stay (the text under the bar is hidden)
+        wheel(hwnd, 450, 400, -3, wait=0.8)
+        settle(hwnd)
+        c0, y0 = q(hwnd, "EDIT_CARET_SRC"), q(hwnd, "SCROLLY")
+        bx = (q(hwnd, "EDIT_TOOL", CMD["SAVE"]) & 0xFFFF) - 160
+        post(hwnd, 0x0204, 2, lp(bx, 20), 0.05)  # WM_RBUTTONDOWN
+        post(hwnd, 0x0205, 0, lp(bx, 20), 0.6)   # WM_RBUTTONUP: the context menu
+        u32.SendMessageW(hwnd, 0x001F, 0, 0)     # WM_CANCELMODE: the menu goes
+        time.sleep(0.3)
+        ok &= check("edit 2a review: a right click on the bar moves neither the caret nor the view",
+                    q(hwnd, "EDIT_CARET_SRC") == c0 and q(hwnd, "SCROLLY") == y0,
+                    f'caret {c0} → {q(hwnd, "EDIT_CARET_SRC")}, scroll {y0} → {q(hwnd, "SCROLLY")}')
+        # dragging a selection up over the bar scrolls, and the selection never reaches under the bar (the autoscroll
+        # timer reads the real cursor: it is put there for the moment)
+        wheel(hwnd, 450, 400, -6, wait=0.8)
+        settle(hwnd)
+        y0 = q(hwnd, "SCROLLY")
+        pt, old = wt.POINT(450, 20), wt.POINT()
+        u32.ClientToScreen(hwnd, ctypes.byref(pt))
+        u32.GetCursorPos(ctypes.byref(old))
+        u32.SetCursorPos(pt.x, pt.y)
+        try:
+            post(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp(450, 400), 0.05)
+            post(hwnd, WM_MOUSEMOVE, MK_LBUTTON, lp(450, 20), 0.5)
+            post(hwnd, WM_LBUTTONUP, 0, lp(450, 20), 0.3)
+        finally:
+            u32.SetCursorPos(old.x, old.y)
+        c = caret_xy(hwnd)
+        ok &= check("edit 2a review: a drag up over the bar scrolls; the selection ends in text that is in sight",
+                    q(hwnd, "SCROLLY") < y0 and c and c[1] >= 44, f'scroll {y0} → {q(hwnd, "SCROLLY")}, caret {c}')
+        # the pencil far below the caret the last session left: it enters where the reader looks
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.6)
+        time.sleep(1.1)
+        wheel(hwnd, 450, 400, -25, wait=1.2)
+        settle(hwnd)
+        y0 = q(hwnd, "SCROLLY")
+        pen = q(hwnd, "EDIT_TOOL", CMD["EDIT_TOGGLE"])
+        if pen > 0:
+            click(hwnd, pen & 0xFFFF, pen >> 16, 0.4)
+        wait_for(lambda: q(hwnd, "EDIT_BAR") == 100, 2.0)
+        settle(hwnd)
+        c = caret_xy(hwnd)
+        ok &= check("edit 2a review: the pencil enters where the reader looks, not at the caret left far above",
+                    q(hwnd, "EDITING") == 1 and abs(q(hwnd, "SCROLLY") - y0) < 60 and c and 44 <= c[1] <= 800,
+                    f'scroll {y0} → {q(hwnd, "SCROLLY")}, caret {c}')
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.5)
+    finally:
+        close_edit(proc, hwnd)
+    # an outline jump in edit mode lands below the bar (§12.1)
+    doc.write_bytes(REVIEW_DOC.encode("utf-8"))
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        cmd(hwnd, "TOC", 0.8)
+        enter_edit(hwnd, 1, dx=2)
+        docked = q(hwnd, "TOC_DOCKED")
+        item = 12
+        click(hwnd, 100, q(hwnd, "TOC_ITEM_Y", item), 1.2)
+        settle(hwnd)
+        by = q(hwnd, "BLOCK_Y", 8 + 2 * (item - 1))
+        shot(hwnd, "111-edit-outline-jump")
+        ok &= check("edit 2a review: an outline jump in edit mode puts the heading below the bar, and it is the current one",
+                    docked == 1 and 44 <= by <= 90 and q(hwnd, "TOC_CURRENT") == item,
+                    f'docked {docked}, heading at {by}, current {q(hwnd, "TOC_CURRENT")}')
+        cmd(hwnd, "TOC", 0.5)
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.5)
+    finally:
+        close_edit(proc, hwnd)
+        del_reg("Outline")
+    return ok
+
+
+def test_edit_review_doc():
+    """more of the review of 2a: the outline neither docks nor undocks while editing (§12.7); an emptied document takes
+    typing (§7.3); the typing check's fallbacks in the app itself (§7.3 step 5)"""
+    ok = True
+    doc = OUT / "edit-one-heading.md"
+    doc.write_bytes("# Единственный заголовок\n\nАбзац под ним.\n".encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_TEST_HOOKS": "1"})
+    try:
+        cmd(hwnd, "TOC", 0.8)
+        enter_edit(hwnd, 1, dx=2)
+        docked, left = q(hwnd, "TOC_DOCKED"), q(hwnd, "TEXT_LEFT")
+        r = copydata(hwnd, 1, "0\t2\t")  # "# " goes: no heading left
+        settle(hwnd)
+        frozen = r == 1 and q(hwnd, "TOC_DOCKED") == docked == 1 and q(hwnd, "TEXT_LEFT") == left
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.6)
+        ok &= check("edit 2a review: the outline stays docked while editing removes the only heading; leaving lets it go",
+                    frozen and q(hwnd, "EDITING") == 0 and q(hwnd, "TOC_DOCKED") == 0, f"frozen {frozen}")
+    finally:
+        close_edit(proc, hwnd)
+        del_reg("Outline")
+    doc = OUT / "edit-emptied.md"
+    doc.write_bytes(b"x\n")
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        enter_edit(hwnd, 0, dx=1)
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.2)
+        post(hwnd, WM_KEYDOWN, VK["back"], 0, 0.3)
+        empty = q(hwnd, "BLOCK_COUNT") == 0
+        type_text(hwnd, "yz", 0.3)
+        cmd(hwnd, "SAVE", 0.4)
+        ok &= check("edit 2a review: the last character of the document gone, typing starts it again",
+                    empty and doc.read_bytes() == b"yz\n", f"empty {empty}, file {doc.read_bytes()!r}")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+    doc = OUT / "edit-fallbacks.md"
+    text = "**API**s и формула\n\nthe $E$ is\n"
+    doc.write_bytes(text.encode("utf-8"))
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        wait_for(lambda: q(hwnd, "MATH", 1) == 1, 5.0)
+        enter_edit(hwnd, 0, dx=1)
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        for _ in range(3):
+            post(hwnd, WM_KEYDOWN, VK["right"], 0, 0.05)
+        type_text(hwnd, ".", 0.3)
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 1, q(hwnd, "BLOCK_Y", 1) + 10, 0.3)
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        for _ in range(5):  # "the ", then over the formula
+            post(hwnd, WM_KEYDOWN, VK["right"], 0, 0.05)
+        type_text(hwnd, "x", 0.3)
+        cmd(hwnd, "SAVE", 0.4)
+        want = "**API**.s и формула\n\nthe $E$ x is\n"
+        ok &= check("edit 2a review: typing's fallbacks in the app: after a closer (**API**.s), a blank beside a formula",
+                    doc.read_bytes() == want.encode("utf-8"), f"file {doc.read_bytes().decode('utf-8')!r}")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+    return ok
+
+
+ZOOM_DOC = "# Начало\n\n" + "".join(f"## Раздел {k}\n\nАбзац {k}: достаточно текста, чтобы документ прокручивался, и "
+                                    f"строка переносилась хотя бы один раз в узкой колонке окна.\n\n" for k in range(1, 40))
+
+
+def test_edit_chrome_zoom():
+    """§12.1, §12.3 (the review of 2a): with a strip under the bar and the zoom changed while editing, scrolled frames
+    - caught without making the app paint - equal full ones, leaving does not move the page, and a click on the lower
+    half of a strip's button is the button's"""
+    import stat
+    ok = True
+    doc = OUT / "edit-zoom.md"
+    saved_as = OUT / "edit-zoom-saved.md"
+    for p in (doc, saved_as):
+        if p.exists():
+            os.chmod(p, stat.S_IWRITE)
+            p.unlink()
+    doc.write_bytes(ZOOM_DOC.encode("utf-8"))
+    os.chmod(doc, stat.S_IREAD)  # the READONLY strip at entry
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_SAVE_AS": str(saved_as)})
+    try:
+        wheel(hwnd, 500, 400, -6, wait=1.0)
+        post(hwnd, WM_KEYDOWN, VK["f2"], 0, 0.6)
+        strip = q(hwnd, "EDIT_STRIP") == STRIP["READONLY"]
+        for _ in range(2):
+            cmd(hwnd, "ZOOM_OUT", 0.4)  # 80 %
+        settle(hwnd)
+        time.sleep(1.0)  # (the zoom's toast is drawn over the text: those frames are full ones)
+        same = []
+        for n in (-3, 2, 1):  # down, then up twice
+            q(hwnd, "FRAME_STATS", 0)
+            wheel(hwnd, 500, 500, n, wait=0.8)
+            settle(hwnd)
+            frames = q(hwnd, "FRAME_STATS", 0)
+            a = shot(hwnd, f"108-edit-zoom-strip{n}", paint=False)
+            b = shot(hwnd, f"108-edit-zoom-strip{n}-full")
+            same.append((frames, same_pixels(a, b)))
+        ok &= check("edit 2a review: a strip under the bar at 80 %: scrolled frames (down, up) equal full ones",
+                    strip and all(f > 0 and s for f, s in same), f"strip {strip}, (partial frames, same) {same}")
+        k = next((b for b in range(q(hwnd, "BLOCK_COUNT")) if q(hwnd, "BLOCK_Y", b) > 200), 5)
+        y0 = q(hwnd, "BLOCK_Y", k)
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.2)
+        wait_for(lambda: q(hwnd, "EDIT_BAR") == 0, 2.0)
+        settle(hwnd)
+        y1 = q(hwnd, "BLOCK_Y", k)
+        ok &= check("edit 2a review: after a zoom change while editing, leaving does not move the page",
+                    q(hwnd, "EDITING") == 0 and abs(y1 - y0) <= 1, f"block {k}: {y0} → {y1}")
+        time.sleep(1.1)
+        post(hwnd, WM_KEYDOWN, VK["f2"], 0, 0.6)
+        for _ in range(3):
+            cmd(hwnd, "ZOOM_OUT", 0.4)  # 50 %
+        settle(hwnd)
+        c = q(hwnd, "EDIT_TOOL", CMD["SAVE_AS"])
+        if c > 0:
+            click(hwnd, c & 0xFFFF, (c >> 16) + 9, 0.8)
+        ok &= check("edit 2a review: at 50 % a click 9 px below the middle of the strip's «Save as…» runs it",
+                    c > 0 and q(hwnd, "LAST_PROMPT") == 4 and saved_as.exists() and title_of(hwnd).startswith(saved_as.name),
+                    f'button at {c}, prompt {q(hwnd, "LAST_PROMPT")}, title {title_of(hwnd)!r}')
+        cmd(hwnd, "ZOOM_RESET", 0.4)
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+        for p in (doc, saved_as):
+            if p.exists():
+                os.chmod(p, stat.S_IWRITE)
+    return ok
+
+
+def test_edit_modal():
+    """§10.10 in edit mode (T13): inside a modal loop the autosave waits and a close waits; once the loop is over the
+    close goes through - the edits saved, exit code 0"""
+    ok = True
+    doc = OUT / "edit-modal.md"
+    doc.write_bytes(EDIT_DOC.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_TEST_HOOKS": "1", "FASTMD_AUTOSAVE_MS": "400"})
+    try:
+        enter_edit(hwnd, 1, dx=1)
+        type_text(hwnd, "модально ", 0.1)  # the autosave is armed for 400 ms after the last character
+        typed = q(hwnd, "SRC_HASH", 0) == src_hash(EDIT_DOC.replace("Первый", "модально Первый"))
+        note_selfcheck(hwnd)
+        loop = threading.Thread(target=lambda: copydata(hwnd, 3, "1500"))  # a modal loop of 1.5 s in the app
+        loop.start()
+        time.sleep(0.9)
+        post(hwnd, WM_CLOSE, 0, 0, 0.2)
+        inside = proc.poll() is None and doc.read_bytes() == EDIT_DOC.encode("utf-8")
+        loop.join(5)
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            pass
+        want = EDIT_DOC.replace("Первый", "модально Первый")
+        ok &= check("edit 2a review: inside a modal loop the autosave and a close wait; after it the close saves and goes",
+                    typed and inside and proc.returncode == 0 and doc.read_bytes() == want.encode("utf-8"),
+                    f"typed {typed}, inside {inside}, rc {proc.returncode}")
+    finally:
+        if proc.poll() is None:
+            close_edit(proc, hwnd)
+    return ok
+
+
+def journals():
+    rec = DATA / "recovery"
+    return sorted(rec.glob("*.unsaved")) if rec.exists() else []
+
+
+def fastmd_windows(prefix):
+    out = []
+    proto = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+
+    def cb(h, _):
+        cls = ctypes.create_unicode_buffer(64)
+        u32.GetClassNameW(h, cls, 64)
+        if cls.value == "FastMD.Document" and title_of(h).startswith(prefix):
+            out.append(h)
+        return True
+    u32.EnumWindows(proto(cb), 0)
+    return out
+
+
+def test_edit_recovery_guards():
+    """the review of 2a, data safety (§10.5, §10.6, §10.7): no entry on a torn file whose save is waiting on the strip;
+    a journal restores only onto the text it was written against, decided when asked; a copy is never written over;
+    the entry's purge keeps what the strip offers; a journal whose change starts inside an emoji restores; Discard with
+    a save in flight; the disk version that edit mode cannot hold keeps the edits in the journal; with autosave off a
+    file that comes back is not written"""
+    ok = True
+    set_reg("EditHintShown", 1)
+    orig = b"# Title\n\nFirst paragraph for typing text.\n\nSecond paragraph here.\n"
+    # a torn save: at the next open the strip; F2 is refused until the reader decides; Restore gives the original
+    doc = OUT / "edit-torn.md"
+    doc.write_bytes(orig)
+    clear_recovery()
+    p, h = launch_edit(doc, {"FASTMD_TEST_FAIL_WRITE": "partial:5,norollback", "FASTMD_AUTOSAVE_MS": "60000"})
+    enter_edit(h, 1, dx=1)
+    post(h, WM_KEYDOWN, VK["home"], 0, 0.1)
+    post(h, WM_KEYDOWN, VK["delete"], 0, 0.2)
+    cmd(h, "SAVE", 0.6)
+    note_selfcheck(h)
+    p.kill()
+    p.wait(5)
+    torn = doc.read_bytes() != orig
+    p, h = launch_edit(doc)
+    try:
+        shown = wait_for(lambda: q(h, "EDIT_STRIP") == STRIP["RECOVERY"], 3.0)
+        post(h, WM_KEYDOWN, VK["f2"], 0, 0.5)
+        said = q(h, "LAST_PROMPT", 2) & 0xFFFFFFFF
+        refused = q(h, "EDITING") == 0 and said == src_hash(
+            "First decide what to do with the interrupted save (the strip above)" if q(h, "LANG") == 1 else
+            "Сначала решите, что делать с прерванным сохранением (полоса сверху)")
+        cmd(h, "RECOVERY_RESTORE", 1.0)
+        ok &= check("edit 2a review: a torn file's save waits on the strip: no entry until then; Restore gives the original",
+                    torn and shown and refused and doc.read_bytes() == orig, f"torn {torn}, strip {shown}, refused {refused}")
+    finally:
+        close_edit(p, h)
+    # a journal, then the edits saved in edit mode past the strip: Restore would undo that save - not offered any more
+    doc = OUT / "edit-journal-stale.md"
+    doc.write_bytes(EDIT_DOC.encode("utf-8"))
+    clear_recovery()
+    set_reg("Autosave", 0)
+    try:
+        p, h = launch_edit(doc)
+        enter_edit(h, 1, dx=1)
+        type_text(h, "журнал ", 0.1)
+        time.sleep(3.6)
+        note_selfcheck(h)
+        p.kill()
+        p.wait(5)
+    finally:
+        del_reg("Autosave")
+    p, h = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "200"})
+    try:
+        offered = wait_for(lambda: q(h, "EDIT_STRIP") == STRIP["RECOVERY"], 3.0) and \
+            q(h, "EDIT_TOOL", CMD["RECOVERY_RESTORE"]) > 0
+        enter_edit(h, 1, dx=1)
+        type_text(h, "сохранено ", 0.2)
+        saved(h)
+        on_disk = doc.read_bytes()
+        gone = q(h, "EDIT_TOOL", CMD["RECOVERY_RESTORE"]) == -1
+        cmd(h, "RECOVERY_RESTORE", 0.8)
+        ok &= check("edit 2a review: a journal is restorable only onto the text it was written against, asked when used",
+                    offered and gone and doc.read_bytes() == on_disk and "сохранено" in on_disk.decode("utf-8") and
+                    "журнал" not in on_disk.decode("utf-8"), f"offered {offered}, gone after the save {gone}")
+        cmd(h, "RECOVERY_DELETE", 0.4)
+        post(h, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(p, h)
+    # "Open the copy" twice: the second copy has a name of its own, the first (edited in its window) stays
+    import pathlib as pl
+    doc = OUT / "edit-copy.md"
+    doc.write_bytes(EDIT_DOC.encode("utf-8"))
+    clear_recovery()
+    tmp = pl.Path(os.environ["TEMP"]) / "FastMD"
+    for f in tmp.glob("edit-copy (*") if tmp.exists() else []:
+        f.unlink()
+    set_reg("Autosave", 0)
+    try:
+        p, h = launch_edit(doc)
+        enter_edit(h, 1, dx=1)
+        type_text(h, "копия ", 0.1)
+        time.sleep(3.6)
+        note_selfcheck(h)
+        p.kill()
+        p.wait(5)
+    finally:
+        del_reg("Autosave")
+    p, h = launch_edit(doc)
+    try:
+        wait_for(lambda: q(h, "EDIT_STRIP") == STRIP["RECOVERY"], 3.0)
+        cmd(h, "RECOVERY_OPEN", 1.5)
+        wins = []
+        wait_for(lambda: bool(wins.extend(fastmd_windows("edit-copy (")) or wins), 5.0, 0.2)
+        copies = sorted(tmp.glob("edit-copy (*"))
+        kept = False
+        if wins and copies:
+            w2 = wins[0]
+            enter_edit(w2, 1, dx=1)
+            type_text(w2, "работа в копии ", 0.1)
+            cmd(w2, "SAVE", 0.5)
+            post(w2, WM_KEYDOWN, VK["esc"], 0, 0.4)
+            cmd(h, "RECOVERY_OPEN", 1.5)
+            kept = "работа в копии" in copies[0].read_bytes().decode("utf-8-sig") and \
+                len(sorted(tmp.glob("edit-copy (*"))) == 2
+        ok &= check("edit 2a review: \"Open the copy\" again makes a copy of its own; the first, edited, stays as saved",
+                    kept, f"windows {len(wins)}, copies {[c.name for c in sorted(tmp.glob('edit-copy (*'))]}")
+        cmd(h, "RECOVERY_DELETE", 0.4)
+    finally:
+        for w in fastmd_windows("edit-copy ("):
+            post(w, WM_CLOSE, 0, 0, 0.5)
+        close_edit(p, h)
+    # a journal 20 days old on the strip: the entry's purge of old recovery files keeps it
+    doc = OUT / "edit-journal-old.md"
+    doc.write_bytes(EDIT_DOC.encode("utf-8"))
+    clear_recovery()
+    set_reg("Autosave", 0)
+    try:
+        p, h = launch_edit(doc)
+        enter_edit(h, 1, dx=1)
+        type_text(h, "старое ", 0.1)
+        time.sleep(3.6)
+        note_selfcheck(h)
+        p.kill()
+        p.wait(5)
+    finally:
+        del_reg("Autosave")
+    old = time.time() - 20 * 86400
+    for f in journals():
+        os.utime(f, (old, old))
+    p, h = launch_edit(doc)
+    try:
+        wait_for(lambda: q(h, "EDIT_STRIP") == STRIP["RECOVERY"], 3.0)
+        post(h, WM_KEYDOWN, VK["f2"], 0, 0.5)
+        ok &= check("edit 2a review: entering edit mode does not purge the journal its own strip offers",
+                    q(h, "EDITING") == 1 and len(journals()) == 1, f"{journals()}")
+        post(h, WM_KEYDOWN, VK["esc"], 0, 0.4)
+        cmd(h, "RECOVERY_DELETE", 0.4)
+    finally:
+        close_edit(p, h)
+    # a journal whose change starts inside an emoji's surrogate pair restores
+    doc = OUT / "edit-journal-emoji.md"
+    text = "# Смайлы\n\nСмайлик \U0001F600 и хвост\n"
+    doc.write_bytes(text.encode("utf-8"))
+    clear_recovery()
+    set_reg("Autosave", 0)
+    try:
+        p, h = launch_edit(doc)
+        enter_edit(h, 1, dx=1)
+        post(h, WM_KEYDOWN, VK["home"], 0, 0.1)
+        for _ in range(8):
+            post(h, WM_KEYDOWN, VK["right"], 0, 0.03)
+        type_text(h, "\U0001F601", 0.2)
+        time.sleep(3.6)
+        note_selfcheck(h)
+        p.kill()
+        p.wait(5)
+    finally:
+        del_reg("Autosave")
+    want = text.replace("\U0001F600", "\U0001F601\U0001F600")
+    p, h = launch_edit(doc)
+    try:
+        wait_for(lambda: q(h, "EDIT_STRIP") == STRIP["RECOVERY"], 3.0)
+        cmd(h, "RECOVERY_RESTORE", 0.8)
+        ok &= check("edit 2a review: a journal whose change starts inside an emoji's surrogate pair restores",
+                    q(h, "EDITING") == 1 and q(h, "SRC_HASH", 0) == src_hash(want))
+        cmd(h, "SAVE", 0.4)
+        post(h, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(p, h)
+    # Discard while a save of a big document is in flight on the worker: the file and the window agree afterwards
+    doc = OUT / "edit-discard-big.md"
+    para = "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore. " * 8
+    parts, n, k = ["# Big\n\nFirst paragraph here.\n\n"], 30, 0
+    while n < 1_150_000:
+        s = f"## Section {k}\n\n{para}\n\n"
+        parts.append(s)
+        n += len(s)
+        k += 1
+    doc.write_bytes("".join(parts).encode("utf-8"))
+    p, h = launch_edit(doc, {"FASTMD_TEST_FAIL_WRITE": "busy", "FASTMD_TEST_SLOW": "save:3000",
+                             "FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        counts = []
+        wait_for(lambda: counts.append(q(h, "BLOCK_COUNT")) or (len(counts) > 3 and counts[-1] == counts[-4]), 8.0, 0.25)
+        enter_edit(h, 1, dx=1)
+        type_text(h, "ZZZ ", 0.2)
+        post(h, WM_KEYDOWN, VK["esc"], 0, 0.3)
+        leave = q(h, "EDIT_STRIP") == STRIP["LEAVE"]
+        time.sleep(1.0)  # the 0.5 s retry started a worker save that sleeps 3 s
+        cmd(h, "DISCARD_EDITS", 4.5)
+        disk = doc.read_bytes().decode("utf-8")
+        ok &= check("edit 2a review: Discard with a save in flight: the file and the window agree, nothing unsaved",
+                    leave and q(h, "EDITING") == 0 and q(h, "SRC_HASH", 0) == src_hash(disk) and q(h, "EDIT_DIRTY") == 0 and
+                    "*" not in title_of(h).split(" — ")[0], f'leave strip {leave}, title {title_of(h)!r}')
+    finally:
+        close_edit(p, h)
+    # the other program wrote bytes edit mode cannot hold: "load the disk version" keeps the edits in the journal
+    doc = OUT / "edit-load-binary.md"
+    doc.write_bytes(EDIT_DOC.encode("utf-8"))
+    clear_recovery()
+    p, h = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        enter_edit(h, 1, dx=1)
+        type_text(h, "наше ", 0.2)
+        binary = b"# Other\n\nabc\x00def\n"
+        doc.write_bytes(binary)
+        wait_for(lambda: q(h, "EDIT_CONFLICT") == 1, 3.0)
+        cmd(h, "CONFLICT_LOAD", 0.8)
+        offered = wait_for(lambda: q(h, "EDIT_STRIP") == STRIP["RECOVERY"], 3.0)
+        j = journals()
+        kept = bool(j) and "наше Первый".encode("utf-16-le") in j[0].read_bytes()
+        ok &= check("edit 2a review: loading a disk version edit mode cannot hold: reading mode, the edits in the journal",
+                    q(h, "EDITING") == 0 and doc.read_bytes() == binary and offered and kept, f"strip {offered}, journal {j}")
+        cmd(h, "RECOVERY_DELETE", 0.4)
+    finally:
+        close_edit(p, h)
+    # autosave off: a file that comes back after MISSING is not written until Ctrl+S (§2.12)
+    doc = OUT / "edit-off-back.md"
+    away = OUT / "edit-off-back-away.md"
+    for f in (doc, away):
+        if f.exists():
+            f.unlink()
+    doc.write_bytes(EDIT_DOC.encode("utf-8"))
+    set_reg("Autosave", 0)
+    try:
+        p, h = launch_edit(doc)
+        try:
+            enter_edit(h, 1, dx=1)
+            type_text(h, "выкл ", 0.2)
+            doc.rename(away)
+            wait_for(lambda: q(h, "EDIT_STRIP") == STRIP["MISSING"], 4.0)
+            away.rename(doc)
+            back = wait_for(lambda: q(h, "EDIT_STRIP") != STRIP["MISSING"], 4.0)
+            time.sleep(1.0)
+            ok &= check("edit 2a review: autosave off: the file back after MISSING is not written without Ctrl+S",
+                        back and doc.read_bytes() == EDIT_DOC.encode("utf-8") and q(h, "EDIT_SAVE_STATE") == SS["OFF"],
+                        f'state {q(h, "EDIT_SAVE_STATE")}')
+            cmd(h, "SAVE", 0.4)
+            post(h, WM_KEYDOWN, VK["esc"], 0, 0.4)
+        finally:
+            close_edit(p, h)
+        # ... nor a read-only file that became writable, when the window is activated again
+        import stat
+        ro = OUT / "edit-off-readonly.md"
+        if ro.exists():
+            os.chmod(ro, stat.S_IWRITE)
+        ro.write_bytes(EDIT_DOC.encode("utf-8"))
+        os.chmod(ro, stat.S_IREAD)
+        p, h = launch_edit(ro)
+        try:
+            enter_edit(h, 1, dx=1)
+            type_text(h, "выкл ", 0.2)
+            was = q(h, "EDIT_STRIP") == STRIP["READONLY"]
+            os.chmod(ro, stat.S_IWRITE)
+            post(h, 0x0006, 1, 0, 0.6)  # WM_ACTIVATE (WA_ACTIVE)
+            ok &= check("edit 2a review: autosave off: a read-only file that became writable is not written on activation",
+                        was and q(h, "EDIT_STRIP") == 0 and ro.read_bytes() == EDIT_DOC.encode("utf-8") and
+                        q(h, "EDIT_SAVE_STATE") == SS["OFF"], f'strip {q(h, "EDIT_STRIP")}, state {q(h, "EDIT_SAVE_STATE")}')
+            cmd(h, "SAVE", 0.4)
+            post(h, WM_KEYDOWN, VK["esc"], 0, 0.4)
+        finally:
+            close_edit(p, h)
+            os.chmod(ro, stat.S_IWRITE)
+    finally:
+        del_reg("Autosave")
+    clear_recovery()
+    return ok
+
+
 def main():
     OUT.mkdir(exist_ok=True)
     reset_profile()
@@ -3342,13 +4169,20 @@ def main():
              ("edit_encoding_strip", test_edit_encoding_strip), ("edit_close_session", test_edit_close_session),
              ("edit_recovery", test_edit_recovery), ("edit_two_windows", test_edit_two_windows),
              ("edit_frames", test_edit_frames), ("edit_blink", test_edit_blink), ("edit_perf", test_edit_perf),
-             ("edit_debounced", test_edit_debounced), ("settings_autosave", test_settings_autosave)]
+             ("edit_debounced", test_edit_debounced), ("settings_autosave", test_settings_autosave),
+             ("edit_review_keys", test_edit_review_keys), ("edit_review_doc", test_edit_review_doc),
+             ("edit_chrome_zoom", test_edit_chrome_zoom), ("edit_modal", test_edit_modal),
+             ("edit_recovery_guards", test_edit_recovery_guards)]
     only = [n for n in os.environ.get("FASTMD_ONLY", "").split(",") if n]  # e.g. FASTMD_ONLY=update,settings
     for name, t in tests:
         if not only or name in only:
             ok &= t()
     if any(name.startswith(("edit_", "settings_autosave")) for name, _ in tests if not only or name in only):
         ok &= check("edit 2a: no edit window's map failed its self-check after a swap", not SELFCHECK, "; ".join(SELFCHECK))
+        ok &= check("edit 2a: every edit window closed at once, without a question, with exit code 0", not CLOSE_PROBLEMS,
+                    "; ".join(CLOSE_PROBLEMS))
+    dumps = sorted((DATA / "crashes").glob("*.dmp")) if (DATA / "crashes").exists() else []
+    ok &= check("no crash dump in the test profile", not dumps, ", ".join(d.name for d in dumps))
     reset_profile()
     print("RESULT", "PASS" if ok else "FAIL")
     return 0 if ok else 1

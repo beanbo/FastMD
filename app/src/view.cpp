@@ -1155,23 +1155,15 @@ static int LinkOfRuns(uint32_t p, uint32_t runOff, uint32_t runCount) {
 }
 
 int LinkAt(float px, float py) {
-    uint32_t pos;
-    bool inside = false;
-    if (g.path.empty() || !HitTestDoc(px, py, &pos, &inside) || !inside) return -1;
-    // HitTestPoint reports the character under the point; a trailing hit moved pos past it → check pos and pos-1
-    for (uint32_t p : {pos, pos ? pos - 1 : 0}) {
-        uint32_t bi = BlockOfPos(p);
-        const Block& b = g.doc.blocks[bi];
-        int li = -1;
-        if (b.kind == BK_TEXT) li = LinkOfRuns(p, b.runOff, b.runCount);
-        else if (b.kind == BK_TABLE) {
-            const Table& t = g.doc.tables[b.aux];
-            for (uint32_t c = 0; c < t.rows * t.cols && li < 0; c++) {
-                const Cell& cell = g.doc.cells[t.cellOff + c];
-                if (p >= cell.textOff && p < cell.textOff + cell.textLen) li = LinkOfRuns(p, cell.runOff, cell.runCount);
-            }
-        }
-        if (li >= 0) return li;
+    DocHit h;
+    if (g.path.empty() || !HitTestDocAt(px, py, &h) || !h.inside || h.block < 0 || h.under == UINT32_MAX) return -1;
+    // the character HitTestPoint found under the point, in the block and cell under it (pos is past it after a trailing
+    // hit, and at a block's left edge pos - 1 would be the end of the block above, a link there not under the point)
+    const Block& b = g.doc.blocks[h.block];
+    if (b.kind == BK_TEXT) return LinkOfRuns(h.under, b.runOff, b.runCount);
+    if (b.kind == BK_TABLE && h.cell >= 0) {
+        const Cell& cell = g.doc.cells[g.doc.tables[b.aux].cellOff + h.cell];
+        return LinkOfRuns(h.under, cell.runOff, cell.runCount);
     }
     return -1;
 }
