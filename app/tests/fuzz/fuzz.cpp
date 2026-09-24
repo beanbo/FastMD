@@ -11,7 +11,8 @@
 // The input being parsed is always in app/tests/out/fuzz/last.md, so a crash can be replayed with --file.
 //
 // Every input is also parsed the way edit mode parses (with the text <-> source map) and checked by MapSelfCheck
-// (docs/EDIT-MODE.md §4.5, §14.2). Half the inputs see the formula and diagram libraries as present, half as absent,
+// (docs/EDIT-MODE.md §4.5, §14.2) and by the corpus sweep's round trips (tests/edit/map_sweep.h, strided to a few
+// thousand positions per input). Half the inputs see the formula and diagram libraries as present, half as absent,
 // and a third get CRLF line ends. A map that breaks an invariant stops the run with exit code 3 and leaves the input
 // as out/fuzz/map-<n>-tex<0|1>.u16 (the exact UTF-16, lone surrogates and all) plus a readable .md copy:
 //   fastmd-fuzz.exe --file out\fuzz\map-123-tex1.u16 --tex 1
@@ -26,6 +27,7 @@
 #include "doc.h"
 #include "editcore.h"
 #include "html.h"
+#include "../edit/map_sweep.h"
 
 // The parser asks whether the formula and diagram libraries are there: a formula is then a picture (an object atom in
 // the map) instead of code text. The fuzzer flips this per input so both paths of the map are exercised.
@@ -80,8 +82,8 @@ void LoadSeeds(const std::wstring& dir) {
     FindClose(h);
 }
 
-// interesting characters to splice in: the ones our parser gives special meaning to
-const wchar_t kSpice[] = L"#*_`~[]()<>!|$\\\n\r\t \"'&;:^-+={}\x00A0\xFFFD\xD83D\xDE00";
+// interesting characters to splice in: the ones our parser gives special meaning to (the NUL last: md4c replaces it)
+const wchar_t kSpice[] = L"#*_`~[]()<>!|$\\\n\r\t \"'&;:^-+={}\x00A0\xFFFD\xD83D\xDE00\0";
 
 std::wstring Mutate(std::mt19937& rng, const std::wstring& src) {
     std::wstring s = src;
@@ -165,6 +167,18 @@ bool ParseOnce(const std::wstring& text, std::string* why) {
             *why = "the map parse has a different block " + std::to_string(k) + " than the reading parse";
             ok = false;
         }
+    }
+    // the round trips of the corpus sweep, over a few thousand stops and offsets of each input: a map can pass the
+    // self-check and still send a caret somewhere else
+    if (ok) {
+        if (g_trace) { wprintf(L"  round trips...\n"); fflush(stdout); }
+        uint32_t stride = 1 + (uint32_t)(text.size() / 4000);
+        size_t stops = 0, offsets = 0;
+        mapsweep::SweepMap(m, text, stride, stride, &stops, &offsets, [&](const std::string& msg) {
+            *why = "round trip: " + msg;
+            ok = false;
+            return false;
+        });
     }
     if (g_trace) { wprintf(L"  tags...\n"); fflush(stdout); }
     // the tag reader is normally fed by md4c; here it is fed the raw text, which is harsher

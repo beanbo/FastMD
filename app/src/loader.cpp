@@ -130,7 +130,12 @@ static void LoadSource(bool startup) {
         g.loadFailed = true;
         g.src = std::wstring(L"# ") + Tr(S_LOAD_FAILED) + L"\n\n`" + g.path + L"`\n";
         tRead = NowTicks();
-        GetFileStamp(g.path.c_str(), nullptr, &g.fileSize);
+        // The watcher's baseline is this stamp: a file that is there but cannot be read (locked, denied) must not look
+        // changed to it, or every load would post the next reload at once.
+        if (!GetFileStamp(g.path.c_str(), &g.fileTime, &g.fileSize)) {
+            g.fileTime = {};
+            g.fileSize = 0;
+        }
     } else {
         static const char* kBom[] = {"", "", "\xFF\xFE", "\xEF\xBB\xBF", "", "\xEF\xBB\xBF\xFF\xFE"};
         g.fileSize = info.size;
@@ -234,6 +239,7 @@ void OpenDocument(const std::wstring& path, bool pushHistory, float scrollY, boo
         g.back.push_back(HistoryEntry{g.path, g.scrollY});
         g.fwd.clear();
     }
+    if (!g.path.empty()) EditLeaveDocument();  // a flush point for the document being left
     StopWatcher();
     JoinWorkers();
     ResetViewState();
@@ -294,6 +300,7 @@ static uint32_t MeasuredBlock(const MeasureJob* job, size_t k) { return job->idx
 
 static DWORD WINAPI MeasureThread(void* p) {
     auto* job = (MeasureJob*)p;
+    SetMeasureThread();  // no picture header from a share or the cloud: an edit waits for this thread (JoinDocReaders)
     Typography t;
     t.Init(g.dwf, &g.typo);
     for (size_t k = 0; k < job->h.size(); k++) {
@@ -321,10 +328,37 @@ static DWORD WINAPI MeasureThread(void* p) {
 // and the next batch follows when this one is in. Reading mode does the same after a model swap (a ticked task box).
 static bool g_measureUnknown = false;  // the batches in flight measure guessed heights only
 
+static int MeasureThreads(size_t blocks) {
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return (int)std::clamp<size_t>(blocks / 400, 1, std::min<DWORD>(8, std::max<DWORD>(1, si.dwNumberOfProcessors / 2)));
+}
+
 static void StartMeasureUnknown() {
     g_measureUnknown = true;
     size_t n = g.doc.blocks.size();
     if (g.jobsPending || !n) return;
+    if (!g.editing) {
+        // Reading mode with many guesses left (a tick landed while a big document was still being measured): nothing
+        // is typed next, so they are split over the threads StartMeasure uses, all at once - batches of 64 on one
+        // thread, each followed by a re-layout of the view, would take seconds there.
+        std::vector<uint32_t> unknown;
+        for (uint32_t i = 0; i < n; i++)
+            if (!g.known[i]) unknown.push_back(i);
+        if (unknown.size() > 512) {
+            g_measureUnknown = false;
+            int threads = MeasureThreads(unknown.size());
+            size_t chunk = (unknown.size() + threads - 1) / threads;
+            for (size_t from = 0; from < unknown.size(); from += chunk) {
+                auto* job = new MeasureJob{g.gen, 0, 0, g.textW, g.wideW, {}, {}};
+                job->idx.assign(unknown.begin() + from, unknown.begin() + std::min(unknown.size(), from + chunk));
+                job->h.assign(job->idx.size(), 0.f);
+                g.jobsPending++;
+                if (!Spawn(MeasureThread, job, THREAD_PRIORITY_BELOW_NORMAL, 256 * 1024, WK_MEASURE)) { g.jobsPending--; delete job; }
+            }
+            return;
+        }
+    }
     uint32_t a = std::min<uint32_t>(FirstVisible(g.scrollY), (uint32_t)n - 1);
     auto* job = new MeasureJob{g.gen, 0, 0, g.textW, g.wideW, {}, {}};
     for (size_t d = 0; job->idx.size() < 64 && (d <= a || a + d < n); d++) {  // outwards from the top of the view
@@ -346,9 +380,7 @@ void StartMeasure() {
     size_t unknown = 0;
     for (size_t i = 0; i < n; i++) unknown += !g.known[i];
     if (!unknown) return;
-    SYSTEM_INFO si;
-    GetSystemInfo(&si);
-    int threads = (int)std::clamp<size_t>(n / 400, 1, std::min<DWORD>(8, std::max<DWORD>(1, si.dwNumberOfProcessors / 2)));
+    int threads = MeasureThreads(n);
     size_t chunk = (n + threads - 1) / threads;
     for (int k = 0; k < threads; k++) {
         auto* job = new MeasureJob{g.gen, (uint32_t)(k * chunk), (uint32_t)std::min(n, (k + 1) * chunk), g.textW, g.wideW, {}, {}};
@@ -718,6 +750,23 @@ void CarryRenders(const Doc& oldD, Doc& nd, uint32_t editBeg, uint32_t oldEnd, u
             }
             continue;
         }
+        // The table has nothing for it in this render context (the text size or theme changed since it was drawn, or
+        // the entry was evicted): it shows the old model's picture of the same source meanwhile - with that picture's
+        // size, so the block diff sees nothing changed - until its own render arrives (StartImages queues it, ShowEntry
+        // keeps these pixels while it is pending). pxFor stays the old key: it is not the picture of the new one.
+        if (oi && oi->state == RS_OK && oi->pix) {
+            im.pix = oi->pix;
+            im.sc = oi->sc;
+            im.w = oi->w;
+            im.h = oi->h;
+            im.ascent = oi->ascent;
+            im.pxFor = oi->pxFor;
+            im.state = RS_OK;
+            im.renderFailed = oi->renderFailed;
+            im.wantW = oi->wantW;
+            im.wantH = oi->wantH;
+            continue;
+        }
         if (!im.mathKind || editBeg == UINT32_MAX || im.outerBeg == UINT32_MAX || im.outerBeg > newEnd || im.outerEnd < editBeg)
             continue;
         for (const Image& was : oldD.images) {
@@ -808,6 +857,12 @@ void OnImagesLoaded(std::vector<RenderResult>* batch) {
 }
 
 void RetryChangedPictures() {
+    // The looks are file-system calls on the UI thread: not inside a modal loop (a print job's pages are cut already),
+    // at most every 2 s, and never on a network drive, where an unreachable share would hang the window for its
+    // timeout on every Alt+Tab - those are tried again at the next load.
+    static ULONGLONG last = 0;
+    if (g.editModal > 0 || GetTickCount64() - last < 2000) return;
+    last = GetTickCount64();
     bool any = false;
     for (auto it = g.renders.begin(); it != g.renders.end();) {
         const std::wstring& k = it->first;
@@ -815,7 +870,7 @@ void RetryChangedPictures() {
             std::wstring path = k.substr(2, k.rfind(L'\x1f') - 2);
             FILETIME t{};
             uint64_t size = 0;
-            if (!path.empty() && GetFileStamp(path.c_str(), &t, &size) &&
+            if (!path.empty() && !IsNetworkPath(path) && GetFileStamp(path.c_str(), &t, &size) &&
                 (CompareFileTime(&t, &it->second.failTime) != 0 || size != it->second.failSize)) {
                 it = g.renders.erase(it);
                 any = true;
@@ -1009,8 +1064,14 @@ void OnFullDoc() {
     Invalidate();
 }
 
+static DWORD g_rereadMs = 0;  // OnFileChanged's backoff for a file that cannot be read now
+
 void StartBackgroundWork() {
     if (!g.path.empty()) StartWatcher();
+    if (g.loadFailed && !g.path.empty()) {  // a file there but locked is looked at again (OnFileChanged backs off)
+        g_rereadMs = 0;
+        SetTimer(g.hwnd, TIMER_RELOAD, 250, nullptr);
+    }
     EditAfterOpen();  // a save of this file was interrupted: the recovery strip (a directory listing, after the frame)
     if (g.fullPending) {  // the full model is (or will be) posted; measure/images start after the swap
         if (g.fullDoc.load()) PostMessageW(g.hwnd, WM_APP_FULLDOC, 0, 0);
@@ -1027,17 +1088,23 @@ void StartBackgroundWork() {
 // folder's notification handle fails (the folder went away, the network dropped) it starts again after a pause of 1,
 // 2, 4 ... 30 s (EDIT-MODE.md §10.7).
 namespace {
-struct WatchArgs { std::wstring path; FILETIME t0; uint64_t s0; };
+// Each watcher has a stop event of its own (its own handle to it: the thread closes one, StopWatcher the other). A
+// watcher stuck on a share that went away can outlive StopWatcher's wait; with a shared event re-armed for the next
+// document it would then run on forever, looking at a file nobody shows any more.
+struct WatchArgs { std::wstring path; FILETIME t0; uint64_t s0; HANDLE stop; };
 }  // namespace
 
 static DWORD WINAPI WatchThread(void* p) {
     auto* a = (WatchArgs*)p;
     std::wstring dir = DirOf(a->path);
     bool avail = true;
+    auto stopped = [&] { return WaitForSingleObject(a->stop, 0) == WAIT_OBJECT_0; };
     auto look = [&] {
         FILETIME t1{};
         uint64_t s1 = 0;
-        if (!GetFileStamp(a->path.c_str(), &t1, &s1)) {
+        bool there = GetFileStamp(a->path.c_str(), &t1, &s1);
+        if (stopped()) return;  // the look took long (a share gone): the window has moved on meanwhile
+        if (!there) {
             if (avail) PostMessageW(g.hwnd, WM_APP_FILECHANGED, 1, 0);
             avail = false;
         } else if (!avail || CompareFileTime(&a->t0, &t1) != 0 || a->s0 != s1) {
@@ -1055,7 +1122,7 @@ static DWORD WINAPI WatchThread(void* p) {
         bool stop = false;
         if (ch != INVALID_HANDLE_VALUE) {
             pause = 1000;
-            HANDLE hs[2] = {g.watchStop, ch};
+            HANDLE hs[2] = {a->stop, ch};
             for (;;) {
                 if (WaitForMultipleObjects(2, hs, FALSE, INFINITE) != WAIT_OBJECT_0 + 1) { stop = true; break; }
                 look();
@@ -1063,26 +1130,39 @@ static DWORD WINAPI WatchThread(void* p) {
             }
             FindCloseChangeNotification(ch);
         }
-        if (stop || WaitForSingleObject(g.watchStop, pause) != WAIT_TIMEOUT) break;
+        if (stop || WaitForSingleObject(a->stop, pause) != WAIT_TIMEOUT) break;
         pause = std::min<DWORD>(pause * 2, 30000);
     }
+    CloseHandle(a->stop);
     delete a;
     return 0;
 }
 
 void StartWatcher() {
     StopWatcher();
-    if (!g.watchStop) g.watchStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    ResetEvent(g.watchStop);
-    g.watchThread = CreateThread(nullptr, 64 * 1024, WatchThread, new WatchArgs{g.path, g.fileTime, g.fileSize}, 0, nullptr);
+    HANDLE stop = CreateEventW(nullptr, TRUE, FALSE, nullptr), mine = nullptr;
+    if (!stop || !DuplicateHandle(GetCurrentProcess(), stop, GetCurrentProcess(), &mine, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+        if (stop) CloseHandle(stop);
+        return;
+    }
+    auto* args = new WatchArgs{g.path, g.fileTime, g.fileSize, mine};
+    g.watchThread = CreateThread(nullptr, 64 * 1024, WatchThread, args, 0, nullptr);
+    if (!g.watchThread) {
+        CloseHandle(mine);
+        CloseHandle(stop);
+        delete args;
+        return;
+    }
+    g.watchStop = stop;
 }
 
 void StopWatcher() {
     if (!g.watchThread) return;
     SetEvent(g.watchStop);
-    WaitForSingleObject(g.watchThread, 2000);
+    WaitForSingleObject(g.watchThread, 2000);  // a thread stuck on a share ends by itself once the call returns
     CloseHandle(g.watchThread);
-    g.watchThread = nullptr;
+    CloseHandle(g.watchStop);
+    g.watchThread = g.watchStop = nullptr;
 }
 
 // Reading mode (EDIT-MODE.md §10.7). The file is what the window shows when its stamp is the one taken at load or left by
@@ -1090,8 +1170,6 @@ void StopWatcher() {
 // unchanged by another program): then only the stamp is taken, and the reader keeps the pictures, the layout and the
 // history. Other text is reloaded. A file that cannot be read now is not taken for an empty or a changed one: it is
 // read again a little later (250 ms, doubling to 4 s), and a file that is gone waits for the watcher to see it again.
-static DWORD g_rereadMs = 0;
-
 void OnFileChanged() {
     FILETIME t{};
     uint64_t size = 0;
@@ -1100,9 +1178,19 @@ void OnFileChanged() {
         g_rereadMs = 0;
         return;
     }
-    if (g.loadFailed) {  // the error document: the file is back
-        if (there) ReloadDocument();
-        return;
+    if (g.loadFailed) {  // the error document: reloaded once the file can be read
+        if (!there) return;  // still gone: the watcher reports its return
+        std::string probe;
+        DWORD pe = 0;
+        SaveState ps = ReadDisk(g.path.c_str(), probe, nullptr, &pe);
+        if (ps == SS_SAVED) {
+            g_rereadMs = 0;
+            ReloadDocument();
+        } else if (ps == SS_BUSY || ps == SS_UNKNOWN) {  // locked by another program: looked at again, less and less often
+            g_rereadMs = g_rereadMs ? std::min<DWORD>(g_rereadMs * 2, 4000) : 250;
+            SetTimer(g.hwnd, TIMER_RELOAD, g_rereadMs, nullptr);
+        }
+        return;  // denied: nothing will change that by itself (F5 tries again)
     }
     std::string bytes;
     DWORD e = 0;

@@ -98,6 +98,20 @@ std::wstring DirOf(const std::wstring& path) {
     return slash == std::wstring::npos ? L"" : path.substr(0, slash + 1);
 }
 
+bool IsNetworkPath(const std::wstring& p) {
+    auto sep = [](wchar_t c) { return c == L'\\' || c == L'/'; };
+    size_t at = 0;
+    if (p.size() >= 4 && sep(p[0]) && sep(p[1]) && (p[2] == L'?' || p[2] == L'.') && sep(p[3])) {  // "\\?\" "\\.\"
+        if (p.size() >= 8 && _wcsnicmp(p.c_str() + 4, L"UNC", 3) == 0 && sep(p[7])) return true;
+        at = 4;  // "\\?\C:\..." is a local drive
+    } else if (p.size() >= 2 && sep(p[0]) && sep(p[1])) {
+        return true;  // \\server\share
+    }
+    if (p.size() < at + 2 || p[at + 1] != L':') return false;
+    wchar_t root[4] = {p[at], L':', L'\\', 0};
+    return GetDriveTypeW(root) == DRIVE_REMOTE;  // the drive table: no round trip to the share
+}
+
 // ------------------------------------------------------------------------------------------------ files
 // Bytes that are not UTF-8 are read in the ANSI code page, and edit mode writes them back in the same one - so it is
 // resolved to its number once (CP_ACP could mean another page by the time of the write), FASTMD_ACP standing in for

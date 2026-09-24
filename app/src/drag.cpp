@@ -198,7 +198,10 @@ void StartDrag(int kind, int arg) {
     if (!data) return;
     auto* src = new DropSource();
     DWORD effect = 0;
-    DoDragDrop(data, src, DROPEFFECT_COPY | (kind == DRAG_LINK ? DROPEFFECT_LINK : 0), &effect);
+    {
+        ModalScope modal;  // the data object holds on to what it was built from
+        DoDragDrop(data, src, DROPEFFECT_COPY | (kind == DRAG_LINK ? DROPEFFECT_LINK : 0), &effect);
+    }
     src->Release();
     data->Release();
     g.selecting = false;

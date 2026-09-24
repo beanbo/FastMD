@@ -99,6 +99,7 @@ void CrashReportIfAny() {
     SetLastCrashSeen(written);
     wchar_t msg[1024];
     swprintf_s(msg, Tr(S_CRASH_FOUND), newest.c_str());
+    ModalScope modal;
     if (MessageBoxW(g.hwnd, msg, L"FastMD", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES)
         ShellExecuteW(g.hwnd, L"open", L"explorer.exe", (L"/select,\"" + newest + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
 }

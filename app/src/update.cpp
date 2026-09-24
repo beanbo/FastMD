@@ -283,6 +283,7 @@ void UpdateInstall(bool ask) {
         wchar_t msg[1024];
         swprintf_s(msg, Tr(S_UPDATE_CONFIRM), g_found.version.c_str(), FASTMD_VERSION_WSTR);
         HWND owner = SettingsHwnd() ? SettingsHwnd() : g.hwnd;
+        ModalScope modal;
         if (MessageBoxW(owner, msg, L"FastMD", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
     }
     ShowToast(Tr(S_UPDATE_DOWNLOADING), 4000);
@@ -372,7 +373,12 @@ void OnUpdateMessage(WPARAM what, LPARAM lp) {
         wchar_t msg[512];
         swprintf_s(msg, Tr(S_UPDATE_RESTART_ASK), g_found.version.c_str());
         HWND owner = SettingsHwnd() ? SettingsHwnd() : g.hwnd;
-        if (MessageBoxW(owner, msg, L"FastMD", MB_YESNO | MB_ICONINFORMATION) == IDYES) UpdateRestart();
+        bool yes;
+        {
+            ModalScope modal;
+            yes = MessageBoxW(owner, msg, L"FastMD", MB_YESNO | MB_ICONINFORMATION) == IDYES;
+        }
+        if (yes) UpdateRestart();
         break;
     }
     }

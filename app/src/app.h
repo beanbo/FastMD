@@ -322,6 +322,17 @@ struct App {
 };
 extern App g;
 
+// Modal depth (EDIT-MODE.md §10.10): every modal loop - a menu, a message box, a file or print dialog, a print job, a
+// drag - runs inside one of these. Messages still arrive in such a loop, and whoever opened it holds on to the model
+// (a print job to its pages), so meanwhile the reload waits, a test splice is refused, window activation looks at no
+// file, and pictures that arrive are put in place only once the last scope has closed (WM_APP_REPLAY).
+struct ModalScope {
+    ModalScope() { g.editModal++; }
+    ~ModalScope();
+    ModalScope(const ModalScope&) = delete;
+    ModalScope& operator=(const ModalScope&) = delete;
+};
+
 // ------------------------------------------------------------------------------------------------ view.cpp
 float Scale();                       // pixels per DIP (DPI / 96 × zoom)
 float ViewW();
@@ -575,7 +586,9 @@ BaselineResult EditBaseline(SaveState* st);
 SaveState EditSave(bool flushPoint); // g.src into the file (§10.3); flushPoint: leave, close, Ctrl+S
 void EditPushStep(EditStep step);    // an undo step for a change made outside edit mode, if a history exists
 void EditOnLoad();                   // a document was (re)loaded: a new session
+void EditLeaveDocument();            // before another document (or a reload, or the close): a flush point
 void EditAfterOpen();                // after the first frame of an open: an interrupted save's recovery file?
+bool EditRecoveryRestorable();       // the recovery strip may offer Restore (the file is still the torn one)
 void EditCommand(UINT id, UINT arg); // the recovery strip's commands
 LRESULT EditCopyData(const COPYDATASTRUCT* cd);  // FASTMD_TEST_HOOKS: splice / save
 bool EditTestHooks();                // FASTMD_TEST_HOOKS=1 (read once)

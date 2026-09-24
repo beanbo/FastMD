@@ -595,11 +595,15 @@ const MD_FASTMD_HOOKS* fastmd;     /* NULL = off */
 | P3 | `md_process_inlines` (4858), immediately before each `MD_TEXT(break_type, "\n")` and before the code-span/formula `MD_TEXT(text_type, " ")` that joins two lines | `break_extent(type, beg, end)` | soft/hard break: `beg = line->end − 1` when the break is a backslash hard break (`enforce_hardbreak`), else `line->end` (so trailing blanks, incl. a two-space break, are inside); `end = (line+1)->beg` (after the next line's container prefix and indentation). Code span / formula: `beg = off` (the EOL position after md4c emitted trailing blanks as text), `end = (line+1)->beg`. Raw inline HTML across lines: reported with `MD_TEXT_HTML`, ignored by the Builder |
 | P4 | `md_process_inlines`, next to every `MD_ENTER_SPAN` / `MD_LEAVE_SPAN` | `span_extent(type, enter, beg, end)` | EM: `[off, off+1)` and STRONG: `[off, off+2)`, fired inside the `*`/`_` loops with the current `off` (a run of three reports EM then STRONG on enter, STRONG then EM on leave); CODE, DEL, LATEXMATH(_DISPLAY): `[mark->beg, mark->end)` (a code opener includes the stripped space); A/IMG: enter `[opener->beg, opener->end)` (`[` or `![`), leave `[closer->beg, closer->end)` — the closer covers `](dest "title")`, `][label]` or `]`; FOOTNOTE_REF: `[opener->beg, closer->end)` on both enter and leave; autolinks (`<…>`, permissive URL/WWW/e-mail): enter `[opener->beg, opener->end)`, leave `[closer->beg, closer->end)`, fired only under the same `VALIDPERMISSIVEAUTOLINK` condition as the span (permissive delimiters are zero-width, F23). Other span types (not enabled by FastMD's flags) report their mark extents the same way |
 | P5 | `md_process_table_cell` (5245) gains `int missing`; `md_process_table_row` passes 1 in the padding loop (5314-5315) | `cell_extent(beg, end, missing)` after trimming, before `MD_ENTER_BLOCK` | an empty present cell reports `beg == end ==` the offset of its closing pipe (trimming ran to it); a padding cell reports `(0, 0, 1)` (F14, F20) |
-| P6 | `MD_FOOTNOTE_DEF` gains `OFF def_beg`, set to `lines[0].beg` in `md_is_footnote_definition` (2046); `md_process_footnote_def` (7217) fires before `MD_ENTER_BLOCK` | `footnote_extent(def_beg, content_lines[0].beg, content_lines[n−1].end)` | `def_beg` is the `[` of `[^label]:`. Unreferenced definitions are not processed, so they get no extent (they are invisible lines, §7.9). Definitions are one paragraph (2082-2105) (F5) |
+| P6 | `MD_FOOTNOTE_DEF` gains `OFF def_beg`, set to `lines[0].beg` in `md_is_footnote_definition` (2046); `md_process_footnote_def` (7217) fires before `MD_ENTER_BLOCK` | `footnote_extent(def_beg, content_lines[0].beg, content_lines[n−1].end)` | `def_beg` is the `[` of `[^label]:`; a definition with no content line reports `(def_beg, def_beg, def_beg)` (Phase 1 notes). Unreferenced definitions are not processed, so they get no extent (they are invisible lines, §7.9). Definitions are one paragraph (2082-2105) (F5) |
 | P7 | `md_is_container_mark` (6573), both list branches (6594-6601, 6613-6624) | — | `p_container->task_mark_off = beg;` (the first character of the marker). The task path (7012) overwrites it for task items, so `MD_BLOCK_LI_DETAIL::task_mark_offset` means "offset of the task mark" for task items and "offset of the list marker" otherwise (comment updated in `md4c.h`). The Builder derives a task item's marker by scanning back from `task_mark_offset − 1` (the `[`) over blanks to the marker (F14a) |
 | P8 | `md_consume_link_reference_definitions` (5896-5911), the injected HR | — | the injected HR keeps its line: the line `lines[n]` is saved before `n++`, the HR is pushed with `sizeof(MD_BLOCK) + sizeof(MD_LINE)`, the current block is moved by that size, `n_lines = 1` and the line is stored after the block, so P1 reports it (F14e). Ordinary HR and ATX blocks already carry their single line (7142-7148) |
 
-The patch is mechanical; §4.5's invariants run under the fuzzer on every input (§14.2).
+The patch is mechanical; §4.5's invariants run under the fuzzer on every input (§14.2). Two upstream bugs are fixed
+with it, in every parse (marked "FastMD fix" in `md4c.c`): a NUL in code or raw HTML reached the text twice (as
+U+FFFD and raw, `md_text_with_null_replacement`), and a code span whose closer starts a line (`` foo⏎`` ``) was
+followed by a soft break inside its own closer (the closer now moves the line on, as the link closer does), which
+also rendered `` ``⏎foo⏎``bar `` as "foo bar" instead of CommonMark's "foobar".
 
 ### 4.2 Doc additions (`doc.h`)
 
@@ -726,7 +730,8 @@ consumed by the next `Emit`, and **cleared after every `Emit`** (F14b).
 | front matter (table or YAML) | first body line start .. last body line end | 0 | last body line end | closing `---`/`...` line end | `BS_RAW\|BS_FRONT` |
 | alert title (md4c admonition or `TryAlert`), footnote-section HR | — | — | — | — | `BS_SYNTH` |
 | footnote definition text | `footnote_extent` content | `LineStart(def_beg)` | `LineEnd(content end)` | `lineEnd` | `BS_FOOTNOTE`, `aux = def_beg` |
-| empty list item (synthesized leaf) | `beg = end` = marker end + following blanks (task: after `[ ]` + one blank), clamped to the line end | `LineStart(markOff)` | `LineEnd` | `lineEnd` | `BS_EMPTYITEM` |
+| footnote definition with no text (`[^2]:`; a synthesized leaf that shows its number and `↩`, in reading mode too) | `beg = end` = after `]:` and the blanks, clamped to the line end | `LineStart(def_beg)` | `LineEnd` | `lineEnd` | `BS_FOOTNOTE\|BS_EMPTYITEM`, `aux = def_beg` |
+| empty list item (synthesized leaf) | `beg = end` = marker end + following blanks (task: after `[ ]` + one blank), clamped to the line end | `LineStart(markOff)` | `LineEnd` | `lineEnd` | `BS_EMPTYITEM`; an item whose marker line holds more than blanks but no leaf (a footnote or link reference definition took it, `- [^1]: x`) stays `BS_SYNTH`: the line is the definition's |
 
 **Spans.** A stack per block: `span_extent(enter)` pushes `{type, tBeg = text.size(), openBeg, openEnd}`,
 `span_extent(leave)` pops and records `closeBeg/closeEnd`, `tEnd`. Flags: `SF_ENTERABLE` for EM, STRONG, DEL,
@@ -734,7 +739,9 @@ consumed by the next `Emit`, and **cleared after every `Emit`** (F14b).
 does not start with `](`; `SF_UNDERSCORE` when the run is `_`. **Inline HTML pseudo-spans** (F25): each inline tag
 chunk of `b strong i em cite var code tt samp del s strike kbd sup sub a` that points into the source opens or closes
 a pseudo-span of its class (innermost open of the class); an opener still open at the block end gets `SF_UNCLOSED`
-with `closeBeg = closeEnd =` the block's content end. A tag split across lines makes no pseudo-span.
+with `closeBeg = closeEnd =` the block's content end. A tag split across lines (md4c sends it one line at a time)
+is put together and read as one tag in both modes: it adds what the tag adds (a `<br>` across lines is one atom over
+its whole source, line end and prefix included), its attributes are never text, and it makes no pseudo-span.
 
 **Other rules.**
 - `TryAlert` (one-line `> [!NOTE] text`): segments inside the replaced text range are dropped, later ones shifted by
@@ -757,18 +764,27 @@ with `closeBeg = closeEnd =` the block's content end. A tag split across lines m
 
 1. `segs` sorted by `t`, non-overlapping; each segment lies inside its block's text range (and inside its cell).
 2. `SEG_PLAIN`: `src.compare(s, len, text, t, len) == 0`.
-3. `SEG_TEXTATOM`/`SEG_OBJATOM`: `sLen ≥ 1`; `[s, s+sLen)` lies inside the block's `[line, outerEnd]`; an escape
-   atom starts with `\`; a NUL atom is `\0`.
+3. `SEG_TEXTATOM`/`SEG_OBJATOM`: `sLen ≥ 1`; an escape atom starts with `\`; a NUL atom is `\0`. Every segment
+   with a source (plain ones too) lies inside the block's `[line, outerEnd]`, and a table cell's inside that cell's
+   `[beg, end]`.
 4. Coverage: every text position of a block that is not `BS_SYNTH`, `BS_RAW` or `BS_OBJECT` is covered by exactly
    one segment (`SEG_SYNTH` counts as covering).
 5. Inside a block, segments are non-decreasing in `s`.
-6. `line ≤ beg ≤ end ≤ lineEnd ≤ outerEnd` for every block with a record; blocks of the normal flow (not
-   `BS_FOOTNOTE`, not `BS_SYNTH`) have non-decreasing `line`; `blockOrder` is sorted by `line`.
+6. `line ≤ beg ≤ end ≤ lineEnd ≤ outerEnd` for every block with a record, `line` at a line start and `lineEnd`,
+   `outerEnd` at line ends; blocks of the normal flow (not `BS_FOOTNOTE`, not `BS_SYNTH`) have non-decreasing
+   `line`; `blockOrder` is sorted by `line`, and neighbours in it claim disjoint `[line, outerEnd]` (the blocks of one
+   HTML block, which share its record, excepted).
 7. Spans: `openBeg ≤ openEnd ≤ closeBeg ≤ closeEnd` (unless `SF_UNCLOSED`); spans of a block nest without partial
-   overlap in both text and source; `tBeg ≤ tEnd` inside the block's text.
+   overlap in both text and source; `tBeg ≤ tEnd` inside the block's text; no segment reaches into a delimiter,
+   except the atom that stands for the whole span (a picture, a formula, a footnote reference).
 8. Cells: a present cell lies inside its row's `[contentStart, lineEnd]`; pipes are `|` characters.
-9. Items: `g.src[markOff]` is `-`, `+`, `*` or a digit; `taskOff` (if any) is ` `, `x` or `X` between `[` and `]`.
+9. Items: `g.src[markOff, markOff + markLen)` is a list marker (`-`, `+`, `*`, or digits and `.`/`)`) followed by a
+   blank or the line end; no two items share a marker; the marker lies before its first block's `beg`; `taskOff` (if
+   any) is ` `, `x` or `X` between `[` and `]`.
 10. Every `Image` with ranges has `outerBeg ≤ srcBeg ≤ srcEnd ≤ outerEnd` inside its block's lines.
+
+The self-check says the map is well formed; the round trips of §14.1's sweep (`tests/edit/map_sweep.h`) say it is
+usable, and the fuzzer runs both (§14.2).
 
 `MapSelfCheck` is compiled into Release: `Q_MAP_SELFCHECK` runs it on demand, and with `FASTMD_EDIT_SELFCHECK=1`
 after every `EditReparse` (failures counted, T22). The fuzzer runs it on every input (§14.2).
@@ -786,7 +802,9 @@ after every `EditReparse` (failures counted, T22). The fuzzer runs it on every i
 - `JoinDocReaders()` (every edit swap): `gen++; docGen++;` **then** waits for `WK_MEASURE` handles only (they stop
   within one block), removes and closes them, `jobsPending = 0`. It asserts `!g.fullPending`. It never waits for the
   scaler, the picture worker, the preview worker or the updater (R3). Bumping `docGen` is harmless: nothing that can
-  run in edit mode checks it any more.
+  run in edit mode checks it any more. "Within one block" holds because a measure thread reads no picture header that
+  can block: a path on a network drive or a cloud file not on this disk is left at size unknown (placeholder), and the
+  picture worker's decode supplies the size (Phase 1 notes).
 
 ### 5.2 Render table and the picture worker (R4, R5, R6, R15, R20)
 
@@ -822,8 +840,9 @@ after every `EditReparse` (failures counted, T22). The fuzzer runs it on every i
   reference a changed entry (a `BK_IMAGE` with that `aux`, or a block with an `F_IMAGE` run on it) lose their cached
   layout and get `H` from `ImageDisplayHeight`; `RecomputeY` under the anchor, `pixelSerial++`, `Invalidate()`.
 - **Failures.** A failed local picture keeps its file stamp and is retried only on an explicit reload,
-  `CMD_LOAD_REMOTE`, or when a stamp check on window activation shows the file changed. A failed formula or diagram is
-  never retried for the same key and context.
+  `CMD_LOAD_REMOTE`, or when a stamp check on window activation shows the file changed. The activation check runs on
+  the UI thread, so it runs at most every 2 s, never inside a modal loop, and never for a path on a network drive
+  (those are retried at the next load). A failed formula or diagram is never retried for the same key and context.
 - **Memory.** When the pixel bytes of entries not referenced by `g.doc` exceed 64 MB, the least recently used are
   evicted.
 
@@ -839,7 +858,8 @@ while closing — so the flag can no longer stick (the leak at `loader.cpp:469`)
 `MeasureJob` gains `std::vector<uint32_t> idx` (empty = the `from..to` range, as today). In edit mode
 `StartMeasure()` measures only blocks with `known == 0`, nearest to the viewport first, in jobs of at most 64 blocks
 on one thread; it runs from `TIMER_EDIT_IDLE` (1 s after the last edit) and from `Relayout`. `EditExit` runs the
-ordinary full `StartMeasure()`.
+ordinary full `StartMeasure()`. Reading mode after a swap (a tick) measures only the unknown blocks too, but with more
+than 512 of them (a big document still being measured) splits them over `StartMeasure`'s threads in one go.
 
 ### 5.5 `EditReparse` — the swap (UI thread, synchronous)
 
@@ -855,7 +875,10 @@ No message is pumped between the first splice of an operation and the end of ste
    pixels of the previously bound image: `pix`, `w`, `h`, `ascent`, `pxFor = old key`, state `RS_OK`,
    `renderFailed = old.renderFailed`; the render for the new key is requested (preview worker when a popup is bound,
    else the picture worker). Such an adoption is never stored in the table under the new key, so a later exact match
-   cannot show a/b for `\frac{a}{` (R15). `detailsOpen` is carried when the `<details>` group count is unchanged.
+   cannot show a/b for `\frac{a}{` (R15). An entry with no table hit whose source the old model shows with pixels
+   (the render context changed since, e.g. the text size, or the entry was evicted) adopts that picture the same way,
+   in reading mode too, until its own render arrives. `detailsOpen` is carried when the `<details>` group count is
+   unchanged.
 5. `DiffBlocks(g.doc, nd)` → common prefix `p` and suffix `q` (`p + q ≤ min(nOld, nNew)`) under layout equality:
    equal kind, heading, marker, listLevel, muted, lang, alertTitle, align, indent, details, text, run count and every
    run's `(start − textOff, len, flags, color, link target text, picture key)`, table shape and every cell's text and
@@ -1008,7 +1031,11 @@ neighbouring stop. Atom ids: inline = image index; block = `0x40000000 | block i
 | `the $E$‸ is` | `the $E$x is` → fails verification (the formula stops being one) → `the $E$ x is` (§7.3) |
 
 **6.3.1 Insertion points of empty blocks and cells.** Empty paragraph cannot exist (phantom instead). Empty ATX
-heading `##`: `beg` (after the `#`s); a space is inserted first when the next character is not a blank (`## x`).
+heading `##`: `beg` (after the `#`s); a space is inserted first when the character before `beg` is not a blank
+(`## x`). With a closing sequence (`## ##`, `lineEnd > end`) `beg` sits before it, and the inserted text gets a
+trailing space when the character at `beg` is not a blank (`## x ##`, not `## x##`, which is the heading "x##").
+Empty footnote definition `[^2]:`: `beg` of its record (after `]:` and the blanks); a space first when none follows
+the colon.
 Empty list item `-` / `1.` / `- [ ]`: `beg` of the `BS_EMPTYITEM` record; a space is inserted first when none follows
 the marker. Empty fenced block with an empty content line: the start of that line after its container prefix;
 `BS_NOCONTENT` (```` ```⏎``` ````): insert `E + ContPrefix` at `beg` (the fence line's EOL) first (F4). Empty table
@@ -1718,11 +1745,18 @@ do nothing when not dirty (equal bytes are never written, UX-5).
    of the prefix / suffix); `middle = Encode(text[p, len − s))`. An unencodable character → **UNENCODABLE** with the
    first offending character, nothing written. `out = bytes[0, pb) + middle + bytes[len − sb, len)`. **Proof**:
    `decode(header + out) == text` in full for sources under 1 M characters and always under `FASTMD_EDIT_SELFCHECK`;
-   above that, the changed window ± 8 bytes is decoded and compared. Reason codes on failure: UNENCODABLE, LONE_SURROGATE,
+   above that, the changed window ± 8 bytes is decoded and compared, and an ANSI file whose edit removes, adds or
+   borders a byte ≥ 0x80 is checked whole for turning into valid UTF-8 (refused: the next read would take it for
+   UTF-8). Reason codes on failure: UNENCODABLE, LONE_SURROGATE,
    BOM_LOOKALIKE (text starting with U+FEFF in a BOM-less UTF-8 file, or ANSI bytes that would start with EF BB BF / FF
-   FE — ENCODING strip with its own message), ENCODER_ERROR (an API failure: status FAILED, no dialog) (D12).
-4. **Recovery file** (§10.5): header + old bytes `[pb, oldLen)`, written, `FlushFileBuffers`, closed. Failure →
-   FAILED, the target untouched.
+   FE — or FF FE right after the UTF-8 mark an ANSI file can have — ENCODING strip with its own message),
+   ENCODER_ERROR (an API failure: status FAILED, no dialog) (D12).
+4. **Recovery file** (§10.5): header + the old bytes `[pb, pe)` — `pe = oldLen`, or the end of the replaced bytes when
+   the length stays (a tick keeps one byte) — written under a new name, `FlushFileBuffers`, closed. Failure → FAILED,
+   the target untouched. While saves go unflushed (step 7), the recovery file of the last flushed version stays and
+   stands for it: a save inside its range writes none, one outside it writes a wider one pieced together from it and
+   the unchanged bytes around (the old one is deleted once the new one is safe); the file's result block records what
+   the target holds after each save. It is deleted at the next flushed save or flush point.
 5. **Growing file**: `SetFilePointerEx(newLen)` + `SetEndOfFile` before any content byte changes; failure → FAILED
    "disk full", content untouched, recovery file deleted.
 6. Write `middle + suffix` from `pb` in 1 MB chunks; `SetFilePointerEx(newLen)` + `SetEndOfFile`.
@@ -1732,8 +1766,10 @@ do nothing when not dirty (equal bytes are never written, UX-5).
    flush cost (median of its first three flushes this session) is below 5 ms — the number goes into the phase report.
 8. `GetFileInformationByHandle` (the new stamp) **before** `CloseHandle`; a failed flush or close → FAILED, still dirty.
 9. A failure in steps 5–8 after bytes changed: the old bytes are written back at `pb` and the old length restored; if
-   that fails too the recovery file is kept and its path shown in the status tooltip.
-10. Success: recovery file deleted; `g.disk` = the snapshot text with `out`'s hash and length and the new stamp;
+   that fails too the recovery file is kept, its path shown in the status tooltip, and the RECOVERY strip shown at
+   once; no save writes the file while a leftover of it waits on the strip.
+10. Success: recovery file deleted if the save was flushed (else kept, step 4); `g.disk` = the snapshot text with
+    `out`'s hash and length and the new stamp;
     `g.fileTime/g.fileSize` from the handle (the watcher stays quiet); `g.saves++`; the journal deleted; `dirty`
     recomputed against the current `g.src`.
 
@@ -1764,17 +1800,30 @@ characters as one undo step. Autosave stays paused until one is chosen; the moda
 (UX-16, D7).
 
 ### 10.5 Recovery file and the restore banner (D2, D3, D22)
-- Name `DataDir()\recovery\<volSerial:8 hex>-<fileIndex:16 hex>-<pid>.rec`; header `{magic "FMDREC1", original path,
-  pre-save size, mtime, code page, header bytes, pb}` + the old bytes from `pb` to the old end. It exists only
-  **around a save** (written and flushed before the target changes, deleted right after a successful flushed save), so
-  a leftover means "a save was interrupted".
+- Name `DataDir()\recovery\<volSerial:8 hex>-<fileIndex:16 hex>-<pid>-<n>.rec`, created with `CREATE_NEW` (never
+  over another one: a kept file may be the only copy of its bytes); header `{magic "FMDREC2", original path, pre-save
+  size, mtime, code page, header bytes, pb, pe, a hash of the old bytes [0, pb), of [pe, size) and of the saved ones
+  (8 bytes a step: a tick at the top of a big file hashes the rest of it), FNV-1a-64 of all the old bytes (the
+  baseline's), writer pid and process start time, a hash of all that}`, a result block `{length, FNV-1a-64, their hash}` of
+  what the target holds after the save that wrote (or last used) it, then the old bytes `[pb, pe)`. It exists only
+  **around a save** (written and flushed before the target changes, deleted right after a successful flushed save —
+  or, between flushes, at the next flushed save or flush point, §10.3 step 4), so a leftover means "a save was
+  interrupted" — or a crash between flushes.
 - A source with `FILE_ATTRIBUTE_ENCRYPTED` gets an encrypted recovery file; files older than 14 days are purged at edit
   entry (D22). BitLocker To Go / VeraCrypt cannot be detected (README).
 - After the first frame of an open (never on the startup path), `recovery\<vol>-<index>-*` is listed for the opened
-  file's identity (skipping files whose pid is a live FastMD); a leftover shows the RECOVERY strip «Прошлое сохранение
-  прервалось»: [Открыть копию] rebuilds the previous file (current bytes `[0, pb)` + the saved tail) as
-  `%TEMP%\FastMD\<name> (восстановлено).md` and opens it in a new window; [Восстановить] writes the tail back at `pb`,
-  restores the old length, flushes and reloads; [Удалить] deletes the recovery file.
+  file's identity, keeping files whose header names this path (case-insensitive: FAT gives a new file a deleted one's
+  index) and whose header and saved bytes check out, and skipping those of another FastMD process that still runs (pid
+  and start time; this process's own are listed). Each is classified against the file's bytes and stamp: it holds
+  the result block's bytes (the save went through) or the old bytes (it never wrote) → deleted without a word; its
+  bytes around `[pb, pe)` are the old version's and the file was not written later than the recovery file (+2 s for
+  FAT) → **torn**; anything else → **changed**. A leftover shows the RECOVERY strip «Прошлое сохранение прервалось»
+  (changed: «…, а файл с тех пор изменён», without [Восстановить]): [Открыть копию] rebuilds the previous file
+  (current bytes `[0, pb)` + the saved ones, + the current ones after `pe` for a save in place) as
+  `%TEMP%\FastMD\<name> (восстановлено).md` and opens it in a new window; [Восстановить] (torn only, checked again
+  under an exclusive handle) first writes the bytes it replaces to a recovery file of its own, then writes the saved
+  bytes back at `pb`, restores the old length, flushes, deletes its own and reloads; [Удалить] deletes the recovery
+  file.
 - «Перезаписать файл моими правками» keeps the overwritten external version as `<id>.theirs` until the document is
   closed.
 - Edit mode is refused when `DataDir()` is empty (§2.1).
@@ -1797,7 +1846,12 @@ unavailable**; when its handle fails it restarts itself with backoff (1, 2, 4 �
 
 **Reading mode:** stamp unchanged → nothing. Else read: a failed or short read → retry with backoff 250 ms → 4 s (no
 reload into the error document); text equal to the baseline → adopt the stamp only (no reload, the history survives,
-D6); otherwise `ReloadDocument()` (`Q_RELOADS++`, history cleared).
+D6); otherwise `ReloadDocument()` (`Q_RELOADS++`, history cleared). The error document (a load that failed) keeps the
+file's stamp as the watcher's baseline, and is reloaded only once the file can be read: a locked file is read again
+with the same backoff (from the open on), a denied one waits for F5.
+
+The watcher has a stop event of its own, so one that outlives `StopWatcher` (stuck on a share that went away) ends
+when its call returns instead of running on for the next document.
 
 **Edit mode:**
 1. stamp unchanged → nothing;
@@ -1872,6 +1926,10 @@ rename by file ID is out of scope.
 - No UI is ever shown while the file handle is open: questions come before a save starts, and the save restarts from
   step 1 afterwards.
 - Printing: `StartDocW` inside a modal scope; paper has no edit inset, no caret, no popups, no phantom row.
+- Phase 1 has the scope and its first users: `ModalScope` wraps every modal call listed above; while it is open
+  `TIMER_RELOAD` re-arms for 250 ms, `EditSplice` refuses (the test hooks arrive as sent messages inside such loops),
+  window activation looks at no file, and `WM_APP_IMAGES` batches wait in the queue that `WM_APP_REPLAY` replays. The
+  other timers, messages and `closePending` join with 2a.
 
 ### 10.11 Two windows on one file (D18)
 At entry, `CreateMutexW(L"Local\\FastMD.edit.<volSerial>-<fileIndex>")`; `ERROR_ALREADY_EXISTS` refuses entry with the
@@ -2128,7 +2186,7 @@ results. Registered message `FastMD.EditOwner` (D18). `WM_COPYDATA` carries test
 | `FASTMD_TEST_ANSWER` | `leave:yes\|no\|cancel,leave2:…,rellinks:yes\|no[,auto-dismiss:<ms>]` — pre-answers every prompt (a missing kind answers cancel); `auto-dismiss` shows the real box and posts IDCANCEL after `<ms>`, so modal re-entrancy is exercised (T1) |
 | `FASTMD_SAVE_AS` | the path the Save As dialog returns (empty = cancelled) |
 | `FASTMD_OPEN_FILE` | the path(s) the picture dialog returns (`\|`-separated) |
-| `FASTMD_TEST_HOOKS=1` | `WM_COPYDATA` dwData 1 = splice (`"at\tlen\ttext"`, UTF-16) through the splice primitive + `EditReparse` (reading mode too, no save); dwData 2 = `SaveSource` now; enables `WM_APP_TESTKEY` (T2, T5) |
+| `FASTMD_TEST_HOOKS=1` | `WM_COPYDATA` dwData 1 = splice (`"at\tlen\ttext"`, UTF-16) through the splice primitive + `EditReparse` (reading mode too, no save); dwData 2 = `SaveSource` now; dwData 3 = a modal loop of its own for `"<ms>"` (§10.10 tests); enables `WM_APP_TESTKEY` (T2, T5) |
 | `FASTMD_TEST_SLOW` | `images:<ms>,scale:<ms>,preview:<ms>,fullparse:<ms>,save:<ms>` sleeps per job (T11, T13) |
 | `FASTMD_TEST_FAIL_WRITE` | `<kind>[:<n>][,always][,norollback]`, kinds `partial` (fail after n bytes), `busy`, `denied`, `missing`, `short_read`, `flush`, `close`, `recovery`, `diskfull`; once by default (T25, D24) |
 | `FASTMD_AUTOSAVE_MS` | autosave delay override (T8) |
@@ -2196,8 +2254,9 @@ results. Registered message `FastMD.EditOwner` (D18). `WM_COPYDATA` carries test
 
 ### 14.2 Fuzzing (T14)
 `fuzz.cpp`: TeX availability toggled per input (`g_texOn = rng() & 1`); a third of the inputs get CRLF; every input
-parsed with maps and checked by `MapSelfCheck` — a failure writes `out\fuzz\map-<n>.md` and returns 3 (`run.ps1` reads
-the exit code). `--edit` mode (from 2b): 50 random operations at random caret stops, `MapSelfCheck` after each, and
+parsed with maps and checked by `MapSelfCheck` and by the round trips of the corpus sweep (`tests/edit/map_sweep.h`,
+strided to a few thousand stops and offsets per input) — a failure writes `out\fuzz\map-<n>.md` and returns 3
+(`run.ps1` reads the exit code). NUL is in the mutation alphabet. `--edit` mode (from 2b): 50 random operations at random caret stops, `MapSelfCheck` after each, and
 "undo all == the original bytes" at the end. 200 000 inputs under ASan at every gate.
 
 ### 14.3 UI tests (`ui_smoke.py`, each on its own file)
@@ -2467,3 +2526,35 @@ offered alternatives) is normative; "adapted" = resolved differently, with the r
 | T23 | §9.2, §13.2 | accepted |
 | T24 | §14.3 | accepted |
 | T25 | §7.11, §13.5, §13.6, §14.3 | accepted; the recovery-file lifecycle follows D3 (kept only when the rollback fails, tested with `norollback`) |
+
+### Phase 1 notes (the review gate after 1c)
+
+Four lenses (mapping, threads, data safety, regressions) reviewed 1a–1c. What changed in the design with the fixes;
+the per-finding verdicts and evidence are in the phase report.
+
+| Finding | Resolved in | Note |
+|---|---|---|
+| Code span closer at a line start: a break atom inside the closer | §4.1 | md4c fix (the closer moves the line on); renders `` ``⏎foo⏎``bar `` as CommonMark does |
+| Footnote definition inside a list item: two blocks on one line | §4.4, §4.5 #6 | the item stays `BS_SYNTH` (typing at its bullet would break the definition); neighbours in `blockOrder` must be disjoint |
+| Empty referenced footnote definition: a second `↩` on the one before | §4.1 P6, §4.4, §6.3.1 | its own synthesized leaf with number, anchor and arrow (reading mode too), an insertion point after `]:`; `InSegs`/`LastStop` go to the start of a run of synthesized segments |
+| NUL in code or raw HTML twice in the text | §4.1 | md4c fix; NUL in the fuzz alphabet |
+| Inline tag across lines: a pseudo-span, its attributes editable text | §4.4 | the pieces are read as one tag in both modes; no pseudo-span |
+| `## ##`: typing at `beg` breaks the heading | §6.3.1 | the op adds a trailing blank (`## x ##`); `InsertionPoint` stays `beg` |
+| MapSelfCheck passed wrong maps | §4.5 | plain segments in the block's lines and in their cell, no segment in a delimiter, disjoint `blockOrder` neighbours, whole-line records, item markers whole, unique and before their content |
+| The fuzzer never checked round trips | §14.2 | the sweep's oracle (`map_sweep.h`) on every input |
+| SYNTH left neighbour in `SrcOfText` | §6.3 | counts as absent when a right one exists (as the 1a report said) |
+| Kept recovery file hidden (own pid) and overwritten by the next save | §10.3 step 9, §10.5 | unique names with `CREATE_NEW`; the strip at once; no save while a leftover waits; pid + process start time |
+| Restore over a file that changed since, or another file on FAT | §10.5 | FMDREC2: path, hashes around the range, write time; torn / changed / done / untouched; Restore rechecks and backs up |
+| Recovery file deleted after an unflushed save | §10.3 steps 4, 10 | one recovery file stands for the last flushed version until the next flush |
+| Leftover never verified | §10.5 | header and tail hashes; the result block tells a finished save |
+| ANSI above 1 M characters could turn into UTF-8; FF FE after an ANSI file's UTF-8 mark | §10.3 step 3 | whole-file UTF-8 check when a high byte is involved; BOM check after any header |
+| A tick holds the whole tail in the recovery file | §10.3 step 4 | a save that keeps the length holds only `[pb, pe)` |
+| Unreadable file at open: a reload loop | §10.7 | the failed load keeps the stamp; locked → backoff; denied → F5 |
+| Swap after a text-size change blanks every formula | §5.5 step 4 | the old picture is adopted on a table miss, in reading mode too |
+| Swap waits for a measure thread blocked on a network picture | §5.1 | measure threads read no header from a share or a cloud placeholder |
+| Activation stats failed pictures on the UI thread | §5.2 | at most every 2 s, no network paths, never inside a modal loop |
+| `editModal` never raised | §10.10 | `ModalScope` and its Phase 1 users |
+| UIA range past the end after a swap | §5.6 | every range method clamps first |
+| Watcher outliving `StopWatcher` runs on forever | §10.7 | a stop event per watcher |
+| A tick during a big document's measuring: 4× slower | §5.4 | reading mode splits many unknown heights over the threads |
+| Exe size over budget | §15.1 item 8 | deferred: the preview DLL compiles the map out (`FASTMD_PREVIEW_DLL`); moving edit mode into a delay-loaded DLL is a decision for before 2a |

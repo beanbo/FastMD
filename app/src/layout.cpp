@@ -181,11 +181,29 @@ static bool ReadImageHeader(const wchar_t* path, int* w, int* h) {
     return false;
 }
 
+static thread_local bool t_measureThread = false;
+void SetMeasureThread() { t_measureThread = true; }
+
+// a picture file whose header a measure thread must not read: on a share (an unreachable one blocks for its timeout)
+// or a cloud file that is not on this disk (reading it downloads all of it)
+static bool SlowPicture(const std::wstring& path) {
+    if (IsNetworkPath(path)) return true;
+    DWORD a = GetFileAttributesW(path.c_str());
+    return a != INVALID_FILE_ATTRIBUTES &&
+           (a & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS));
+}
+
 int ImageSize(Doc& d, uint32_t idx, int* w, int* h) {
     Image& im = d.images[idx];
     AcquireSRWLockShared(&g_imgLock);
     int cw = im.w, ch = im.h;
     ReleaseSRWLockShared(&g_imgLock);
+    if (cw == -1 && t_measureThread && !im.path.empty() && SlowPicture(im.path)) {
+        // unknown for now, and not remembered as such: the picture worker's decode gives the size (ShowEntry), or the
+        // UI thread reads it when the block is laid out there
+        *w = *h = 0;
+        return 0;
+    }
     if (cw == -1) {
         cw = ch = 0;  // 0 = failed / remote
         if (!im.path.empty()) {

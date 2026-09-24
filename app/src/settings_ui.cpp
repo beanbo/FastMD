@@ -263,7 +263,11 @@ void EditorMenu(float x, float y) {
     AppendMenuW(m, MF_STRING, 3, Tr(S_EDITOR_OTHER));
     POINT p{(LONG)std::lround(x * g_scale), (LONG)std::lround(y * g_scale)};
     ClientToScreen(g_wnd, &p);
-    UINT id = (UINT)TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, g_wnd, nullptr);
+    UINT id;
+    {
+        ModalScope modal;  // the document window's messages run in this loop too
+        id = (UINT)TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, g_wnd, nullptr);
+    }
     DestroyMenu(m);
     if (!id || id == 2) return;
     if (id == 1) g.cfg.editor.clear();

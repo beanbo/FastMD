@@ -118,6 +118,7 @@ std::wstring UrlDecode(const std::wstring& s) {
 static bool Confirm(const std::wstring& what) {
     wchar_t msg[2048];
     swprintf_s(msg, Tr(S_CONFIRM_OPEN), what.substr(0, 1500).c_str());
+    ModalScope modal;
     return MessageBoxW(g.hwnd, msg, L"FastMD", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES;
 }
 
@@ -223,7 +224,12 @@ void OpenDialog() {
     of.nMaxFile = (DWORD)std::size(file);
     of.lpstrInitialDir = dir.empty() ? nullptr : dir.c_str();
     of.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
-    if (GetOpenFileNameW(&of)) OpenDocument(file, true, 0, true);
+    bool picked;
+    {
+        ModalScope modal;
+        picked = GetOpenFileNameW(&of) != 0;
+    }
+    if (picked) OpenDocument(file, true, 0, true);
 }
 
 // where to write the exported PDF: beside the document, named after it
@@ -247,6 +253,7 @@ std::wstring SavePdfDialog() {
     of.lpstrDefExt = L"pdf";
     of.lpstrInitialDir = dir.empty() ? nullptr : dir.c_str();
     of.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOREADONLYRETURN;
+    ModalScope modal;
     return GetSaveFileNameW(&of) ? std::wstring(file) : std::wstring();
 }
 
@@ -259,6 +266,7 @@ std::wstring PickExeDialog(HWND owner) {
     of.lpstrFile = file;
     of.nMaxFile = (DWORD)std::size(file);
     of.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+    ModalScope modal;
     return GetOpenFileNameW(&of) ? std::wstring(file) : std::wstring();
 }
 

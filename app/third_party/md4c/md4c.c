@@ -422,7 +422,10 @@ md_text_with_null_replacement(MD_CTX* ctx, MD_TEXTTYPE type, const CHAR* str, SZ
         ret = ctx->parser.text(MD_TEXT_NULLCHAR, _T(""), 1, ctx->userdata);
         if(ret != 0)
             return ret;
-        off++;
+        /* FastMD fix: step over the NUL itself. Upstream only did off++, so the next chunk began with the NUL again
+         * and it reached the text twice (once as U+FFFD, once raw). */
+        str++;
+        size--;
     }
 }
 
@@ -4926,6 +4929,12 @@ md_process_inlines(MD_CTX* ctx, const MD_LINE* lines, MD_SIZE n_lines)
                         MD_LEAVE_SPAN(MD_SPAN_CODE, NULL);
                         MD_FASTMD_SPAN(MD_SPAN_CODE, 0, mark->beg, mark->end);
                         text_type = MD_TEXT_NORMAL;
+                        /* FastMD fix: a closer whose stripped space is the line end ("foo\n``") starts on the line
+                         * before its backticks. Its line end is inside it, so no soft break may follow: move on to
+                         * the line it ends on, as the link closer does. (Upstream emitted a break there, rendering
+                         * "``\nfoo\n``bar" as "foo bar" instead of "foobar".) */
+                        while(mark->end > line->end)
+                            line++;
                     }
                     break;
 
@@ -7341,9 +7350,13 @@ md_process_footnote_def(MD_CTX* ctx, MD_FOOTNOTE_DEF* def)
     MD_CHECK(md_build_attribute(ctx, def->entry.label, def->entry.label_size, 0,
                                 &det.label, &label_build));
 
-    if(MD_FASTMD_ON(footnote_extent)  &&  def->n_content_lines > 0) {
-        ctx->parser.fastmd->footnote_extent(def->def_beg, def->content_lines[0].beg,
-                def->content_lines[def->n_content_lines-1].end, ctx->userdata);
+    if(MD_FASTMD_ON(footnote_extent)) {
+        /* a definition with no content ("[^2]:") is reported too, with its content empty at def_beg */
+        if(def->n_content_lines > 0)
+            ctx->parser.fastmd->footnote_extent(def->def_beg, def->content_lines[0].beg,
+                    def->content_lines[def->n_content_lines-1].end, ctx->userdata);
+        else
+            ctx->parser.fastmd->footnote_extent(def->def_beg, def->def_beg, def->def_beg, ctx->userdata);
     }
 
     MD_ENTER_BLOCK(MD_BLOCK_FOOTNOTE_DEF, &det);

@@ -68,12 +68,7 @@ bool Fires(FaultKind k) {
 }
 
 // ------------------------------------------------------------------------------------------------ error classes
-bool OnNetwork(const wchar_t* path) {
-    if (path[0] == L'\\' && path[1] == L'\\') return true;  // UNC
-    if (!path[0] || path[1] != L':') return false;
-    wchar_t root[4] = {path[0], L':', L'\\', 0};
-    return GetDriveTypeW(root) == DRIVE_REMOTE;
-}
+bool OnNetwork(const wchar_t* path) { return IsNetworkPath(path); }
 
 bool FolderExists(const wchar_t* path) {
     std::wstring dir = DirOf(path);
@@ -179,9 +174,12 @@ VolFlush* VolumeCost(uint32_t vol) {
     return &g_vols[g_volCount++];
 }
 
+int g_flushPolicy = 0;  // SetFlushPolicyForTests
+
 // a local volume is flushed after every save while flushing it is cheap (the median of its first three flushes under
 // 5 ms, and those three to find out); otherwise only at the flush points
 bool FlushEverySave(uint32_t vol) {
+    if (g_flushPolicy == 1) return false;
     VolFlush* v = VolumeCost(vol);
     if (!v || v->n < 3) return true;
     double a = v->ms[0], b = v->ms[1], c = v->ms[2];
@@ -193,6 +191,35 @@ void RecordFlush(uint32_t vol, double ms) {
     VolFlush* v = VolumeCost(vol);
     if (v && v->n < 3) v->ms[v->n++] = ms;
 }
+
+// Strict UTF-8 over bytes that come in pieces - what MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS) takes: no
+// overlong forms, no surrogates, nothing past U+10FFFF, no sequence cut off at the end.
+struct Utf8Check {
+    int need = 0;
+    uint8_t lo = 0x80, hi = 0xBF;
+    bool bad = false;
+    void Feed(const char* p, uint64_t n) {
+        for (uint64_t i = 0; i < n && !bad; i++) {
+            uint8_t c = (uint8_t)p[i];
+            if (need) {
+                if (c < lo || c > hi) bad = true;
+                lo = 0x80;
+                hi = 0xBF;
+                need--;
+            } else if (c >= 0x80) {
+                if (c >= 0xC2 && c <= 0xDF) need = 1;
+                else if (c == 0xE0) { need = 2; lo = 0xA0; }
+                else if ((c >= 0xE1 && c <= 0xEC) || c == 0xEE || c == 0xEF) need = 2;
+                else if (c == 0xED) { need = 2; hi = 0x9F; }
+                else if (c == 0xF0) { need = 3; lo = 0x90; }
+                else if (c >= 0xF1 && c <= 0xF3) need = 3;
+                else if (c == 0xF4) { need = 3; hi = 0x8F; }
+                else bad = true;
+            }
+        }
+    }
+    bool Valid() const { return !bad && !need; }
+};
 
 bool WriteAllAt(HANDLE f, uint64_t at, const char* p, size_t n, DWORD* err) {
     LARGE_INTEGER li;
@@ -218,58 +245,166 @@ bool SetLength(HANDLE f, uint64_t len, DWORD* err) {
 }
 
 // ------------------------------------------------------------------------------------------------ recovery files
-const char kRecMagic[8] = {'F', 'M', 'D', 'R', 'E', 'C', '1', 0};
+// FMDREC2: magic, the document's path, the version the file restores (length, stamp, code page, byte-order mark), the
+// range [pb, pe) of its bytes that follow, RangeHash of its bytes before, after and in that range, FNV-1a-64 of all
+// of them, the writer (pid, process start), a hash of all that; then a result block (the file's length and hash as the
+// last save that used this recovery file left it, and their hash) that later saves rewrite in place; then the bytes. So a
+// leftover can tell a torn file from a finished save, from a file that moved on since, and from another file that now
+// has the same identity - and a header or tail that did not reach the disk is seen as such.
+const char kRecMagic[8] = {'F', 'M', 'D', 'R', 'E', 'C', '2', 0};
 
 template <class T> void Put(std::string& s, T v) { s.append((const char*)&v, sizeof v); }
 template <class T> bool Get(const std::string& s, size_t& at, T& v) {
-    if (s.size() - at < sizeof v || at > s.size()) return false;
+    if (at > s.size() || s.size() - at < sizeof v) return false;
     memcpy(&v, s.data() + at, sizeof v);
     at += sizeof v;
     return true;
 }
 
-// the old bytes from pb on, with what it takes to put them back, safe on disk before the target changes (§10.5)
-bool WriteRecovery(const SaveRequest& rq, const DiskState& base, const BY_HANDLE_FILE_INFORMATION& fi,
-                   const std::string& bytes, uint64_t pb, std::wstring& file, DWORD* err) {
-    if (rq.recoveryDir.empty()) { *err = ERROR_PATH_NOT_FOUND; return false; }
-    std::wstring dir = rq.recoveryDir;
+// The hash of one range of bytes for a recovery file's checks (the bytes it holds, the ones before and after them):
+// 8 bytes per step with a fold of the high half, several times faster than the byte-wise FNV-1a of the baseline -
+// a tick at the top of a big file hashes the rest of it. Never chained across calls.
+uint64_t RangeHash(const char* p, size_t n) {
+    uint64_t h = 14695981039346656037ull ^ n;
+    size_t i = 0;
+    for (uint64_t w; i + 8 <= n; i += 8) {
+        memcpy(&w, p + i, 8);
+        h = (h ^ w) * 0x9E3779B97F4A7C15ull;
+        h ^= h >> 32;
+    }
+    for (; i < n; i++) h = (h ^ (uint8_t)p[i]) * 1099511628211ull;
+    return h;
+}
+
+uint64_t ProcessStart() {
+    static const uint64_t t = [] {
+        FILETIME c{}, x{}, k{}, u{};
+        GetProcessTimes(GetCurrentProcess(), &c, &x, &k, &u);
+        return U64(c.dwHighDateTime, c.dwLowDateTime);
+    }();
+    return t;
+}
+uint64_t NowFileTime() {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    return U64(ft.dwHighDateTime, ft.dwLowDateTime);
+}
+
+std::string RecHeader(const RecoveryInfo& r) {
+    std::string h(kRecMagic, sizeof kRecMagic);
+    Put<uint32_t>(h, (uint32_t)r.path.size());
+    h.append((const char*)r.path.data(), r.path.size() * sizeof(wchar_t));
+    Put<uint64_t>(h, r.preSize);
+    Put<uint64_t>(h, r.mtime);
+    Put<uint32_t>(h, r.cp);
+    Put<uint32_t>(h, (uint32_t)r.header.size());
+    h += r.header;
+    for (uint64_t v : {r.pb, r.pe, r.prefixHash, r.suffixHash, r.oldHash, r.tailHash}) Put<uint64_t>(h, v);
+    Put<uint32_t>(h, r.pid);
+    Put<uint64_t>(h, r.created);
+    Put<uint64_t>(h, Fnv64(h.data(), h.size()));
+    return h;
+}
+std::string RecResult(uint64_t len, uint64_t hash) {
+    std::string s;
+    Put<uint64_t>(s, len);
+    Put<uint64_t>(s, hash);
+    Put<uint64_t>(s, Fnv64(s.data(), s.size()));
+    return s;
+}
+
+// A new recovery file for r (its bytes in `tail`), created under a name nobody has used and flushed before the target
+// changes (§10.5). An encrypted document gets an encrypted one (D22). Fills r's file, writer and offsets.
+bool WriteRecovery(const std::wstring& recoveryDir, uint32_t vol, uint64_t index, bool encrypted, RecoveryInfo& r,
+                   const std::string& tail, DWORD* err) {
+    if (recoveryDir.empty()) { *err = ERROR_PATH_NOT_FOUND; return false; }
+    std::wstring dir = recoveryDir;
     if (dir.back() != L'\\') dir += L'\\';
     CreateDirectoryW(DirOf(dir.substr(0, dir.size() - 1)).c_str(), nullptr);  // the data folder itself
     CreateDirectoryW(dir.c_str(), nullptr);
-    file = dir + RecoveryName(fi.dwVolumeSerialNumber, U64(fi.nFileIndexHigh, fi.nFileIndexLow), GetCurrentProcessId());
     if (Fires(FK_RECOVERY)) { *err = ERROR_WRITE_FAULT; return false; }
-    std::string h(kRecMagic, sizeof kRecMagic);
-    size_t pathLen = wcslen(rq.path);
-    Put<uint32_t>(h, (uint32_t)pathLen);
-    h.append((const char*)rq.path, pathLen * sizeof(wchar_t));
-    Put<uint64_t>(h, bytes.size());
-    Put<uint64_t>(h, U64(fi.ftLastWriteTime.dwHighDateTime, fi.ftLastWriteTime.dwLowDateTime));
-    Put<uint32_t>(h, base.cp);
-    Put<uint32_t>(h, (uint32_t)base.header.size());
-    h += base.header;
-    Put<uint64_t>(h, pb);
-    // an encrypted document gets an encrypted copy (D22)
-    DWORD attr = (fi.dwFileAttributes & FILE_ATTRIBUTE_ENCRYPTED) ? FILE_ATTRIBUTE_ENCRYPTED : FILE_ATTRIBUTE_NORMAL;
-    HANDLE r = CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, attr, nullptr);
-    if (r == INVALID_HANDLE_VALUE) { *err = GetLastError(); return false; }
-    bool ok = WriteAllAt(r, 0, h.data(), h.size(), err) &&
-              WriteAllAt(r, h.size(), bytes.data() + pb, bytes.size() - (size_t)pb, err);
-    if (ok && !FlushFileBuffers(r)) { *err = GetLastError(); ok = false; }
-    if (!CloseHandle(r)) ok = false;
-    if (!ok) DeleteFileW(file.c_str());
+    r.pid = GetCurrentProcessId();
+    r.created = ProcessStart();
+    r.tailHash = RangeHash(tail.data(), tail.size());
+    r.tailLen = tail.size();
+    r.hasResult = true;
+    std::string h = RecHeader(r);
+    r.resultOff = h.size();
+    h += RecResult(r.newLen, r.newHash);
+    r.tailOff = h.size();
+    // never over another file: a kept one may be the only copy of the bytes it holds
+    static uint32_t seq = 0;
+    HANDLE f = INVALID_HANDLE_VALUE;
+    for (int tries = 0; tries < 256 && f == INVALID_HANDLE_VALUE; tries++) {
+        r.file = dir + RecoveryName(vol, index, r.pid, seq++);
+        f = CreateFileW(r.file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                        encrypted ? FILE_ATTRIBUTE_ENCRYPTED : FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_EXISTS) break;
+    }
+    if (f == INVALID_HANDLE_VALUE) { *err = GetLastError(); return false; }
+    bool ok = WriteAllAt(f, 0, h.data(), h.size(), err) && WriteAllAt(f, h.size(), tail.data(), tail.size(), err);
+    if (ok && !FlushFileBuffers(f)) { *err = GetLastError(); ok = false; }
+    if (!CloseHandle(f)) ok = false;
+    if (!ok) DeleteFileW(r.file.c_str());
+    r.written = NowFileTime();
     return ok;
 }
 
-bool IsLiveFastMd(DWORD pid) {
+// A later save used a recovery file held between flushes: what the target holds now goes into its result block. Not
+// flushed - a stale one only means the file is later shown as torn or changed, never deleted unasked.
+void WriteResult(RecoveryInfo& r, uint64_t len, uint64_t hash) {
+    r.newLen = len;
+    r.newHash = hash;
+    r.hasResult = true;
+    HANDLE f = CreateFileW(r.file.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    std::string s = RecResult(len, hash);
+    DWORD e = 0;
+    WriteAllAt(f, r.resultOff, s.data(), s.size(), &e);
+    CloseHandle(f);
+    r.written = NowFileTime();
+}
+
+// Another FastMD process that wrote a recovery file and still runs (the very process: pid and start time) deletes its
+// own. This process's files are its own business, and a pid that was reused by now is not their writer.
+bool LiveOtherWriter(DWORD pid, uint64_t created) {
+    if (pid == GetCurrentProcessId() && created == ProcessStart()) return false;
     HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!h) return false;
     DWORD code = 0;
-    bool live = GetExitCodeProcess(h, &code) && code == STILL_ACTIVE;
+    FILETIME c{}, x{}, k{}, u{};
+    bool live = GetExitCodeProcess(h, &code) && code == STILL_ACTIVE && GetProcessTimes(h, &c, &x, &k, &u) &&
+                U64(c.dwHighDateTime, c.dwLowDateTime) == created;
     wchar_t img[MAX_PATH * 2];
     DWORD n = (DWORD)std::size(img);
     if (live) live = QueryFullProcessImageNameW(h, 0, img, &n) && EndsWithI(img, L"\\FastMD.exe");
     CloseHandle(h);
     return live;
+}
+
+// the saved bytes of a recovery file, whole (their hash is checked by the caller)
+bool ReadTail(const RecoveryInfo& r, std::string& tail) {
+    if (r.tailLen > (1ull << 30)) return false;
+    HANDLE h = CreateFileW(r.file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    tail.resize((size_t)r.tailLen);
+    LARGE_INTEGER at;
+    at.QuadPart = (LONGLONG)r.tailOff;
+    bool ok = SetFilePointerEx(h, at, nullptr, FILE_BEGIN) != 0;
+    for (size_t got = 0; ok && got < tail.size();) {
+        DWORD n = 0, want = (DWORD)std::min<size_t>(1u << 20, tail.size() - got);
+        ok = ReadFile(h, tail.data() + got, want, &n, nullptr) && n == want;
+        got += n;
+    }
+    CloseHandle(h);
+    return ok;
+}
+
+// what a restore would make of the file: bytes [0, pb), the saved ones, and for a save in place the rest as it is
+uint64_t RestoredHash(const RecoveryInfo& r, const std::string& bytes, const std::string& tail) {
+    uint64_t h = Fnv64(tail.data(), tail.size(), Fnv64(bytes.data(), (size_t)r.pb));
+    if (r.pe < r.preSize) h = Fnv64(bytes.data() + r.pe, (size_t)(r.preSize - r.pe), h);
+    return h;
 }
 }  // namespace
 
@@ -403,11 +538,15 @@ SaveResult SaveSource(const SaveRequest& rq) {
         r.reason = "open";
         return r;
     }
+    // A recovery file this process holds between flushes (the version the last flush left on disk) is handed back
+    // unchanged by every way out before step 4.
+    const RecoveryInfo* pend = rq.pending && !rq.pending->file.empty() ? rq.pending : nullptr;
     auto give = [&](SaveState st, const char* why) {  // nothing has changed yet
         if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
         r.state = st;
         r.reason = why;
         r.error = e;
+        if (pend) r.pending = *pend;
         return r;
     };
 
@@ -418,7 +557,8 @@ SaveResult SaveSource(const SaveRequest& rq) {
     SaveState st = ReadAll(f, bytes, &fi, &e, true);
     if (st != SS_SAVED) return give(st, "read");
     const DiskState* base = rq.disk;
-    if (bytes.size() != base->length || Fnv64(bytes.data(), bytes.size()) != base->hash) {
+    const uint64_t curHash = Fnv64(bytes.data(), bytes.size());
+    if (bytes.size() != base->length || curHash != base->hash) {
         DiskState now;
         DiskRefusal dr = DecodeDisk(bytes, DecodeAcp(*base), now);
         if (now.text != base->text) return give(SS_CONFLICT, "conflict");
@@ -430,6 +570,10 @@ SaveResult SaveSource(const SaveRequest& rq) {
         r.adopted = true;
         r.disk = std::move(now);
         base = &r.disk;
+        // Written outside meanwhile: a recovery file held for the last flush describes bytes that are not there
+        // any more (the whole file was rewritten), so it goes.
+        if (pend) DeleteFileW(pend->file.c_str());
+        pend = nullptr;
     }
     const std::wstring& old = base->text;
     const UINT cp = base->cp;
@@ -444,8 +588,15 @@ SaveResult SaveSource(const SaveRequest& rq) {
     };
     while (p > 0 && (splits(old, p) || splits(text, p))) p--;
     while (s > 0 && (splits(old, on - s) || splits(text, nn - s))) s--;
-    // the baseline is byte-exact, so its text up to p is exactly the bytes up to pb (and the same for the suffix)
-    size_t pl = EncodedLen(cp, old.data(), p), sb = EncodedLen(cp, old.data() + on - s, s);
+    // The baseline is byte-exact, so its text up to p is exactly the bytes up to pb (and the same for the suffix). Only
+    // the shorter side is encoded to count its bytes: the longer one is what the file's length leaves (a tick at the
+    // top of a big file would otherwise encode all of it once more).
+    const size_t body = bytes.size() - std::min(bytes.size(), base->header.size());
+    size_t mid = EncodedLen(cp, old.data() + p, on - s - p), pl = SIZE_MAX, sb = SIZE_MAX;
+    if (p <= s) pl = EncodedLen(cp, old.data(), p);
+    else sb = EncodedLen(cp, old.data() + on - s, s);
+    size_t known = p <= s ? pl : sb;
+    if (mid != SIZE_MAX && known != SIZE_MAX && known + mid <= body) (p <= s ? sb : pl) = body - known - mid;
     size_t pb = pl == SIZE_MAX ? SIZE_MAX : base->header.size() + pl;
     if (pb > bytes.size() || sb > bytes.size() - pb) return give(SS_FAILED, "ENCODER_ERROR");
     std::string middle;
@@ -455,19 +606,28 @@ SaveResult SaveSource(const SaveRequest& rq) {
         r.bad = bad == SIZE_MAX ? UINT32_MAX : (uint32_t)(p + bad);
         return give(strcmp(why, "ENCODER_ERROR") ? SS_UNENCODABLE : SS_FAILED, why);
     }
-    // A file without a byte-order mark must not start to look like one: the next read would take it for the mark.
-    if (base->header.empty() && cp != 1200) {
-        std::string head = bytes.substr(0, std::min<size_t>(pb, 3)) + middle.substr(0, 3);
-        if (head.size() < 3) head += bytes.substr(bytes.size() - sb, 3);
-        auto starts = [&](const char* m, size_t k) { return head.size() >= k && memcmp(head.data(), m, k) == 0; };
-        if ((cp == CP_UTF8 && nn && text[0] == 0xFEFF) || starts("\xEF\xBB\xBF", 3) || starts("\xFF\xFE", 2) ||
-            starts("\xFE\xFF", 2)) {
+    const uint64_t oldLen = bytes.size(), newLen = pb + middle.size() + sb;
+    const char* suffix = bytes.data() + (oldLen - sb);
+    auto outAt = [&](uint64_t at) -> uint8_t {  // byte `at` of the file as this save would leave it
+        return at < pb ? (uint8_t)bytes[at] : at < pb + middle.size() ? (uint8_t)middle[at - pb] : (uint8_t)suffix[at - pb - middle.size()];
+    };
+    // The text after the byte-order mark (or at the start, without one) must not start to look like one: the next read
+    // would take it for the mark. Without a mark that is EF BB BF, FF FE or FE FF; after a UTF-8 mark (an ANSI file
+    // can have one) the read looks for FF FE once more.
+    if (cp != 1200) {
+        const uint64_t hs = base->header.size();
+        uint8_t head[3] = {};
+        uint64_t k = 0;
+        for (; k < 3 && hs + k < newLen; k++) head[k] = outAt(hs + k);
+        auto starts = [&](const char* m, uint64_t n) { return k >= n && memcmp(head, m, (size_t)n) == 0; };
+        bool look = hs ? starts("\xFF\xFE", 2)
+                       : (cp == CP_UTF8 && nn && text[0] == 0xFEFF) || starts("\xEF\xBB\xBF", 3) || starts("\xFF\xFE", 2) ||
+                             starts("\xFE\xFF", 2);
+        if (look) {
             r.bad = 0;
             return give(SS_UNENCODABLE, "BOM_LOOKALIKE");
         }
     }
-    const uint64_t oldLen = bytes.size(), newLen = pb + middle.size() + sb;
-    const char* suffix = bytes.data() + (oldLen - sb);
     // The proof: the new file reads back as exactly this text - all of it below a million characters (and always under
     // FASTMD_EDIT_SELFCHECK), the changed window with whole characters on both sides above.
     uint64_t hash = Fnv64(suffix, sb, Fnv64(middle.data(), middle.size(), Fnv64(bytes.data(), pb)));
@@ -493,19 +653,98 @@ SaveResult SaveSource(const SaveRequest& rq) {
             if (k > 0) MultiByteToWideChar(cp, 0, middle.data(), (int)middle.size(), back.data(), k);
         }
         auto cont = [&](uint64_t at) {  // a UTF-8 continuation byte where a character must start
-            if (cp != CP_UTF8 || at >= newLen) return false;
-            uint8_t c = at < pb ? (uint8_t)bytes[at] : at < pb + middle.size() ? (uint8_t)middle[at - pb] : (uint8_t)suffix[at - pb - middle.size()];
-            return (c & 0xC0) == 0x80;
+            return cp == CP_UTF8 && at < newLen && (outAt(at) & 0xC0) == 0x80;
         };
-        if (back.compare(0, std::wstring::npos, text, p, nn - s - p) != 0 || cont(pb) || cont(pb + middle.size())) {
+        bool same = back.compare(0, std::wstring::npos, text, p, nn - s - p) == 0 && !cont(pb) && !cont(pb + middle.size());
+        // An ANSI file must not become valid UTF-8 (or its bytes are read as UTF-8 next time: "Ã©" turns into "é").
+        // Only bytes of 0x80 and up can make or break a UTF-8 sequence, so the whole file is looked at only when the
+        // edit removes, adds or borders one.
+        if (same && cp != CP_UTF8) {
+            bool high = std::any_of(middle.begin(), middle.end(), [](char c) { return (uint8_t)c >= 0x80; }) ||
+                        std::any_of(bytes.begin() + pb, bytes.begin() + (oldLen - sb), [](char c) { return (uint8_t)c >= 0x80; }) ||
+                        (pb > 0 && (uint8_t)bytes[pb - 1] >= 0x80) || (sb > 0 && (uint8_t)suffix[0] >= 0x80);
+            if (high) {
+                Utf8Check u;
+                const uint64_t hs = base->header.size();
+                u.Feed(bytes.data() + hs, pb - hs);
+                u.Feed(middle.data(), middle.size());
+                u.Feed(suffix, sb);
+                same = !u.Valid();
+            }
+        }
+        if (!same) {
             r.bad = (uint32_t)p;
             return give(SS_UNENCODABLE, "UNENCODABLE");
         }
     }
 
-    // 4. The recovery file: the bytes about to be replaced, on disk before the first byte of the target changes.
-    std::wstring rec;
-    if (!WriteRecovery(rq, *base, fi, bytes, pb, rec, &e)) return give(SS_FAILED, "recovery");
+    // 4. The recovery file: the bytes about to be replaced, on disk before the first byte of the target changes. A save
+    // that keeps the length holds only the bytes it replaces ([pb, pe)); one that does not, everything from pb on.
+    // While saves go unflushed (a slow local volume between flush points), one recovery file stands for the last
+    // flushed version: a save inside the range it holds needs nothing new, one outside it gets a wider one, pieced
+    // together from it and the bytes around (which have not changed since that flush), and the old one goes only once
+    // the new one is safe.
+    const bool inPlace = newLen == oldLen;
+    const uint64_t pe = inPlace ? oldLen - sb : oldLen;
+    if (pend && (pend->pb > oldLen || pend->pe > pend->preSize || (pend->pe < pend->preSize && oldLen != pend->preSize))) {
+        DeleteFileW(pend->file.c_str());  // not the file it was kept for: it cannot restore anything here
+        pend = nullptr;
+    }
+    RecoveryInfo rec;
+    bool fresh = false;
+    if (pend && pb >= pend->pb && (pend->pe == pend->preSize || (inPlace && pe <= pend->pe))) {
+        rec = *pend;
+    } else {
+        std::string tail;
+        if (pend) {
+            std::string held;
+            if (!ReadTail(*pend, held) || RangeHash(held.data(), held.size()) != pend->tailHash) return give(SS_FAILED, "recovery");
+            const uint64_t lo = std::min<uint64_t>(pb, pend->pb);
+            const uint64_t hi = pend->pe == pend->preSize || !inPlace ? pend->preSize : std::max(pend->pe, pe);
+            tail.assign(bytes, (size_t)lo, (size_t)(pend->pb - lo));
+            tail += held;
+            if (hi > pend->pe) tail.append(bytes, (size_t)pend->pe, (size_t)(hi - pend->pe));
+            rec.preSize = pend->preSize;
+            rec.mtime = pend->mtime;
+            rec.oldHash = pend->oldHash;
+            rec.cp = pend->cp;
+            rec.header = pend->header;
+            rec.pb = lo;
+            rec.pe = hi;
+        } else {
+            tail.assign(bytes, pb, (size_t)(pe - pb));
+            rec.preSize = oldLen;
+            rec.mtime = U64(fi.ftLastWriteTime.dwHighDateTime, fi.ftLastWriteTime.dwLowDateTime);
+            rec.oldHash = curHash;
+            rec.cp = base->cp;
+            rec.header = base->header;
+            rec.pb = pb;
+            rec.pe = pe;
+        }
+        rec.prefixHash = RangeHash(bytes.data(), (size_t)rec.pb);
+        rec.suffixHash = RangeHash(bytes.data() + rec.pe, (size_t)(rec.preSize - rec.pe));
+        rec.path = rq.path;
+        rec.newLen = newLen;  // what the file will hold once this save is through
+        rec.newHash = hash;
+        if (!WriteRecovery(rq.recoveryDir, fi.dwVolumeSerialNumber, U64(fi.nFileIndexHigh, fi.nFileIndexLow),
+                           (fi.dwFileAttributes & FILE_ATTRIBUTE_ENCRYPTED) != 0, rec, tail, &e))
+            return give(SS_FAILED, "recovery");
+        fresh = true;
+    }
+    // After this save: the target holds `len` bytes of `h` (`torn`: neither the old nor the new ones), flushed or not.
+    // The recovery files that are not needed any more go; the one still needed is kept - as the file of a torn save, or
+    // as the one standing for the last flush.
+    auto settle = [&](bool torn, bool flushed, uint64_t len, uint64_t h) {
+        if (fresh && pend) DeleteFileW(pend->file.c_str());  // the fresh one holds all it held
+        if (torn) {
+            r.recoveryKept = rec.file;
+        } else if (flushed || (!pend && len == oldLen && h == curHash && fresh)) {
+            DeleteFileW(rec.file.c_str());  // on disk for good, or back to a flushed version
+        } else {
+            if (!fresh || len != rec.newLen || h != rec.newHash) WriteResult(rec, len, h);
+            r.pending = rec;
+        }
+    };
 
     bool changed = false;  // bytes (or the length) of the target have changed: a failure from here on is rolled back
     auto fail = [&](const char* what, DWORD err) {
@@ -526,8 +765,7 @@ SaveResult SaveSource(const SaveRequest& rq) {
         }
         if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
         f = INVALID_HANDLE_VALUE;
-        if (restored) DeleteFileW(rec.c_str());
-        else r.recoveryKept = rec;
+        settle(!restored, false, oldLen, curHash);
         return r;
     };
 
@@ -540,13 +778,7 @@ SaveResult SaveSource(const SaveRequest& rq) {
             e = 0;
             changed = true;
         }
-        if (e) {
-            if (!changed) {
-                DeleteFileW(rec.c_str());
-                return give(SS_FAILED, "disk full");
-            }
-            return fail("disk full", e);
-        }
+        if (e) return fail("disk full", e);  // nothing changed yet: only the recovery files are put right
     }
     // 6. The new bytes from pb on, then the length. An edit that keeps the byte length leaves the suffix alone: it is
     // already there.
@@ -562,6 +794,7 @@ SaveResult SaveSource(const SaveRequest& rq) {
     // 7. Flushed always on remote and cloud files, at the flush points, and on every save while the volume flushes
     // cheaply.
     bool flushFault = Fires(FK_FLUSH);
+    bool flushed = false;
     if (flushFault || rq.flushPoint || base->remote || base->cloud || FlushEverySave(fi.dwVolumeSerialNumber)) {
         LARGE_INTEGER t0, t1;
         QueryPerformanceCounter(&t0);
@@ -570,6 +803,7 @@ SaveResult SaveSource(const SaveRequest& rq) {
         if (!ok) return fail("flush", flushFault ? ERROR_WRITE_FAULT : GetLastError());
         r.flushMs = Ms(t0, t1);
         if (!base->remote && !base->cloud) RecordFlush(fi.dwVolumeSerialNumber, r.flushMs);
+        flushed = true;
     }
     // 8. The new stamp through the same handle, before it is closed (NTFS moves the write time at WriteFile).
     BY_HANDLE_FILE_INFORMATION after{};
@@ -579,8 +813,9 @@ SaveResult SaveSource(const SaveRequest& rq) {
     if (Fires(FK_CLOSE)) closed = false;
     if (!closed) return fail("close", ERROR_WRITE_FAULT);
 
-    // 10. Saved: the recovery file goes, and the snapshot is what the disk holds.
-    DeleteFileW(rec.c_str());
+    // 10. Saved: the recovery file goes once the bytes are flushed (until then it stays, standing for the last flush),
+    // and the snapshot is what the disk holds.
+    settle(false, flushed, newLen, hash);
     DiskState d;
     d.valid = true;
     d.text = text;
@@ -603,9 +838,9 @@ SaveResult SaveSource(const SaveRequest& rq) {
 }
 
 // ------------------------------------------------------------------------------------------------ recovery files
-std::wstring RecoveryName(uint32_t volume, uint64_t index, DWORD pid) {
-    wchar_t b[64];
-    swprintf_s(b, L"%08x-%016llx-%lu.rec", volume, (unsigned long long)index, (unsigned long)pid);
+std::wstring RecoveryName(uint32_t volume, uint64_t index, DWORD pid, uint32_t n) {
+    wchar_t b[80];
+    swprintf_s(b, L"%08x-%016llx-%lu-%u.rec", volume, (unsigned long long)index, (unsigned long)pid, n);
     return b;
 }
 
@@ -613,16 +848,18 @@ bool ReadRecovery(const std::wstring& file, RecoveryInfo& out) {
     HANDLE h = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
     LARGE_INTEGER size{};
-    std::string head(4096, '\0');
+    FILETIME wt{};
+    std::string head(70000, '\0');  // the longest path fits
     DWORD got = 0;
-    bool ok = GetFileSizeEx(h, &size) && ReadFile(h, head.data(), (DWORD)head.size(), &got, nullptr);
+    bool ok = GetFileSizeEx(h, &size) && GetFileTime(h, nullptr, nullptr, &wt) &&
+              ReadFile(h, head.data(), (DWORD)head.size(), &got, nullptr);
     CloseHandle(h);
     if (!ok) return false;
     head.resize(got);
     size_t at = sizeof kRecMagic;
     uint32_t pathLen = 0, hdrLen = 0;
-    if (head.size() < at || memcmp(head.data(), kRecMagic, at) != 0 || !Get(head, at, pathLen) ||
-        pathLen > 1024 || head.size() - at < pathLen * sizeof(wchar_t))
+    if (head.size() < at || memcmp(head.data(), kRecMagic, at) != 0 || !Get(head, at, pathLen) || pathLen > 32768 ||
+        head.size() - at < pathLen * sizeof(wchar_t))
         return false;
     out.path.assign((const wchar_t*)(head.data() + at), pathLen);
     at += pathLen * sizeof(wchar_t);
@@ -631,17 +868,30 @@ bool ReadRecovery(const std::wstring& file, RecoveryInfo& out) {
         return false;
     out.header.assign(head.data() + at, hdrLen);
     at += hdrLen;
-    if (!Get(head, at, out.pb)) return false;
+    uint32_t pid = 0;
+    uint64_t headHash = 0, len = 0, hash = 0, resHash = 0;
+    if (!Get(head, at, out.pb) || !Get(head, at, out.pe) || !Get(head, at, out.prefixHash) || !Get(head, at, out.suffixHash) ||
+        !Get(head, at, out.oldHash) || !Get(head, at, out.tailHash) || !Get(head, at, pid) || !Get(head, at, out.created))
+        return false;
+    size_t headEnd = at;
+    if (!Get(head, at, headHash) || headHash != Fnv64(head.data(), headEnd)) return false;  // a header that is not whole
+    out.pid = pid;
+    out.resultOff = at;
+    if (!Get(head, at, len) || !Get(head, at, hash) || !Get(head, at, resHash)) return false;
+    out.hasResult = resHash == Fnv64(head.data() + out.resultOff, 16);
+    out.newLen = len;
+    out.newHash = hash;
     out.file = file;
     out.tailOff = at;
     out.tailLen = (uint64_t)size.QuadPart - at;
-    // the name says which process wrote it
-    size_t dash = file.find_last_of(L'-'), dot = file.find_last_of(L'.');
-    out.pid = dash != std::wstring::npos && dot > dash ? (DWORD)wcstoul(file.c_str() + dash + 1, nullptr, 10) : 0;
-    return out.pb + out.tailLen == out.preSize;
+    out.written = U64(wt.dwHighDateTime, wt.dwLowDateTime);
+    if (!(out.pb <= out.pe && out.pe <= out.preSize && out.tailLen == out.pe - out.pb)) return false;
+    // the saved bytes are what was written (a power cut in the flush can leave zeros past a valid length)
+    std::string tail;
+    return ReadTail(out, tail) && RangeHash(tail.data(), tail.size()) == out.tailHash;
 }
 
-std::vector<RecoveryInfo> FindRecovery(const std::wstring& dir, uint32_t volume, uint64_t index) {
+std::vector<RecoveryInfo> FindRecovery(const std::wstring& dir, uint32_t volume, uint64_t index, const std::wstring& path) {
     std::vector<RecoveryInfo> out;
     std::wstring d = dir;
     if (d.empty()) return out;
@@ -654,8 +904,10 @@ std::vector<RecoveryInfo> FindRecovery(const std::wstring& dir, uint32_t volume,
     do {
         RecoveryInfo ri;
         if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !ReadRecovery(d + fd.cFileName, ri)) continue;
-        if (IsLiveFastMd(ri.pid)) continue;  // still saving, or it deletes its own
-        ri.written = U64(fd.ftLastWriteTime.dwHighDateTime, fd.ftLastWriteTime.dwLowDateTime);
+        // The identity alone is not enough: on FAT a file made later in the same place gets the same index.
+        if (CompareStringOrdinal(ri.path.c_str(), (int)ri.path.size(), path.c_str(), (int)path.size(), TRUE) != CSTR_EQUAL)
+            continue;
+        if (LiveOtherWriter(ri.pid, ri.created)) continue;
         size_t k = out.size();  // oldest first (there is hardly ever more than one)
         out.push_back(std::move(ri));
         for (; k > 0 && out[k - 1].written > out[k].written; k--) std::swap(out[k - 1], out[k]);
@@ -664,47 +916,70 @@ std::vector<RecoveryInfo> FindRecovery(const std::wstring& dir, uint32_t volume,
     return out;
 }
 
-namespace {
-bool ReadTail(const RecoveryInfo& r, std::string& tail) {
-    HANDLE h = CreateFileW(r.file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (h == INVALID_HANDLE_VALUE || r.tailLen > (1ull << 30)) {
-        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-        return false;
-    }
-    tail.resize((size_t)r.tailLen);
-    LARGE_INTEGER at;
-    at.QuadPart = (LONGLONG)r.tailOff;
-    DWORD got = 0;
-    bool ok = SetFilePointerEx(h, at, nullptr, FILE_BEGIN) &&
-              (tail.empty() || (ReadFile(h, tail.data(), (DWORD)tail.size(), &got, nullptr) && got == tail.size()));
-    CloseHandle(h);
-    return ok;
+RecoveryVerdict ClassifyRecovery(const RecoveryInfo& r, const std::string& bytes, uint64_t mtime) {
+    const uint64_t len = bytes.size();
+    const uint64_t all = Fnv64(bytes.data(), bytes.size());
+    if (r.hasResult && len == r.newLen && all == r.newHash) return RV_DONE;  // the save went through
+    if (len == r.preSize && all == r.oldHash) return RV_UNTOUCHED;           // it never wrote a byte (or was rolled back)
+    bool prefix = len >= r.pb && RangeHash(bytes.data(), (size_t)r.pb) == r.prefixHash;
+    bool suffix = r.pe == r.preSize ||
+                  (len == r.preSize && RangeHash(bytes.data() + r.pe, (size_t)(r.preSize - r.pe)) == r.suffixHash);
+    // not written since the recovery file was (FAT keeps write times to 2 s)
+    bool quiet = mtime <= r.written + 20000000ull;
+    return prefix && suffix && quiet ? RV_TORN : RV_CHANGED;
 }
-}  // namespace
 
-bool RecoveryRestore(const RecoveryInfo& r, const wchar_t* target, DWORD* err) {
+bool RecoveryRestore(const RecoveryInfo& r, const wchar_t* target, const std::wstring& recoveryDir, DWORD* err) {
     *err = 0;
     std::string tail;
-    if (!ReadTail(r, tail)) { *err = GetLastError() ? GetLastError() : ERROR_READ_FAULT; return false; }
+    if (!ReadTail(r, tail) || RangeHash(tail.data(), tail.size()) != r.tailHash) { *err = ERROR_INVALID_DATA; return false; }
     HANDLE f = CreateFileW(target, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) { *err = GetLastError(); return false; }
-    LARGE_INTEGER size{};
-    // the bytes before pb are the file's own: a file now shorter than that is not the one the copy belongs to
-    bool ok = GetFileSizeEx(f, &size) && (uint64_t)size.QuadPart >= r.pb;
-    if (!ok) *err = ERROR_INVALID_DATA;
-    ok = ok && WriteAllAt(f, r.pb, tail.data(), tail.size(), err) && SetLength(f, r.pb + tail.size(), err);
+    // Nobody can write it now: it must still be the torn file the recovery file is for - its bytes around the saved
+    // range that version's own, and not written since. Anything else would lose what was written after.
+    std::string bytes;
+    BY_HANDLE_FILE_INFORMATION fi{};
+    if (ReadAll(f, bytes, &fi, err, false) != SS_SAVED ||
+        ClassifyRecovery(r, bytes, U64(fi.ftLastWriteTime.dwHighDateTime, fi.ftLastWriteTime.dwLowDateTime)) != RV_TORN) {
+        CloseHandle(f);
+        if (!*err) *err = ERROR_INVALID_DATA;
+        return false;
+    }
+    // what it replaces goes to a recovery file of its own first: an interrupted restore can be undone as well
+    RecoveryInfo own;
+    own.path = target;
+    own.preSize = bytes.size();
+    own.mtime = U64(fi.ftLastWriteTime.dwHighDateTime, fi.ftLastWriteTime.dwLowDateTime);
+    own.cp = r.cp;
+    own.header = r.header;
+    own.pb = r.pb;
+    own.pe = bytes.size();
+    own.prefixHash = RangeHash(bytes.data(), (size_t)r.pb);
+    own.suffixHash = RangeHash(nullptr, 0);
+    own.oldHash = Fnv64(bytes.data(), bytes.size());
+    own.newLen = r.preSize;
+    own.newHash = RestoredHash(r, bytes, tail);
+    std::string ownTail = bytes.substr((size_t)r.pb);
+    bool ok = WriteRecovery(recoveryDir, fi.dwVolumeSerialNumber, U64(fi.nFileIndexHigh, fi.nFileIndexLow),
+                            (fi.dwFileAttributes & FILE_ATTRIBUTE_ENCRYPTED) != 0, own, ownTail, err) &&
+              WriteAllAt(f, r.pb, tail.data(), tail.size(), err) && SetLength(f, r.preSize, err);
     if (ok && !FlushFileBuffers(f)) { *err = GetLastError(); ok = false; }
     CloseHandle(f);
+    if (ok) DeleteFileW(own.file.c_str());
     return ok;
 }
 
 bool RecoveryRebuild(const RecoveryInfo& r, const wchar_t* current, const wchar_t* out) {
     std::string tail, bytes;
     DWORD e = 0;
-    if (!ReadTail(r, tail) || ReadDisk(current, bytes, nullptr, &e) != SS_SAVED || bytes.size() < r.pb) return false;
+    if (!ReadTail(r, tail) || RangeHash(tail.data(), tail.size()) != r.tailHash ||
+        ReadDisk(current, bytes, nullptr, &e) != SS_SAVED || bytes.size() < r.pb)
+        return false;
+    std::string rest = r.pe < r.preSize && bytes.size() >= r.preSize ? bytes.substr((size_t)r.pe, (size_t)(r.preSize - r.pe)) : "";
     bytes.resize((size_t)r.pb);
     bytes += tail;
+    bytes += rest;
     HANDLE f = CreateFileW(out, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) return false;
     bool ok = WriteAllAt(f, 0, bytes.data(), bytes.size(), &e);
@@ -712,7 +987,19 @@ bool RecoveryRebuild(const RecoveryInfo& r, const wchar_t* current, const wchar_
     return ok;
 }
 
+bool RecoveryFlushPending(const RecoveryInfo& r, const wchar_t* target) {
+    HANDLE f = CreateFileW(target, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    bool ok = f != INVALID_HANDLE_VALUE && FlushFileBuffers(f);
+    if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+    if (ok) DeleteFileW(r.file.c_str());
+    return ok;
+}
+
 void SetFailWriteForTests(const wchar_t* spec) {
     g_faultRead = true;
     ParseFault(spec);
 }
+
+void SetFlushPolicyForTests(int policy) { g_flushPolicy = policy; }
+

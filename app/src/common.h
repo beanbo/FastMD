@@ -41,3 +41,5 @@ bool EndsWithI(const std::wstring& s, const wchar_t* suffix);
 bool StartsWithI(const std::wstring& s, const wchar_t* prefix);
 std::wstring FileNameOf(const std::wstring& path);
 std::wstring DirOf(const std::wstring& path);  // with trailing backslash
+// a path on another machine - UNC, or a drive letter mapped to a share - where a file call can block for a timeout
+bool IsNetworkPath(const std::wstring& path);

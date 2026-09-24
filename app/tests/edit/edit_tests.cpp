@@ -25,7 +25,7 @@
 //
 // Sweeps (bench/corpus/*.md, app/tests/*.md; large files strided), with TeX on and off: MapSelfCheck; at every caret
 // stop SrcOfText in every mode gives an offset inside the block's lines and TextOfSrc(SrcOfText(t)) == t in both
-// directions; TextOfSrc of any source offset is a caret stop.
+// directions; TextOfSrc of any source offset is a caret stop (map_sweep.h, which the fuzzer runs too).
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -37,6 +37,7 @@
 #include "doc.h"
 #include "editcore.h"
 #include "editfile.h"
+#include "map_sweep.h"
 #include "../third_party/md4c/md4c.h"  // span type names in the dump
 
 // The formula and diagram libraries are "there" or not per parse: a formula is a picture (an object atom) with them,
@@ -666,80 +667,17 @@ void SweepDoc(const std::string& name, const std::wstring& text, SweepStats& st)
     std::string why;
     bool ok = MapSelfCheck(p.d, p.src, &why);
     if (!Check(ok, "%s: MapSelfCheck: %s", name.c_str(), why.c_str())) return;
-    const Doc& d = p.d;
     const uint32_t n = (uint32_t)p.src.size();
-    const uint32_t stride = n > 400000 ? 61 : 1;
     int reported = 0;
-    auto report = [&](const char* fmt, auto... args) {
-        if (reported++ < 8) Fail(fmt, args...);
+    size_t stops = 0, offsets = 0;
+    mapsweep::SweepMap(p.d, p.src, n > 400000 ? 61 : 1, n > 400000 ? 53 : 1, &stops, &offsets, [&](const std::string& m) {
+        if (reported++ < 8) Fail("%s: %s", name.c_str(), m.c_str());
         else g_failures++;
-    };
-    uint32_t tick = 0;
-    for (uint32_t k = 0; k < d.blocks.size(); k++) {
-        const Block& b = d.blocks[k];
-        const BlockSrc& bs = d.blockSrc[k];
-        if (bs.flags & BS_SYNTH) continue;
-        std::vector<std::pair<int32_t, std::pair<uint32_t, uint32_t>>> ranges;  // cell, [beg, end]
-        if (bs.flags & (BS_OBJECT | BS_RAW)) {
-            ranges.push_back({-1, {b.textOff, b.textOff}});
-        } else if (b.kind == BK_TABLE && b.aux < d.tables.size()) {
-            const Table& tb = d.tables[b.aux];
-            for (uint32_t c = 0; c < tb.rows * tb.cols; c++) {
-                const Cell& cell = d.cells[tb.cellOff + c];
-                ranges.push_back({(int32_t)c, {cell.textOff, cell.textOff + cell.textLen}});
-            }
-        } else {
-            ranges.push_back({-1, {b.textOff, b.textOff + b.textLen}});
-        }
-        for (auto& r : ranges) {
-            for (uint32_t t = r.second.first; t <= r.second.second; t++) {
-                if (stride > 1 && (tick++ % stride) != 0) continue;
-                TextPos pos{t, (int32_t)k, r.first};
-                if (!CaretStop(d, pos)) continue;
-                st.stops++;
-                g_checks += 6;  // four modes, two round trips
-                for (MapMode m : {MAP_CARET, MAP_OUTER_START, MAP_OUTER_END, MAP_INNER_START}) {
-                    uint32_t s = SrcOfText(d, p.src, pos, m);
-                    if (s == UINT32_MAX || s > n || s < bs.line || s > bs.outerEnd)
-                        report("%s: b%u t%u c%d mode %d: SrcOfText = %d outside the block's lines [%u,%u]", name.c_str(), k,
-                               t, r.first, (int)m, (int)s, bs.line, bs.outerEnd);
-                }
-                uint32_t s = SrcOfText(d, p.src, pos, MAP_CARET);
-                for (int dir : {-1, 1}) {
-                    TextPos back = TextOfSrc(d, p.src, s, dir, nullptr);
-                    int32_t wantBlock = (bs.flags & BS_RAW) && bs.rawId >= 0 ? bs.rawId : (int32_t)k;
-                    bool same = back.t == (bs.flags & BS_RAW ? d.blocks[wantBlock].textOff : t) && back.block == wantBlock;
-                    if (same && back.cell != r.first) {
-                        // a cell a short row lacks shares its place with the end of the cell before it
-                        const Table& tb = d.tables[b.aux];
-                        bool missing = r.first >= 0 && d.cellSrc[tb.cellOff + r.first].missing;
-                        same = missing;
-                    }
-                    if (!same)
-                        report("%s: b%u t%u c%d -> s%u -> t%u b%d c%d (dir %d): the round trip does not come back", name.c_str(),
-                               k, t, r.first, s, back.t, back.block, back.cell, dir);
-                }
-            }
-        }
-    }
-    // any source offset maps to a caret stop (or a folded block)
-    const uint32_t sStride = n > 400000 ? 53 : 1;
-    for (uint32_t s = 0; s <= n; s += sStride) {
-        for (int dir : {-1, 1}) {
-            TextPos t = TextOfSrc(d, p.src, s, dir, nullptr);
-            st.offsets++;
-            g_checks++;
-            if (t.block < 0) {
-                if (!d.blockOrder.empty()) report("%s: TextOfSrc(%u, %d) found no block", name.c_str(), s, dir);
-                continue;
-            }
-            const Block& b = d.blocks[t.block];
-            bool hidden = b.details && !(b.details & 0x8000) && (uint32_t)(b.details & 0x7FFF) - 1 < d.detailsOpen.size() &&
-                          !d.detailsOpen[(b.details & 0x7FFF) - 1];
-            if (!hidden && !CaretStop(d, t))
-                report("%s: TextOfSrc(%u, %d) = t%u b%d c%d is not a caret stop", name.c_str(), s, dir, t.t, t.block, t.cell);
-        }
-    }
+        return true;
+    });
+    st.stops += stops;
+    st.offsets += offsets;
+    g_checks += (int)(stops * 6 + offsets);  // four modes and two round trips per stop, one look per offset
 }
 
 void Sweep(const std::vector<std::wstring>& dirs) {
@@ -943,16 +881,19 @@ struct FileFixture {
         d.valid = r == DR_OK;
         return r;
     }
-    SaveResult Save(const std::wstring& text, const DiskState& d, bool flushPoint = false) {
+    SaveResult Save(const std::wstring& text, const DiskState& d, bool flushPoint = false,
+                    const RecoveryInfo* pending = nullptr, bool fullProof = true) {
         SaveRequest rq;
         rq.path = path.c_str();
         rq.text = &text;
         rq.disk = &d;
         rq.recoveryDir = rec;
         rq.flushPoint = flushPoint;
-        rq.fullProof = true;
+        rq.fullProof = fullProof;
+        rq.pending = pending;
         return SaveSource(rq);
     }
+    std::vector<std::wstring> RecoveryList() { return ListFiles(rec.substr(0, rec.size() - 1), L"*.rec"); }
     std::string Bytes() {
         std::string b;
         ReadBytes(path, b);
@@ -964,6 +905,147 @@ const char* StateName(SaveState s) {
     static const char* n[] = {"SAVED", "PENDING", "SAVING", "BUSY", "DENIED", "READONLY", "MISSING", "CONFLICT",
                               "UNENCODABLE", "FAILED", "UNKNOWN", "OFF"};
     return s < std::size(n) ? n[s] : "?";
+}
+
+uint64_t FileTimeOf(const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA a{};
+    GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a);
+    return ((uint64_t)a.ftLastWriteTime.dwHighDateTime << 32) | a.ftLastWriteTime.dwLowDateTime;
+}
+void SetFileTimeOf(const std::wstring& path, uint64_t t) {
+    HANDLE h = CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    FILETIME ft{(DWORD)t, (DWORD)(t >> 32)};
+    SetFileTime(h, nullptr, nullptr, &ft);
+    CloseHandle(h);
+}
+
+// Recovery files (§10.3 steps 4 and 9, §10.5, and the review of Phase 1): what they hold, when they go, and that a
+// leftover is put back only over the torn file it was made for.
+void RecoveryTests(FileFixture& fx) {
+    DiskState d;
+    const std::wstring v0 = L"# Title\n\nline one of the original\nline two of the original\nline three\n\n- [ ] task\n";
+    const std::string orig = EncodeAs(CP_UTF8, v0);
+    const size_t box = v0.find(L"[ ]") + 1;
+    std::wstring ticked = v0;
+    ticked[box] = L'x';
+    for (const std::wstring& f : fx.RecoveryList()) DeleteFileW(f.c_str());
+
+    // A save that keeps the length holds only the bytes it replaces; one that never wrote a byte leaves a file that
+    // is seen as untouched (and would be deleted without a word).
+    fx.Baseline(orig, 1252, d);
+    SetFailWriteForTests(L"partial:0,norollback");
+    SaveResult r = fx.Save(ticked, d);
+    SetFailWriteForTests(L"");
+    RecoveryInfo ri;
+    bool read = !r.recoveryKept.empty() && ReadRecovery(r.recoveryKept, ri);
+    Check(read && ri.pb == box && ri.pe == box + 1 && ri.tailLen == 1 && ri.preSize == orig.size(),
+          "recovery: a tick keeps one byte, [%llu,%llu) of %llu", ri.pb, ri.pe, ri.preSize);
+    Check(read && ClassifyRecovery(ri, fx.Bytes(), FileTimeOf(fx.path)) == RV_UNTOUCHED,
+          "recovery: a save that wrote nothing leaves an untouched file");
+    DeleteFileW(r.recoveryKept.c_str());
+
+    // Unflushed saves (a slow volume between flush points): one recovery file stands for the last flushed version. A
+    // save inside its range adds nothing, one outside widens it; a crash leaves a file that shows the save went
+    // through; a torn save among them restores the flushed version; the flush point removes it.
+    SetFlushPolicyForTests(1);
+    fx.Baseline(orig, 1252, d);
+    r = fx.Save(ticked, d);
+    RecoveryInfo pend = r.pending;
+    Check(r.state == SS_SAVED && !pend.file.empty() && fx.RecoveryList().size() == 1 && r.flushMs < 0,
+          "pending: an unflushed tick keeps its recovery file (%s, %zu files)", StateName(r.state), fx.RecoveryList().size());
+    d = r.disk;
+    r = fx.Save(v0, d, false, &pend);  // untick: the same byte
+    Check(r.state == SS_SAVED && r.pending.file == pend.file && fx.RecoveryList().size() == 1,
+          "pending: a save inside its range reuses it");
+    pend = r.pending;
+    d = r.disk;
+    std::wstring grown = L"# A longer title\n" + v0.substr(v0.find(L'\n') + 1);
+    r = fx.Save(grown, d, false, &pend);  // before its range, and longer: a wider one, to the end
+    Check(r.state == SS_SAVED && !r.pending.file.empty() && r.pending.file != pend.file && fx.RecoveryList().size() == 1 &&
+              r.pending.pb == 2 && r.pending.pe == r.pending.preSize && r.pending.preSize == orig.size(),
+          "pending: a save outside its range widens it (pb %llu, pe %llu, %zu files)", r.pending.pb, r.pending.pe,
+          fx.RecoveryList().size());
+    pend = r.pending;
+    d = r.disk;
+    std::wstring copy = fx.dir + L"copy.md";
+    std::string cb;
+    Check(RecoveryRebuild(pend, fx.path.c_str(), copy.c_str()) && ReadBytes(copy, cb) && cb == orig,
+          "pending: it rebuilds the flushed version");
+    DeleteFileW(copy.c_str());
+    std::vector<RecoveryInfo> found = FindRecovery(fx.rec, d.volume, d.index, fx.path);
+    Check(found.size() == 1 && ClassifyRecovery(found[0], fx.Bytes(), FileTimeOf(fx.path)) == RV_DONE,
+          "pending: after a crash it shows the last save went through");
+    SetFailWriteForTests(L"partial:3,norollback");
+    r = fx.Save(grown + L"and more at the end\n", d, false, &pend);
+    SetFailWriteForTests(L"");
+    found = FindRecovery(fx.rec, d.volume, d.index, fx.path);
+    DWORD e = 0;
+    Check(r.state == SS_FAILED && r.recoveryKept == pend.file && r.pending.file.empty() && found.size() == 1 &&
+              ClassifyRecovery(found[0], fx.Bytes(), FileTimeOf(fx.path)) == RV_TORN &&
+              RecoveryRestore(found[0], fx.path.c_str(), fx.rec, &e) && fx.Bytes() == orig,
+          "pending: a torn save among unflushed ones restores the last flushed version");
+    for (const std::wstring& f : fx.RecoveryList()) DeleteFileW(f.c_str());
+    fx.Baseline(orig, 1252, d);
+    r = fx.Save(ticked, d);
+    pend = r.pending;
+    Check(RecoveryFlushPending(pend, fx.path.c_str()) && fx.RecoveryList().empty(), "pending: the flush point removes it");
+    SetFlushPolicyForTests(0);
+
+    // A leftover is put back only over the torn file it was made for (the reviewer's harness case): written again by
+    // another program since, or only touched later than the save, it is "changed" - Restore refuses, the file stays.
+    fx.Baseline(orig, 1252, d);
+    std::wstring shrunk = v0;
+    shrunk.erase(v0.find(L"line one"), 9);
+    SetFailWriteForTests(L"partial:4,norollback");
+    r = fx.Save(shrunk, d);
+    SetFailWriteForTests(L"");
+    std::string torn = fx.Bytes();
+    const std::string other = "INSERTED BY ANOTHER EDITOR\n" + orig + "new closing line\n";
+    WriteBytes(fx.path, other);
+    found = FindRecovery(fx.rec, d.volume, d.index, fx.path);
+    Check(found.size() == 1 && ClassifyRecovery(found[0], other, FileTimeOf(fx.path)) == RV_CHANGED &&
+              !RecoveryRestore(found[0], fx.path.c_str(), fx.rec, &e) && e == ERROR_INVALID_DATA && fx.Bytes() == other,
+          "restore: a file rewritten since is not overwritten (%lu)", e);
+    WriteBytes(fx.path, torn);
+    SetFileTimeOf(fx.path, FileTimeOf(fx.path) + 600000000ull);  // a minute later than the recovery file
+    Check(found.size() == 1 && ClassifyRecovery(found[0], torn, FileTimeOf(fx.path)) == RV_CHANGED &&
+              !RecoveryRestore(found[0], fx.path.c_str(), fx.rec, &e) && fx.Bytes() == torn,
+          "restore: a torn file written after the recovery file is not overwritten either");
+    // another file under the same identity (FAT reuses the index of a deleted file): not its recovery file at all
+    Check(FindRecovery(fx.rec, d.volume, d.index, fx.dir + L"todo.md").empty(), "recovery: another path, not listed");
+
+    // A kept recovery file is never written over: the next save from the torn file gets one of its own.
+    fx.Baseline(torn, 1252, d);
+    size_t before = fx.RecoveryList().size();
+    r = fx.Save(d.text + L"x", d);
+    RecoveryInfo still;
+    Check(r.state == SS_SAVED && fx.RecoveryList().size() == before && found.size() == 1 && ReadRecovery(found[0].file, still) &&
+              still.tailHash == found[0].tailHash,
+          "recovery: a later save leaves the kept file as it was (%s)", StateName(r.state));
+    for (const std::wstring& f : fx.RecoveryList()) DeleteFileW(f.c_str());
+
+    // Above a million characters the proof decodes only the changed window: an ANSI file must still not turn into
+    // valid UTF-8 ("Ã©" plus one lone "é": deleting the "é" would make the next read take it for UTF-8).
+    SetAnsiCodePageForTests(1252);
+    std::wstring big = L"Ã© and é\n" + std::wstring(1100000, L'a') + L"\n";
+    std::string bigBytes = EncodeAs(1252, big);
+    Check(fx.Baseline(bigBytes, 1252, d) == DR_OK && d.cp == 1252, "ansi: the big 1252 file is taken, cp %u", d.cp);
+    std::wstring noE = big;
+    noE.erase(noE.find(L'é', 3), 1);
+    r = fx.Save(noE, d, false, nullptr, false);
+    Check(r.state == SS_UNENCODABLE && fx.Bytes() == bigBytes, "ansi: > 1M characters, becoming UTF-8 is refused (%s %s)",
+          StateName(r.state), r.reason);
+    std::wstring plainEdit = big;
+    plainEdit.insert(20, L"b");
+    r = fx.Save(plainEdit, d, false, nullptr, false);
+    Check(r.state == SS_SAVED && fx.Bytes() == EncodeAs(1252, plainEdit), "ansi: an ASCII edit is saved (%s)", StateName(r.state));
+    // an ANSI file that starts with a UTF-8 byte-order mark must not get FF FE after it (the read would see UTF-16)
+    std::string bomAnsi = "\xEF\xBB\xBF" "caf\xE9\n";
+    Check(fx.Baseline(bomAnsi, 1252, d) == DR_OK && d.cp == 1252 && d.header == "\xEF\xBB\xBF", "ansi: BOM + 1252 is taken");
+    r = fx.Save(L"\xFF\xFE" + d.text, d);
+    Check(r.state == SS_UNENCODABLE && !strcmp(r.reason, "BOM_LOOKALIKE") && fx.Bytes() == bomAnsi,
+          "ansi: \"ÿþ\" after its UTF-8 mark → BOM_LOOKALIKE (%s %s)", StateName(r.state), r.reason);
+    SetAnsiCodePageForTests(GetACP());
 }
 
 void EditFileTests() {
@@ -1089,10 +1171,11 @@ void EditFileTests() {
     std::string torn = fx.Bytes();
     Check(r.state == SS_FAILED && torn != orig && !r.recoveryKept.empty() && fx.RecoveryFiles() == 1,
           "fault partial:10,norollback: a torn file and its recovery file (%s)", StateName(r.state));
-    std::vector<RecoveryInfo> found = FindRecovery(fx.rec, d.volume, d.index);
+    std::vector<RecoveryInfo> found = FindRecovery(fx.rec, d.volume, d.index, fx.path);
     Check(found.size() == 1 && found[0].path == fx.path && found[0].preSize == orig.size() && found[0].pid == GetCurrentProcessId(),
           "recovery: found for the file's identity, %zu", found.size());
     if (found.size() == 1) {
+        Check(ClassifyRecovery(found[0], torn, FileTimeOf(fx.path)) == RV_TORN, "recovery: the torn file is seen as torn");
         std::wstring copy = fx.dir + L"copy.md";
         Check(RecoveryRebuild(found[0], fx.path.c_str(), copy.c_str()), "recovery: the copy is rebuilt");
         std::string cb;
@@ -1100,10 +1183,12 @@ void EditFileTests() {
         Check(cb == orig, "recovery: the rebuilt copy is the file before the save");
         DeleteFileW(copy.c_str());
         DWORD e = 0;
-        Check(RecoveryRestore(found[0], fx.path.c_str(), &e) && fx.Bytes() == orig, "recovery: restore gives the original bytes");
+        Check(RecoveryRestore(found[0], fx.path.c_str(), fx.rec, &e) && fx.Bytes() == orig, "recovery: restore gives the original bytes");
+        Check(fx.RecoveryFiles() == 1, "recovery: the restore's own recovery file is gone after it, %zu left", fx.RecoveryFiles());
         DeleteFileW(found[0].file.c_str());
     }
     SetFailWriteForTests(L"");
+    RecoveryTests(fx);
 
     // ---- the local flush cost (§10.3 step 7): every save at a flush point flushes; the median goes into the report
     fx.Baseline(orig, 1252, d);

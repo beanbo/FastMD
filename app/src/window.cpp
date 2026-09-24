@@ -19,6 +19,13 @@ void Invalidate() {
     if (g.hwnd) InvalidateRect(g.hwnd, nullptr, FALSE);
 }
 
+// ------------------------------------------------------------------------------------------------ modal depth
+static std::vector<std::vector<RenderResult>*> g_deferredImages;  // picture batches that arrived inside a modal loop
+
+ModalScope::~ModalScope() {
+    if (--g.editModal == 0 && g.hwnd && !g_deferredImages.empty()) PostMessageW(g.hwnd, WM_APP_REPLAY, 0, 0);
+}
+
 // ------------------------------------------------------------------------------------------------ window placement
 // Placement of the last closed window (HKCU\Software\FastMD\Window, one binary value = one registry read).
 struct SavedWindow {
@@ -64,6 +71,7 @@ static void SavePlacement() {
 bool PrepareToClose() { return true; }
 
 static void SaveAll() {  // window closes / session ends
+    EditLeaveDocument();    // a flush point: the file's bytes on disk for good, the recovery file that stood by goes
     if (BenchActive()) return;
     g.cfg.tocOpen = g.tocOpen;
     SaveConfig(g.cfg, g.findQuery);
@@ -387,7 +395,11 @@ static void ContextMenu(int sx, int sy, bool keyboard) {
     if (UpdateAvailable()) AppendMenuW(m, MF_STRING, CMD_UPDATE, Tr(S_MENU_UPDATE));
     AppendMenuW(m, MF_STRING, CMD_SETTINGS, Tr(S_MENU_SETTINGS));
     AppendMenuW(m, MF_STRING, CMD_ASSOCIATE, Tr(S_MENU_ASSOCIATE));
-    UINT id = (UINT)TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, sx, sy, 0, g.hwnd, nullptr);
+    UINT id;
+    {
+        ModalScope modal;
+        id = (UINT)TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, sx, sy, 0, g.hwnd, nullptr);
+    }
     DestroyMenu(m);  // destroys the submenus too
     if (id) Command(id);
     g.ctxLink = g.ctxImage = -1;
@@ -1114,7 +1126,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (wp == TIMER_TOAST) { KillTimer(hwnd, TIMER_TOAST); Invalidate(); }
         else if (wp == TIMER_HBAR) { KillTimer(hwnd, TIMER_HBAR); Invalidate(); }
-        else if (wp == TIMER_RELOAD) { KillTimer(hwnd, TIMER_RELOAD); OnFileChanged(); }
+        else if (wp == TIMER_RELOAD) {  // never inside a modal loop: a reload would swap the model under it
+            KillTimer(hwnd, TIMER_RELOAD);
+            if (g.editModal > 0) SetTimer(hwnd, TIMER_RELOAD, 250, nullptr);
+            else OnFileChanged();
+        }
         else if (wp == TIMER_UPDATE) UpdateCheckAsync();  // hourly: asks GitHub only once a day has passed
         else if (wp >= TIMER_CARET && wp <= TIMER_EDIT_UI) EditTimer(wp);
         else if (wp == TIMER_AUTOSCROLL && g.selecting) {
@@ -1147,7 +1163,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP_QUERY: return (g.ready && !g.firstFrame) ? Query(wp, lp) : 0;
     case WM_APP_MEASURED: OnMeasured((MeasureJob*)lp); return 0;
     case WM_APP_FULLDOC: if (!g.firstFrame) OnFullDoc(); return 0;
-    case WM_APP_IMAGES: OnImagesLoaded((std::vector<RenderResult>*)lp); return 0;
+    case WM_APP_IMAGES:  // inside a modal loop the pictures wait: whoever opened it may be walking the pages
+        if (g.editModal > 0) g_deferredImages.push_back((std::vector<RenderResult>*)lp);
+        else OnImagesLoaded((std::vector<RenderResult>*)lp);
+        return 0;
+    case WM_APP_REPLAY:  // the last modal scope closed: what waited is put in place, in order
+        if (g.editModal == 0) {
+            std::vector<std::vector<RenderResult>*> q;
+            q.swap(g_deferredImages);
+            for (auto* batch : q) OnImagesLoaded(batch);
+        }
+        return 0;
     case WM_APP_UPDATE: OnUpdateMessage(wp, lp); return 0;
     case WM_APP_SCALED: OnScaledImages((std::vector<ScaledImage>*)lp); return 0;
     case WM_APP_FILECHANGED: SetTimer(hwnd, TIMER_RELOAD, 120, nullptr); return 0;  // debounce editor save bursts

@@ -399,6 +399,14 @@ map:
     row 3 26/26..27 pipes
   order 0
 
+=== map_nul_in_code (§4.4 a NUL in a code block is one atom, the text after it plain - the NUL is in the text once)
+src: ```\n\0x\n```\n
+map:
+  b0 CODE FENCED line=0 beg=4 end=6 le=6 outer=10 aux=3 "�x" «```\n⟨\0x⟩|\n```»
+    s 0+1 TEXT 4..5 «\0» "�"
+    s 1+1 P 5..6 «x»
+  order 0
+
 === map_table_in_quote (§4.4 a table inside a quote)
 src: > | h1 | h2 |\n> |----|----|\n> | c  |    |\n
 flags: noquote

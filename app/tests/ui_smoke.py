@@ -10,6 +10,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import winreg
 
@@ -1955,7 +1956,11 @@ def test_task_swap():
     ok = True
     doc = OUT / "task-swap.md"
     doc.write_bytes(TASK_SWAP_DOC.encode("utf-8"))
-    proc, hwnd = launch(doc, size="--size=900x700")
+    ENV["FASTMD_TEST_SLOW"] = "images:250"  # a formula typeset anew takes a while: what shows meanwhile is seen
+    try:
+        proc, hwnd = launch(doc, size="--size=900x700")
+    finally:
+        ENV.pop("FASTMD_TEST_SLOW", None)
     try:
         drawn = wait_for(lambda: q(hwnd, "MATH", 1) == 3, 8.0)
         settle(hwnd)
@@ -1988,8 +1993,29 @@ def test_task_swap():
         ok &= check("edit 1c: ... and the frame is what a fresh layout draws", relayout_same(hwnd, "82-task-middle"))
         ok &= check("edit 1c: ... the file and the source in memory agree",
                     q(hwnd, "SRC_HASH", 0) == src_hash(doc.read_bytes().decode("utf-8")) and q(hwnd, "EDIT_DIRTY") == 0)
+        # another text size (the settings of another window: registry + broadcast, no reload), then a tick at the top:
+        # the formulas keep their pictures until they are typeset for the new size - none goes blank (review of 1c)
+        wheel(hwnd, 450, 350, 40, wait=0.4)
+        settle(hwnd)
+        set_reg("Theme", 1)  # the window runs --light: the registry says so too, or the broadcast switches the theme
+        set_reg("FontSize", 20)
+        post(hwnd, u32.RegisterWindowMessageW("FastMD.SettingsChanged"), 0, 0, 0.6)
+        settle(hwnd)
+        drawn, renders = q(hwnd, "MATH", 1), q(hwnd, "RENDERS")
+        box = task_box(hwnd, 0)
+        if box:
+            click(hwnd, box[0], box[1], 0.02)
+        kept = q(hwnd, "MATH", 1)
+        fresh = wait_for(lambda: q(hwnd, "MATH", 3) == 0, 5.0)  # typeset for the new size (the old pictures meanwhile)
+        ok &= check("edit 1c: a tick after a text-size change: the formulas keep their pictures, then get new ones",
+                    q(hwnd, "FONT_SIZE") == 20 and box and drawn == 3 and kept == 3 and q(hwnd, "MATH", 1) == 3 and
+                    fresh and q(hwnd, "TASK", 0) == 0 and q(hwnd, "RELOADS") == reloads,
+                    f'drawn {drawn}, right after the tick {kept}, stale {q(hwnd, "MATH", 3)}, renders {renders} → '
+                    f'{q(hwnd, "RENDERS")}')
     finally:
         close_and_wait(proc, hwnd)
+        del_reg("FontSize")  # after the close: the window writes its settings back when it closes
+        del_reg("Theme")
     return ok
 
 
@@ -2139,6 +2165,14 @@ def test_save_fault():
             ok &= check("edit 1c: partial:10,norollback: a torn file and its recovery file",
                         s1 == 1 + 9 and torn != original and torn != new.encode("utf-8") and len(recovery_files()) == 1,
                         f"hook {s1}, recovery {recovery_files()}")
+            # the recovery file is the only copy of the old bytes now: on the strip at once, and no save goes over it
+            # (refused while the edits are still there; once the watcher has reloaded the torn file nothing is dirty)
+            shown_now = wait_for(lambda: q(hwnd, "EDIT_STRIP") == 6, 2.0)
+            s2 = copydata(hwnd, 2)
+            time.sleep(0.6)
+            ok &= check("edit 1c: ... the strip shows at once, and no save goes over the recovery file",
+                        shown_now and s2 in (1 + 9, 1 + 0) and doc.read_bytes() == torn and len(recovery_files()) == 1 and
+                        q(hwnd, "EDIT_STRIP") == 6, f'strip {q(hwnd, "EDIT_STRIP")}, hook {s2}, recovery {recovery_files()}')
         finally:
             close_and_wait(proc, hwnd)
     finally:
@@ -2178,6 +2212,37 @@ def test_save_fault():
                     doc.read_bytes() == original and q(hwnd, "EDIT_STRIP") == 0 and not recovery_files() and
                     q(hwnd, "RELOADS") == reloads + 1 and q(hwnd, "SRC_HASH", 0) == src_hash(text),
                     f'strip {q(hwnd, "EDIT_STRIP")}, recovery {recovery_files()}')
+    finally:
+        close_and_wait(proc, hwnd)
+    # A torn file that another program has written since: putting the old bytes back would lose that write, so the
+    # strip offers only the copy (and Delete); the file is never touched (review of 1c: RecoveryRestore)
+    ENV.update(FASTMD_TEST_HOOKS="1", FASTMD_TEST_FAIL_WRITE="partial:10,norollback")
+    try:
+        proc, hwnd = launch(doc)
+        try:
+            splice(hwnd, text, at, 0, " и расширен до длинного текста")
+            copydata(hwnd, 2)
+        finally:
+            close_and_wait(proc, hwnd)
+    finally:
+        ENV.pop("FASTMD_TEST_HOOKS", None)
+        ENV.pop("FASTMD_TEST_FAIL_WRITE", None)
+    written = "Строка, дописанная другой программой\n".encode("utf-8") + doc.read_bytes()
+    doc.write_bytes(written)
+    proc, hwnd = launch(doc)
+    try:
+        shown = wait_for(lambda: q(hwnd, "EDIT_STRIP") == 6, 3.0)
+        shot(hwnd, "85-recovery-strip-changed")
+        restore, copy_btn = q(hwnd, "EDIT_TOOL", CMD["RECOVERY_RESTORE"]), q(hwnd, "EDIT_TOOL", CMD["RECOVERY_OPEN"])
+        ok &= check("edit 1c: a torn file written since by another program: the strip offers the copy, not Restore",
+                    shown and restore == -1 and copy_btn > 0 and len(recovery_files()) == 1,
+                    f'strip {q(hwnd, "EDIT_STRIP")}, restore {restore}, copy {copy_btn}')
+        cmd(hwnd, "RECOVERY_RESTORE", 0.5)  # even asked for directly: refused
+        ok &= check("edit 1c: ... Restore asked for anyway changes nothing", doc.read_bytes() == written and
+                    len(recovery_files()) == 1)
+        cmd(hwnd, "RECOVERY_DELETE", 0.5)
+        ok &= check("edit 1c: ... Delete removes the recovery file and the strip, the file stays as it is",
+                    q(hwnd, "EDIT_STRIP") == 0 and not recovery_files() and doc.read_bytes() == written)
     finally:
         close_and_wait(proc, hwnd)
     return ok
@@ -2228,6 +2293,68 @@ def test_reading_touch():
     return ok
 
 
+def test_locked_at_open():
+    """a file that is there but cannot be read when it is opened (another program holds it with no sharing): the error
+    page, no reload loop (review of 1c: the watcher's baseline), and the document once the file is free"""
+    ok = True
+    doc = OUT / "locked-open.md"
+    text = "# Заперт\n\nЭтот файл был занят другой программой, когда его открывали.\n"
+    doc.write_bytes(text.encode("utf-8"))
+    k32.CreateFileW.restype = wt.HANDLE
+    k32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p, wt.DWORD, wt.DWORD, wt.HANDLE]
+    k32.CloseHandle.argtypes = [wt.HANDLE]
+    h = k32.CreateFileW(str(doc), 0x80000000, 0, None, 3, 0, None)  # GENERIC_READ, no sharing at all
+    proc, hwnd = launch(doc)
+    try:
+        time.sleep(2.0)
+        reloads = q(hwnd, "RELOADS")
+        ok &= check("edit 1c: a locked file opens as the error page and is not reloaded over and over",
+                    reloads <= 1 and q(hwnd, "SRC_HASH", 0) != src_hash(text), f"{reloads} reloads in 2 s")
+        k32.CloseHandle(h)
+        h = None
+        ok &= check("edit 1c: ... and it is read once it is free",
+                    wait_for(lambda: q(hwnd, "SRC_HASH", 0) == src_hash(text), 6.0),
+                    f'reloads {q(hwnd, "RELOADS")}')
+    finally:
+        if h:
+            k32.CloseHandle(h)
+        close_and_wait(proc, hwnd)
+    return ok
+
+
+def test_modal_scope():
+    """§10.10: inside a modal loop (a test hook runs one, as a menu or a dialog would) the reload waits and a splice is
+    refused; the reload happens once the loop is over (review of 1c: editModal was never raised)"""
+    ok = True
+    doc = OUT / "modal.md"
+    text = "# Модальное окно\n\nПока открыт диалог, модель не меняется.\n"
+    doc.write_bytes(text.encode("utf-8"))
+    ENV.update(FASTMD_TEST_HOOKS="1")
+    try:
+        proc, hwnd = launch(doc)
+        try:
+            settle(hwnd)
+            reloads = q(hwnd, "RELOADS")
+            t = threading.Thread(target=lambda: copydata(hwnd, 3, "2000"))  # the loop runs on the app's thread
+            t.start()
+            time.sleep(0.3)
+            refused = copydata(hwnd, 1, "0\t0\tx") == 0
+            text2 = text.replace("не меняется", "не меняется никогда")
+            doc.write_bytes(text2.encode("utf-8"))
+            time.sleep(1.0)
+            waited = q(hwnd, "RELOADS") == reloads and q(hwnd, "SRC_HASH", 0) == src_hash(text)
+            t.join()
+            ok &= check("edit 1c: inside a modal loop a splice is refused and a changed file is not reloaded",
+                        refused and waited, f"refused {refused}, reloads {q(hwnd, 'RELOADS')}")
+            ok &= check("edit 1c: ... the reload comes once the loop is over",
+                        wait_for(lambda: q(hwnd, "RELOADS") == reloads + 1 and q(hwnd, "SRC_HASH", 0) == src_hash(text2), 3.0))
+        finally:
+            close_and_wait(proc, hwnd)
+    finally:
+        ENV.pop("FASTMD_TEST_HOOKS", None)
+    return ok
+
+
 def main():
     OUT.mkdir(exist_ok=True)
     reset_profile()
@@ -2249,7 +2376,8 @@ def main():
              ("placement", lambda: test_placement(doc)), ("map_selfcheck", test_map_selfcheck),
              ("copy_md_exact", test_copy_md_exact), ("image_race", test_image_race),
              ("reload_during_update", test_reload_during_update), ("task_swap", test_task_swap),
-             ("splice_hook", test_splice_hook), ("save_fault", test_save_fault), ("reading_touch", test_reading_touch)]
+             ("splice_hook", test_splice_hook), ("save_fault", test_save_fault), ("reading_touch", test_reading_touch),
+             ("locked_at_open", test_locked_at_open), ("modal_scope", test_modal_scope)]
     only = [n for n in os.environ.get("FASTMD_ONLY", "").split(",") if n]  # e.g. FASTMD_ONLY=update,settings
     for name, t in tests:
         if not only or name in only:

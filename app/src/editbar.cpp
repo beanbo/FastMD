@@ -17,10 +17,15 @@ int g_hot = -1;  // hovered button (index)
 void Describe(int kind, std::wstring* text, uint8_t* accent, std::vector<StripButton>* btns) {
     switch (kind) {
     case STRIP_RECOVERY:
-        *text = Tr(S_ED_RECOVERY_INTERRUPTED);
         *accent = P_ALERT_WARNING;
-        *btns = {{CMD_RECOVERY_OPEN, S_ED_RECOVERY_OPEN}, {CMD_RECOVERY_RESTORE, S_ED_RECOVERY_RESTORE},
-                 {CMD_RECOVERY_DELETE, S_ED_RECOVERY_DELETE}};
+        if (EditRecoveryRestorable()) {
+            *text = Tr(S_ED_RECOVERY_INTERRUPTED);
+            *btns = {{CMD_RECOVERY_OPEN, S_ED_RECOVERY_OPEN}, {CMD_RECOVERY_RESTORE, S_ED_RECOVERY_RESTORE},
+                     {CMD_RECOVERY_DELETE, S_ED_RECOVERY_DELETE}};
+        } else {  // the file moved on since: putting the old bytes back would lose what came after, a copy cannot
+            *text = Tr(S_ED_RECOVERY_CHANGED);
+            *btns = {{CMD_RECOVERY_OPEN, S_ED_RECOVERY_OPEN}, {CMD_RECOVERY_DELETE, S_ED_RECOVERY_DELETE}};
+        }
         break;
     default: *text = L""; *accent = P_ALERT_NOTE; btns->clear();
     }

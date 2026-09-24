@@ -158,6 +158,7 @@ const Pair kStr[] = {
     {L"Удалить", L"Delete"},
     {L"Не удалось восстановить файл", L"The file could not be restored"},
     {L" (восстановлено)", L" (recovered)"},
+    {L"Прошлое сохранение прервалось, а файл с тех пор изменён", L"The last save was interrupted, and the file has changed since"},
 };
 static_assert(std::size(kStr) == S_COUNT, "one entry per StrId");
 UiLang g_lang = UL_RU;

@@ -39,6 +39,14 @@ struct Range final : ITextRangeProvider {
 
     Range(uint32_t a, uint32_t b) : from(std::min(a, b)), to(std::max(a, b)) {}
 
+    // A client may hold a range across a model swap that shortened the text (a reload, a ticked box, typing), so
+    // every method that reads the text or moves the selection first brings the range back inside it (§5.6).
+    void Fit() {
+        from = Clamp(from);
+        to = Clamp(to);
+        if (from > to) from = to;
+    }
+
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
         if (riid == IID_IUnknown || riid == __uuidof(ITextRangeProvider)) {
             *ppv = static_cast<ITextRangeProvider*>(this);
@@ -119,6 +127,7 @@ struct Range final : ITextRangeProvider {
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE ExpandToEnclosingUnit(TextUnit unit) override {
+        Fit();
         uint32_t a = 0, b = 0;
         if (UnitRange(unit, from, &a, &b)) {
             from = a;
@@ -134,6 +143,7 @@ struct Range final : ITextRangeProvider {
                                        ITextRangeProvider** out) override {
         *out = nullptr;
         if (!text) return E_INVALIDARG;
+        Fit();
         std::wstring needle(text, SysStringLen(text)), hay = g.doc.text.substr(from, to - from);
         if (needle.empty()) return S_OK;
         if (ignoreCase) {
@@ -146,6 +156,7 @@ struct Range final : ITextRangeProvider {
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetAttributeValue(TEXTATTRIBUTEID id, VARIANT* value) override {
+        Fit();
         VariantInit(value);
         if (id == UIA_StyleIdAttributeId) {  // how a screen reader finds headings
             int level = HeadingLevelAt(from);
@@ -162,6 +173,7 @@ struct Range final : ITextRangeProvider {
         return UiaGetReservedNotSupportedValue((IUnknown**)&value->punkVal);
     }
     HRESULT STDMETHODCALLTYPE GetBoundingRectangles(SAFEARRAY** out) override {
+        Fit();
         std::vector<double> rects;
         RangeScreenRects(from, to, rects);
         *out = SafeArrayCreateVector(VT_R8, 0, (ULONG)rects.size());
@@ -179,6 +191,7 @@ struct Range final : ITextRangeProvider {
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE Move(TextUnit unit, int count, int* moved) override {
+        Fit();
         *moved = 0;
         uint32_t at = from;
         for (int i = 0; i < std::abs(count); i++) {
@@ -200,6 +213,8 @@ struct Range final : ITextRangeProvider {
                                                   TextPatternRangeEndpoint theirs) override {
         auto* o = static_cast<Range*>(other);
         if (!o) return E_INVALIDARG;
+        Fit();
+        o->Fit();
         uint32_t v = theirs == TextPatternRangeEndpoint_Start ? o->from : o->to;
         if (mine == TextPatternRangeEndpoint_Start) from = std::min(v, to);
         else to = std::max(v, from);
@@ -207,6 +222,7 @@ struct Range final : ITextRangeProvider {
     }
     HRESULT STDMETHODCALLTYPE MoveEndpointByUnit(TextPatternRangeEndpoint endpoint, TextUnit unit, int count,
                                                  int* moved) override {
+        Fit();
         *moved = 0;
         uint32_t at = endpoint == TextPatternRangeEndpoint_Start ? from : to;
         for (int i = 0; i < std::abs(count); i++) {
@@ -226,11 +242,13 @@ struct Range final : ITextRangeProvider {
     }
     HRESULT STDMETHODCALLTYPE RemoveFromSelection() override { return UIA_E_INVALIDOPERATION; }
     HRESULT STDMETHODCALLTYPE ScrollIntoView(BOOL) override {
+        Fit();
         RevealTextPos(from, false);
         Invalidate();
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE Select() override {
+        Fit();
         g.selAnchor = from;
         g.selFocus = to;
         Invalidate();

@@ -231,13 +231,48 @@ map:
     span <i> t15..18 o21..24 c27..27 UNCLOSED ENTER «<i>»«»
   order 0 1
 
-=== map_html_split_tag (§4.4 an inline HTML tag across two lines makes no pseudo-span)
+=== map_html_split_tag (§4.4 an inline HTML tag across two lines is one tag - its attributes are not text - and makes no pseudo-span)
 src: a <span\nclass="x">b</span> c\n
 map:
-  b0 P - line=0 beg=0 end=28 le=28 outer=28 "a \nclass="x">b c" «⟨a <span\nclass="x">b</span> c⟩»
+  b0 P - line=0 beg=0 end=28 le=28 outer=28 "a b c" «⟨a <span\nclass="x">b</span> c⟩»
     s 0+2 P 0..2 «a »
-    s 2+1 TEXT 7..8 «\n» "\n"
-    s 3+10 P 8..18 «class="x">»
-    s 13+1 P 18..19 «b»
-    s 14+2 P 26..28 « c»
+    s 2+1 P 18..19 «b»
+    s 3+2 P 26..28 « c»
+  order 0
+
+=== map_html_split_bold (§4.4 a formatting tag across lines: bold as a browser shows it, no pseudo-span, the tag is no text)
+src: a <b\nclass="x">bold</b> c\n
+map:
+  b0 P - line=0 beg=0 end=25 le=25 outer=25 "a bold c" «⟨a <b\nclass="x">bold</b> c⟩»
+    s 0+2 P 0..2 «a »
+    s 2+4 P 15..19 «bold»
+    s 6+2 P 23..25 « c»
+  order 0
+
+=== map_html_split_br (§4.4 a <br> across lines: one atom over the whole tag)
+src: a<br\nclass="x">b\n
+map:
+  b0 P - line=0 beg=0 end=16 le=16 outer=16 "a\nb" «⟨a<br\nclass="x">b⟩»
+    s 0+1 P 0..1 «a»
+    s 1+1 TEXT 1..15 «<br\nclass="x">» "\n"
+    s 2+1 P 15..16 «b»
+  order 0
+
+=== map_code_span_closer_line_start (§4.4 a code span whose closer starts a line: no break after it, the blank is plain)
+src: a ``\nfoo\n`` b\n
+map:
+  b0 P - line=0 beg=0 end=13 le=13 outer=13 "a foo b" «⟨a ``\nfoo\n`` b⟩»
+    s 0+2 P 0..2 «a »
+    s 2+3 P 5..8 «foo»
+    s 5+2 P 11..13 « b»
+    span CODE t2..5 o2..5 c8..11 «``\n»«\n``»
+  order 0
+
+=== map_code_span_closer_joins (§4.4 ... and the text right after such a closer joins the code, as CommonMark says)
+src: ``\nfoo\n``bar ``\n
+map:
+  b0 P - line=0 beg=0 end=15 le=15 outer=15 "foobar ``" «⟨``\nfoo\n``bar ``⟩»
+    s 0+3 P 3..6 «foo»
+    s 3+6 P 9..15 «bar ``»
+    span CODE t0..3 o0..3 c6..9 «``\n»«\n``»
   order 0

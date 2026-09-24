@@ -132,3 +132,23 @@ src: | a | b |\n|---|---|\n| x |‸|\n
 do: caret
 want: | a | b |\n|---|---|\n| x |‸|\n
 flags: nolist
+
+=== caret_empty_atx_closing (§6.3.1 an empty heading with a closing sequence: beg, before the "##" - the op adds "x ")
+src: ## #‸#\n
+do: caret
+want: ## ‸##\n
+
+=== caret_footnote_empty (§6.3.1 a footnote definition with no text: after its "]:")
+src: a[^1]\n\n[^‸1]:\n
+do: caret
+want: a[^1]\n\n[^1]:‸\n
+
+=== caret_item_footnote_def (§4.4 the line of an item a definition took belongs to the definition)
+src: x[^1]\n\n‸- [^1]: note\n
+do: caret
+want: x[^1]\n\n- [^1]: ‸note\n
+
+=== caret_code_span_closer_line_start (§6.4 after a closer that starts a line, the caret stays out of the code)
+src: a ``\nfoo\n``‸ b\n
+do: caret
+want: a ``\nfoo\n``‸ b\n

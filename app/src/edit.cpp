@@ -40,6 +40,7 @@ struct Session {
     Sample ring[128] = {};
     uint32_t samples = 0;
     std::vector<RecoveryInfo> recovery;  // interrupted saves of the open file (the RECOVERY strip)
+    RecoveryInfo pending;                // the recovery file standing for the last flush, while saves go unflushed
 } s;
 
 std::wstring RecoveryDir() {
@@ -128,7 +129,7 @@ bool EditTestHooks() {
 // was: its layouts, heights, horizontal scroll and pictures, and the view does not move. at / oldLen / newLen: the
 // source range the change replaced (at == UINT32_MAX: none, the entry parse). Nothing is pumped in here (R13).
 void EditReparse(uint32_t at, uint32_t oldLen, uint32_t newLen) {
-    // 1. the splice primitive refuses both, so neither can hold here
+    // 1. the splice primitive refuses both (and the reload timer waits for the modal loop), so neither can hold here
     if (g.fullPending || g.editModal > 0) DebugLog("EditReparse with the full parse pending or inside a modal");
     uint64_t t0 = Qpc();
     // 2. only the measure jobs read the model and stop within a block; the picture worker and the scaler hold their own
@@ -284,8 +285,9 @@ void EditReparse(uint32_t at, uint32_t oldLen, uint32_t newLen) {
 
 // ------------------------------------------------------------------------------------------------ splice (§7.1)
 bool EditSplice(uint32_t at, uint32_t len, std::wstring text) {
-    // the full parse of a big document reads g.src on its thread; the error document is not the file
-    if (g.fullPending || g.loadFailed || g.path.empty()) return false;
+    // the full parse of a big document reads g.src on its thread; the error document is not the file; inside a modal
+    // loop (a sent WM_COPYDATA arrives there too) whoever opened it holds on to the model (§10.10)
+    if (g.fullPending || g.loadFailed || g.path.empty() || g.editModal > 0) return false;
     if (at > g.src.size() || len > g.src.size() - at || SpliceSplits(g.src, at, len)) {
         DebugLog("splice refused: %u+%u would cut a character or a line end in two", at, len);
         ShowToast(Tr(S_ED_REFUSED), 3000);
@@ -325,9 +327,39 @@ BaselineResult EditBaseline(SaveState* st) {
     return BL_OK;
 }
 
+// What the file on disk says about each recovery file on the strip; the ones of a save that went through (or never
+// wrote a byte) are deleted without a word.
+static void ClassifyLeftovers() {
+    std::string bytes;
+    DiskState now;
+    DWORD e = 0;
+    bool read = ReadDisk(g.path.c_str(), bytes, &now, &e) == SS_SAVED;
+    uint64_t mtime = FileTimeU64(now.mtime);
+    for (size_t i = 0; i < s.recovery.size();) {
+        RecoveryInfo& r = s.recovery[i];
+        r.verdict = read ? ClassifyRecovery(r, bytes, mtime) : RV_CHANGED;
+        if (r.verdict == RV_DONE || r.verdict == RV_UNTOUCHED) {
+            DebugLog("recovery file of a save that %s: deleted", r.verdict == RV_DONE ? "went through" : "never wrote");
+            DeleteFileW(r.file.c_str());
+            s.recovery.erase(s.recovery.begin() + i);
+        } else {
+            i++;
+        }
+    }
+}
+
 SaveState EditSave(bool flushPoint) {
     if (!g.disk.valid) return SS_FAILED;
-    if (g.src == g.disk.text) return s.saveState = SS_SAVED;  // equal bytes are never written (UX-5)
+    if (g.src == g.disk.text) {  // equal bytes are never written (UX-5); a flush point still flushes
+        if (flushPoint) EditLeaveDocument();
+        return s.saveState = SS_SAVED;
+    }
+    // An interrupted save of this file waits on the strip: nothing is written until the reader has chosen what to do
+    // with it - its recovery file may be the only copy of the bytes it holds, and a torn file is no baseline.
+    if (!s.recovery.empty()) {
+        DebugLog("save refused: a recovery file of this file is waiting on the strip");
+        return s.saveState = SS_FAILED;
+    }
     SaveRequest rq;
     rq.path = g.path.c_str();
     rq.text = &g.src;
@@ -335,8 +367,10 @@ SaveState EditSave(bool flushPoint) {
     rq.recoveryDir = RecoveryDir();
     rq.flushPoint = flushPoint;
     rq.fullProof = SelfCheckOn();
+    rq.pending = s.pending.file.empty() ? nullptr : &s.pending;
     SaveResult r = SaveSource(rq);
     DebugLog("save: state %d (%s), error %lu, flush %.2f ms", (int)r.state, r.reason, r.error, r.flushMs);
+    s.pending = std::move(r.pending);
     if (r.state == SS_SAVED || r.adopted) {
         g.disk = std::move(r.disk);
         if (r.adopted) g.eol = DiskEol(g.disk);
@@ -346,6 +380,16 @@ SaveState EditSave(bool flushPoint) {
         g.fileTime = g.disk.mtime;
         g.fileSize = g.disk.size;
         g.saves++;
+    }
+    if (!r.recoveryKept.empty()) {
+        // The write failed half-way and so did putting the old bytes back: the recovery file is now the only copy of
+        // them. It goes on the strip at once (§10.3 step 9), not only at the next open.
+        RecoveryInfo ri;
+        if (ReadRecovery(r.recoveryKept, ri)) {
+            s.recovery.push_back(std::move(ri));
+            ClassifyLeftovers();
+        }
+        if (!s.recovery.empty()) StripShow(STRIP_RECOVERY);
     }
     return s.saveState = r.state;
 }
@@ -359,18 +403,33 @@ void EditOnLoad() {
     s.undo.Clear();  // a new document session (§11)
     s.saveState = SS_SAVED;
     s.recovery.clear();
+    s.pending = RecoveryInfo();  // (EditLeaveDocument has flushed its file already)
     StripHide(STRIP_RECOVERY);
 }
 
+// A flush point (§10.3 step 7): leaving the document for another one or a reload, and the window closing. The recovery
+// file that stood for the last flush while saves went unflushed goes once the file is flushed; a flush that fails
+// leaves it, and the next open finds it.
+void EditLeaveDocument() {
+    if (s.pending.file.empty()) return;
+    if (!RecoveryFlushPending(s.pending, g.path.c_str())) DebugLog("flush point: the flush failed, the recovery file stays");
+    s.pending = RecoveryInfo();
+}
+
 // ------------------------------------------------------------------------------------------------ recovery (§10.5)
-// After the first frame of an open: a recovery file left for this file's identity means a save was interrupted.
+// After the first frame of an open: a recovery file left for this file means a save was interrupted - unless the file
+// shows the save went through or never began, and then it is deleted without a word.
 void EditAfterOpen() {
     s.recovery.clear();
-    if (!g.path.empty() && !g.loadFailed && !BenchActive())
-        s.recovery = FindRecovery(RecoveryDir(), g.disk.volume, g.disk.index);
+    if (!g.path.empty() && !g.loadFailed && !BenchActive()) {
+        s.recovery = FindRecovery(RecoveryDir(), g.disk.volume, g.disk.index, g.path);
+        if (!s.recovery.empty()) ClassifyLeftovers();
+    }
     if (s.recovery.empty()) StripHide(STRIP_RECOVERY);
     else StripShow(STRIP_RECOVERY);
 }
+
+bool EditRecoveryRestorable() { return !s.recovery.empty() && s.recovery.back().verdict == RV_TORN; }
 
 static void RecoveryDone() {
     s.recovery.pop_back();
@@ -405,8 +464,12 @@ void EditCommand(UINT id, UINT) {
     }
     case CMD_RECOVERY_RESTORE: {  // the saved bytes back at pb, the old length, then the file read again
         DWORD e = 0;
-        if (!RecoveryRestore(r, g.path.c_str(), &e)) {
-            DebugLog("recovery restore failed: %lu", e);
+        if (r.verdict != RV_TORN || !RecoveryRestore(r, g.path.c_str(), RecoveryDir(), &e)) {
+            DebugLog("recovery restore refused or failed: %lu", e);
+            // the file is not the torn one any more (checked again under an exclusive handle): Restore goes
+            if (e == ERROR_INVALID_DATA) s.recovery.back().verdict = RV_CHANGED;
+            ForceFullRedraw();
+            Invalidate();
             ShowToast(Tr(S_ED_RECOVERY_FAILED), 3000);
             break;
         }
@@ -424,7 +487,8 @@ void EditCommand(UINT id, UINT) {
 
 // ------------------------------------------------------------------------------------------------ test hooks (§13.5)
 // FASTMD_TEST_HOOKS=1: WM_COPYDATA dwData 1 = a splice "at\tlen\ttext" through the splice primitive and the swap (reading
-// mode too, nothing saved) → 1 done, 0 refused; dwData 2 = SaveSource now (a flush point) → 1 + the SaveState.
+// mode too, nothing saved) → 1 done, 0 refused; dwData 2 = SaveSource now (a flush point) → 1 + the SaveState;
+// dwData 3 = a modal loop for "<ms>" milliseconds → 1 when it is over.
 LRESULT EditCopyData(const COPYDATASTRUCT* cd) {
     if (!HooksOn() || !cd || !g.ready || g.firstFrame || g.path.empty()) return 0;
     SaveState st;
@@ -441,6 +505,27 @@ LRESULT EditCopyData(const COPYDATASTRUCT* cd) {
     if (cd->dwData == 2) {
         if (EditBaseline(&st) != BL_OK) return 1 + SS_FAILED;
         return 1 + EditSave(true);
+    }
+    if (cd->dwData == 3) {
+        // a modal loop of its own for the given milliseconds, as a menu or a dialog runs one (§10.10): a test sees
+        // what has to wait inside it - the reload, a splice - and that it happens once the loop is over
+        std::wstring arg((const wchar_t*)cd->lpData, cd->cbData / sizeof(wchar_t));
+        DWORD ms = std::min<DWORD>(10000, (DWORD)wcstoul(arg.c_str(), nullptr, 10));
+        ModalScope modal;
+        ULONGLONG end = GetTickCount64() + ms;
+        MSG m;
+        while (GetTickCount64() < end) {
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 20, QS_ALLINPUT);
+            while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
+                if (m.message == WM_QUIT) {
+                    PostQuitMessage((int)m.wParam);
+                    return 1;
+                }
+                TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+        }
+        return 1;
     }
     return 0;
 }

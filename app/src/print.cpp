@@ -193,6 +193,9 @@ bool PrintPages(HDC dc, const wchar_t* jobName, const wchar_t* outFile, int from
 // Ctrl+P: the system dialog picks the printer, the paper and the pages.
 void PrintDocument() {
     if (g.path.empty() || g.doc.blocks.empty()) return;
+    // the dialog and the job (whose driver may show a dialog of its own in StartDocW, after the pages are cut): no
+    // reload, no picture changes the model before the last page is out
+    ModalScope modal;
     PRINTDLGW pd{sizeof(pd)};
     pd.hwndOwner = g.hwnd;
     pd.Flags = PD_RETURNDC | PD_NOSELECTION | PD_USEDEVMODECOPIESANDCOLLATE;
@@ -215,6 +218,7 @@ void PrintDocument() {
 // "Экспорт в PDF": our own save dialog, then the same job through the PDF driver with the file name set up front.
 void ExportPdf() {
     if (g.path.empty() || g.doc.blocks.empty()) return;
+    ModalScope modal;  // the save dialog and the job, as PrintDocument
     std::wstring path = SavePdfDialog();
     if (path.empty()) return;
     HDC dc = CreateDCW(L"WINSPOOL", kPdfPrinter, nullptr, nullptr);

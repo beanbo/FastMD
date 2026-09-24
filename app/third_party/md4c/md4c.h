@@ -29,7 +29,9 @@
  * source: leaf extents, verbatim lines, line breaks, span delimiters, table cells and footnote definitions. The editor
  * builds its text <-> source map from them. With `fastmd == NULL` (a zero-initialised parser) md4c behaves exactly as
  * upstream. Two side changes ride along: MD_BLOCK_LI_DETAIL::task_mark_offset also carries the offset of the list
- * marker of a non-task item, and an HR injected after reference definitions keeps its source line.
+ * marker of a non-task item, and an HR injected after reference definitions keeps its source line. Two upstream bugs
+ * are fixed whatever `fastmd` is (both marked "FastMD fix" in md4c.c): a NUL in code or HTML reached the text twice,
+ * and a code span whose closer starts a line was followed by a phantom soft break.
  */
 
 #ifndef MD4C_H
@@ -444,7 +446,8 @@ typedef struct MD_BLOCK_BLANK_DETAIL {
  *                  "\n" of raw inline HTML across lines): the source that stands for it, up to the next line's start.
  * span_extent:     the delimiters of a span, before it is entered (enter = 1) and after it is left (enter = 0).
  * cell_extent:     a table cell after trimming; missing = 1 for a cell a short row is padded with (beg = end = 0).
- * footnote_extent: a referenced footnote definition before it is entered: the '[' of "[^label]:" and its content.
+ * footnote_extent: a referenced footnote definition before it is entered: the '[' of "[^label]:" and its content
+ *                  (content_beg = content_end = def_beg for a definition with no content).
  */
 typedef struct MD_FASTMD_HOOKS {
     void (*leaf_extent)(MD_BLOCKTYPE type, MD_OFFSET beg, MD_OFFSET end, unsigned flags, void* userdata);

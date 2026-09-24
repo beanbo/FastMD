@@ -114,14 +114,21 @@ uint32_t InsertionPoint(const Doc& d, const std::wstring& src, const TextPos& p)
     return bs.beg;  // empty heading, empty item, empty fenced block: their records already point there
 }
 
+// the first segment of the run of synthesized ones that ends with *g (only the start of such a run is a caret stop)
+const SrcSeg* SynthRunStart(const SrcSeg* first, const SrcSeg* g) {
+    while (g > first && (g - 1)->kind == SEG_SYNTH && (g - 1)->t + (g - 1)->tLen == g->t) g--;
+    return g;
+}
+
 // the last caret stop of a block (before a synthesized tail such as the footnote arrow)
 uint32_t LastStop(const Doc& d, int32_t block) {
     const Block& b = d.blocks[block];
     const BlockSrc& bs = d.blockSrc[block];
     uint32_t end = b.textOff + b.textLen;
     if (bs.segCount && bs.segOff + bs.segCount <= d.segs.size()) {
-        const SrcSeg& last = d.segs[bs.segOff + bs.segCount - 1];
-        if (last.kind == SEG_SYNTH && last.t + last.tLen == end) return last.t;
+        const SrcSeg* first = d.segs.data() + bs.segOff;
+        const SrcSeg* last = first + bs.segCount - 1;
+        if (last->kind == SEG_SYNTH && last->t + last->tLen == end) return SynthRunStart(first, last)->t;
     }
     return end;
 }
@@ -168,7 +175,7 @@ TextPos InSegs(const Doc& d, const std::wstring& src, int32_t block, int32_t cel
         }
         return TextPos{dir < 0 ? pv.t : pv.t + pv.tLen, block, cell};  // inside an atom: its nearer edge that way
     }
-    if (pv.kind == SEG_SYNTH) return TextPos{pv.t, block, cell};  // never past the start of synthesized text
+    if (pv.kind == SEG_SYNTH) return TextPos{SynthRunStart(ss.b, it - 1)->t, block, cell};  // never past its start
     uint32_t after = pv.t + pv.tLen;
     // trailing blanks: after the last segment of a line, before its end (or the cell's pipe)
     uint32_t le = LineEndOf(src, pvEnd);
@@ -386,6 +393,7 @@ uint32_t SrcOfText(const Doc& d, const std::wstring& src, const TextPos& p, MapM
     }
     const SrcSeg* R = it && it != ss.e && it->t == t ? it : nullptr;
     const SrcSeg* L = it && it != ss.b && (it - 1)->t + (it - 1)->tLen == t ? it - 1 : nullptr;
+    if (L && R && L->kind == SEG_SYNTH) L = nullptr;  // synthesized text has no source to continue: R's start counts
     uint32_t lEnd = L ? L->s + L->sLen : 0;
     switch (mode) {
     case MAP_CARET:
@@ -495,6 +503,11 @@ bool MapSelfCheck(const Doc& d, const std::wstring& src, std::string* why) {
         if (!(bs.line <= bs.beg && bs.beg <= bs.end && bs.end <= bs.lineEnd && bs.lineEnd <= bs.outerEnd && bs.outerEnd <= n))
             return w.Fail("block %u: line %u beg %u end %u lineEnd %u outerEnd %u (source %u)", k, bs.line, bs.beg, bs.end,
                           bs.lineEnd, bs.outerEnd, n);
+        // a record's lines are whole lines: it starts at a line start and its line ends are line ends
+        if ((bs.line && !EolChar(src[bs.line - 1])) || (bs.lineEnd < n && !EolChar(src[bs.lineEnd])) ||
+            (bs.outerEnd < n && !EolChar(src[bs.outerEnd])))
+            return w.Fail("block %u: line %u, lineEnd %u or outerEnd %u is not on a line boundary", k, bs.line, bs.lineEnd,
+                          bs.outerEnd);
         if (bs.container >= (int32_t)d.containers.size()) return w.Fail("block %u: container %d", k, bs.container);
         if ((bs.flags & BS_RAW) && (bs.rawId < 0 || bs.rawId > (int32_t)k)) return w.Fail("block %u: rawId %d", k, bs.rawId);
         const uint32_t tEnd = b.textOff + b.textLen;
@@ -503,6 +516,7 @@ bool MapSelfCheck(const Doc& d, const std::wstring& src, std::string* why) {
         // 1, 2, 3, 5: each segment inside the block (and its cell), PLAIN equal to its source, atoms inside the lines
         const Table* tb = TableOf(d, (int32_t)k);
         uint32_t prevSEnd = 0, cover = b.textOff, cell = 0;
+        std::vector<const SrcSeg*> real;  // the segments with a source, in source order (#5), for the span check below
         for (uint32_t i = bs.segOff; i < bs.segOff + bs.segCount; i++) {
             const SrcSeg& g = d.segs[i];
             if (g.t < b.textOff || g.t + g.tLen > tEnd) return w.Fail("block %u: seg %u [%u,+%u) outside the block's text [%u,%u)", k, i, g.t, g.tLen, b.textOff, tEnd);
@@ -512,7 +526,15 @@ bool MapSelfCheck(const Doc& d, const std::wstring& src, std::string* why) {
                 if (cell >= cells) return w.Fail("block %u: seg %u in no cell", k, i);
                 const Cell& c = d.cells[tb->cellOff + cell];
                 if (g.t < c.textOff || g.t + g.tLen > c.textOff + c.textLen) return w.Fail("block %u: seg %u crosses cell %u", k, i, cell);
+                // ... and its source inside that cell's
+                const CellSrc& cs = d.cellSrc[tb->cellOff + cell];
+                if (g.kind != SEG_SYNTH && !(bs.flags & BS_RAW) && (cs.missing || g.s < cs.beg || g.s + g.sLen > cs.end))
+                    return w.Fail("block %u: seg %u source [%u,+%u) outside cell %u's [%u,%u]", k, i, g.s, g.sLen, cell, cs.beg, cs.end);
             }
+            // every segment with a source lies in its block's lines, plain text too: a record that belongs to another
+            // block (or none) is caught even where its text happens to equal some other part of the source
+            if (g.kind != SEG_SYNTH && (g.s < bs.line || g.s + g.sLen > bs.outerEnd))
+                return w.Fail("block %u: %s seg %u source [%u,+%u) outside the block's lines [%u,%u]", k, KindName(g.kind), i, g.s, g.sLen, bs.line, bs.outerEnd);
             if (g.kind == SEG_PLAIN) {
                 if (g.tLen != g.sLen) return w.Fail("block %u: PLAIN seg %u has tLen %u, sLen %u", k, i, g.tLen, g.sLen);
                 if (src.compare(g.s, g.sLen, d.text, g.t, g.tLen) != 0) return w.Fail("block %u: PLAIN seg %u text != source at t %u, s %u", k, i, g.t, g.s);
@@ -520,8 +542,6 @@ bool MapSelfCheck(const Doc& d, const std::wstring& src, std::string* why) {
                 if (g.sLen) return w.Fail("block %u: SYNTH seg %u has source length %u", k, i, g.sLen);
             } else {
                 if (!g.sLen) return w.Fail("block %u: %s seg %u has no source", k, KindName(g.kind), i);
-                if (g.s < bs.line || g.s + g.sLen > bs.outerEnd)
-                    return w.Fail("block %u: %s seg %u source [%u,+%u) outside the block's lines [%u,%u]", k, KindName(g.kind), i, g.s, g.sLen, bs.line, bs.outerEnd);
                 if (g.kind == SEG_TEXTATOM && g.tLen == 1 && g.sLen == 1 && d.text[g.t] == 0xFFFD && src[g.s] != 0 && src[g.s] != 0xFFFD)
                     return w.Fail("block %u: seg %u stands for a NUL but the source holds U+%04X", k, i, src[g.s]);
                 // an escape atom ("\*") stands for the character it escapes; a backslash hard break ("\" + a line end)
@@ -533,6 +553,7 @@ bool MapSelfCheck(const Doc& d, const std::wstring& src, std::string* why) {
             if (g.kind != SEG_SYNTH) {
                 if (g.s < prevSEnd) return w.Fail("block %u: seg %u source %u goes back before %u", k, i, g.s, prevSEnd);
                 prevSEnd = g.s + g.sLen;
+                real.push_back(&g);
             }
             // 4. coverage: the segments tile the text (cells are contiguous, so a table's text too)
             if (g.t != cover) return w.Fail("block %u: text [%u,%u) is covered by no segment", k, cover, g.t);
@@ -557,6 +578,21 @@ bool MapSelfCheck(const Doc& d, const std::wstring& src, std::string* why) {
                 if (partial(a.tBeg, a.tEnd, c.tBeg, c.tEnd)) return w.Fail("spans %u and %u overlap in the text", j, i);
                 if (partial(a.openBeg, a.closeEnd, c.openBeg, c.closeEnd)) return w.Fail("spans %u and %u overlap in the source", j, i);
             }
+            // No text stands for a piece of a delimiter: a segment reaching into an opener or a closer is wrong, unless
+            // it is the atom that stands for the whole span (a picture, a formula, a footnote reference).
+            auto intoDelim = [&](uint32_t db, uint32_t de) -> const SrcSeg* {
+                if (db >= de) return nullptr;
+                auto it = std::lower_bound(real.begin(), real.end(), db,
+                                           [](const SrcSeg* g, uint32_t v) { return g->s + g->sLen <= v; });
+                if (it == real.end() || (*it)->s >= de) return nullptr;
+                const SrcSeg* g = *it;
+                return g->s <= a.openBeg && g->s + g->sLen >= (open ? a.closeBeg : a.closeEnd) ? nullptr : g;
+            };
+            const SrcSeg* bad = intoDelim(a.openBeg, a.openEnd);
+            if (!bad && !open) bad = intoDelim(a.closeBeg, a.closeEnd);
+            if (bad)
+                return w.Fail("span %u (delimiters [%u,%u) [%u,%u)): seg at source [%u,+%u) reaches into a delimiter", i,
+                              a.openBeg, a.openEnd, a.closeBeg, a.closeEnd, bad->s, bad->sLen);
         }
         // 8. cells inside their rows, pipes that are pipes (HTML and front-matter tables are raw: no cell sources)
         if (tb && !(bs.flags & BS_RAW) && d.blocks[k].aux < d.tableSrc.size()) {
@@ -590,6 +626,16 @@ bool MapSelfCheck(const Doc& d, const std::wstring& src, std::string* why) {
             if (d.blockSrc[k].flags & BS_SYNTH) return w.Fail("blockOrder holds synthesized block %u", k);
             if (d.blockSrc[k].line < prev) return w.Fail("blockOrder is not sorted at %zu", i);
             prev = d.blockSrc[k].line;
+            // Two blocks never claim the same source line, or TextOfSrc could not tell whose it is - except the
+            // blocks one HTML block became, which share its record.
+            if (i) {
+                const BlockSrc& a = d.blockSrc[d.blockOrder[i - 1]];
+                const BlockSrc& c = d.blockSrc[k];
+                bool shared = (a.flags & BS_RAW) && (c.flags & BS_RAW) && a.rawId >= 0 && a.rawId == c.rawId;
+                if (!shared && c.line <= a.outerEnd)
+                    return w.Fail("blocks %u and %u share source lines ([%u,%u] and [%u,%u])", d.blockOrder[i - 1], k,
+                                  a.line, a.outerEnd, c.line, c.outerEnd);
+            }
         }
         for (uint32_t k = 0; k < nb; k++)
             if (!seen[k] && !(d.blockSrc[k].flags & BS_SYNTH)) return w.Fail("block %u is missing from blockOrder", k);
@@ -603,6 +649,7 @@ bool MapSelfCheck(const Doc& d, const std::wstring& src, std::string* why) {
     }
 
     // 9. containers: markers and task marks where they say they are
+    std::vector<uint32_t> marks;
     for (size_t i = 0; i < d.containers.size(); i++) {
         const ContainerSrc& c = d.containers[i];
         if (c.parent >= (int32_t)i) return w.Fail("container %zu: parent %d", i, c.parent);
@@ -612,6 +659,18 @@ bool MapSelfCheck(const Doc& d, const std::wstring& src, std::string* why) {
             if (c.markOff >= n) return w.Fail("item %zu: marker at %u", i, c.markOff);
             wchar_t m = src[c.markOff];
             if (!(m == L'-' || m == L'+' || m == L'*' || (m >= L'0' && m <= L'9'))) return w.Fail("item %zu: marker '%lc'", i, m);
+            // the whole marker: one bullet character, or digits and '.' / ')'; then a blank or the line end
+            uint32_t me = c.markOff + c.markLen;
+            bool bullet = m == L'-' || m == L'+' || m == L'*';
+            bool shape = c.markLen >= 1 && me <= n && (bullet ? c.markLen == 1 : (src[me - 1] == L'.' || src[me - 1] == L')'));
+            for (uint32_t p = c.markOff; shape && !bullet && p + 1 < me; p++) shape = src[p] >= L'0' && src[p] <= L'9';
+            if (!shape || (me < n && !Blank(src[me]) && !EolChar(src[me])))
+                return w.Fail("item %zu: [%u,+%u) is not a list marker", i, c.markOff, c.markLen);
+            marks.push_back(c.markOff);
+            if (c.firstBlock != UINT32_MAX && !(d.blockSrc[c.firstBlock].flags & BS_SYNTH) &&
+                c.markOff >= d.blockSrc[c.firstBlock].beg)
+                return w.Fail("item %zu: marker at %u is not before its first block's content at %u", i, c.markOff,
+                              d.blockSrc[c.firstBlock].beg);
             if (c.taskOff != UINT32_MAX) {
                 if (c.taskOff < 1 || c.taskOff + 1 >= n) return w.Fail("item %zu: task mark at %u", i, c.taskOff);
                 wchar_t t = src[c.taskOff];
@@ -619,6 +678,12 @@ bool MapSelfCheck(const Doc& d, const std::wstring& src, std::string* why) {
                     return w.Fail("item %zu: no [ ] around the task mark at %u", i, c.taskOff);
             }
         }
+    }
+    // every item has a marker of its own (a nested "- - a" has two)
+    std::vector<bool> marked(n + 1, false);
+    for (uint32_t m : marks) {
+        if (marked[m]) return w.Fail("two items have the same marker at %u", m);
+        marked[m] = true;
     }
 
     // 10. pictures, formulas and diagrams: their ranges nest and lie in the lines of the block that shows them

@@ -146,6 +146,11 @@ struct Builder {
     uint32_t pendTask = 0;  // task item: source offset of the character between its brackets
     std::vector<std::wstring> pendAnchors;  // #targets for the next emitted block (footnote jumps)
     uint32_t fnId = 0;                      // footnote definition being collected
+    uint32_t fnBlocks = 0;                  // ... and the block count when it started
+    bool emptyFn = false;                   // EndLeaf closes the leaf made up for a definition with no text
+    // an inline tag md4c sends in pieces, one per line ("<b" "\n" "class=x>"): put together before it is read
+    std::wstring htmlSplit;
+    const MD_CHAR* htmlSplitAt = nullptr;   // where its first piece is in the source
     // tables
     int tIndex = -1;
     uint32_t row = 0, col = 0;
@@ -155,7 +160,11 @@ struct Builder {
     // none of these paths, and md4c's hooks are not even installed then. The bigger map-only methods are kept out of
     // line (MAPFN), so reading mode's hot paths do not carry their code inlined.
 #define MAPFN __declspec(noinline)
+#ifdef FASTMD_PREVIEW_DLL
+    static constexpr bool map = false;  // the Explorer pane never edits: every map path is compiled out of it
+#else
     bool map = false;
+#endif
     int noSegs = 0;            // > 0: text appended now gets no segment (HTML-block text, front matter, tag atoms)
     struct Extent {
         bool set = false;
@@ -454,8 +463,8 @@ struct Builder {
     }
 
     // An inline HTML tag in map mode: what HtmlInline adds (a <br>'s "\n", an <img>'s U+FFFC) is one atom over the
-    // tag's source; formatting tags become pseudo-spans.
-    MAPFN void MapHtmlTag(const HtmlTag& tag, const MD_CHAR* s, MD_SIZE n) {
+    // tag's source; formatting tags become pseudo-spans - unless the tag runs across lines (`split`, §4.4).
+    MAPFN void MapHtmlTag(const HtmlTag& tag, const MD_CHAR* s, MD_SIZE n, bool split = false) {
         bool inSrc = srcBase && s >= srcBase && s < srcEnd;
         uint32_t so = inSrc ? (uint32_t)(s - srcBase) : srcCur;
         if (tag.name.empty()) {  // a comment
@@ -478,8 +487,27 @@ struct Builder {
             uint32_t vb, ve;
             if (AttrValueRange(s, n, L"src", &vb, &ve)) { im.srcBeg = so + vb; im.srcEnd = so + ve; }
         }
-        if (inSrc && SegsOn()) PseudoSpan(tag, so, so + n);
+        if (inSrc && SegsOn() && !split) PseudoSpan(tag, so, so + n);
         if (inSrc) srcCur = so + n;
+    }
+
+    // The last piece of a tag md4c sent line by line has arrived (end: just past it in the source, or null when the
+    // leaf ended first): the pieces are read as one tag. Its source runs from the first piece to the last, line end
+    // and container prefix included, so in map mode what it adds is one atom over all of it and it opens no
+    // pseudo-span. Text that is no tag after all is shown as it is.
+    void FlushSplitTag(const MD_CHAR* end) {
+        std::wstring t;
+        t.swap(htmlSplit);
+        const MD_CHAR* at = htmlSplitAt;
+        htmlSplitAt = nullptr;
+        HtmlTag tag;
+        bool whole = end && srcBase && at >= srcBase && end <= srcEnd && end > at;
+        if (!ParseHtmlTag(t.data(), t.size(), tag)) {
+            AppendText(t.data(), (MD_SIZE)t.size(), false);
+            return;
+        }
+        if (map) MapHtmlTag(tag, whole ? at : t.data(), (MD_SIZE)(whole ? end - at : t.size()), true);
+        else if (!tag.name.empty()) HtmlInline(tag);
     }
 
     // Segments for a chunk AppendText has just added: [start, start+len) of the text, from s[0..n).
@@ -624,10 +652,28 @@ struct Builder {
                 while (p < le && Blank(srcBase[p])) p++;
             }
             p = std::min(p, le);
+            // More than blanks after the marker, yet no leaf: a footnote or link reference definition took the line
+            // ("- [^1]: note"). The line is the definition's; the bullet stays synthesized (typing there would turn
+            // the definition into text).
+            if (p < le) return;
             bs.beg = bs.end = p;
             bs.line = LineStart(c.markOff);
             bs.lineEnd = bs.outerEnd = le;
             bs.flags = BS_EMPTYITEM;
+            return;
+        }
+        if (emptyFn && e.set && e.fnDef != UINT32_MAX) {
+            // a footnote definition with no text ("[^2]:"): typing goes after its "]:" and the blanks, on its line
+            uint32_t le = LineEnd(e.fnDef), p = e.fnDef + 1;
+            while (p < le && srcBase[p] != L']') p += srcBase[p] == L'\\' && p + 1 < le ? 2 : 1;
+            if (p < le) p++;
+            if (p < le && srcBase[p] == L':') p++;
+            while (p < le && Blank(srcBase[p])) p++;
+            bs.beg = bs.end = std::min(p, le);
+            bs.line = LineStart(e.fnDef);
+            bs.lineEnd = bs.outerEnd = le;
+            bs.aux = e.fnDef;
+            bs.flags = BS_FOOTNOTE | BS_EMPTYITEM;
             return;
         }
         if (!e.set) return;  // a leaf md4c said nothing about: stays synthesized
@@ -830,6 +876,7 @@ struct Builder {
 
     void EndLeaf() {
         if (!collecting) return;
+        if (htmlSplitAt) FlushSplitTag(nullptr);  // md4c always ends a tag it began; should it not, it is text
         collecting = false;
         uint32_t tEnd = (uint32_t)d.text.size();
         bool mermaid = leafKind == BK_CODE && codeLang && codeLangLen == 7 && _wcsnicmp(codeLang, L"mermaid", 7) == 0 &&
@@ -892,7 +939,7 @@ struct Builder {
         b.runCount = (uint32_t)d.runs.size() - rStart;
         uint32_t extBeg = ext.beg;  // a fenced block's fence character (LeafSrc clears the extent)
         if (map) {
-            bool empty = emptyItem;
+            bool empty = emptyItem || emptyFn;
             LeafSrc();
             BlockSrc& bs = d.blockSrc.back();
             if (alertBeg != UINT32_MAX && alertBeg > bs.beg && alertBeg <= bs.end) {  // the content after the tag
@@ -1451,6 +1498,7 @@ struct Builder {
         case MD_BLOCK_FOOTNOTE_DEF: {
             EndLeaf();
             fnId = ((MD_BLOCK_FOOTNOTE_DEF_DETAIL*)det)->id;
+            fnBlocks = (uint32_t)d.blocks.size();
             pendMarker = MK_NUMBER;
             pendNumber = fnId;
             pendLevel = 1;
@@ -1607,9 +1655,17 @@ struct Builder {
         case MD_BLOCK_H: case MD_BLOCK_CODE: case MD_BLOCK_P: EndLeaf(); break;
         case MD_BLOCK_FOOTNOTE_DEF: {
             EndLeaf();
+            if (fnId && d.blocks.size() == fnBlocks) {  // no text at all: its number, anchor and arrow still show
+                StartLeaf(BK_TEXT, 0);
+                leafIsLiImplicit = true;
+                emptyFn = true;
+                EndLeaf();
+                emptyFn = false;
+            }
             indent -= 32.f;
-            // back to the place that referenced it: an arrow appended to the definition's last line
-            if (fnId && !d.blocks.empty()) {
+            // back to the place that referenced it: an arrow appended to the definition's last line (its own block,
+            // never the one of the definition before it)
+            if (fnId && d.blocks.size() > fnBlocks) {
                 Block& b = d.blocks.back();
                 if (b.kind == BK_TEXT && b.textOff + b.textLen == d.text.size()) {
                     uint32_t start = (uint32_t)d.text.size();
@@ -1866,7 +1922,14 @@ struct Builder {
         case MD_TEXT_ENTITY: AppendText(s, n, true); break;
         case MD_TEXT_HTML: {
             if (inHtmlBlock) { htmlRaw.append(s, n); break; }  // a block: kept whole, walked when it ends
-            HtmlTag tag;                                       // inline: one tag per callback, text comes as normal
+            // a tag across lines comes one line at a time, the line end as "\n" between: gathered until its '>'
+            if (htmlSplitAt || (n && s[0] == L'<' && s[n - 1] != L'>')) {
+                if (!htmlSplitAt) htmlSplitAt = s;
+                htmlSplit.append(s, n);
+                if (n && s[n - 1] == L'>') FlushSplitTag(s + n);
+                break;
+            }
+            HtmlTag tag;  // inline: one tag per callback, text comes as normal
             if (n && s[0] == L'<' && ParseHtmlTag(s, n, tag)) {
                 if (map) MapHtmlTag(tag, s, n);
                 else if (!tag.name.empty()) HtmlInline(tag);
@@ -2019,7 +2082,11 @@ bool ParseMarkdown(Doc& d, const wchar_t* src, size_t n, const ParseOptions* opt
     b.srcEnd = src + n;
     // Edit mode's map (§4.3). Masks and raw-text leaves (§6.9) are accepted here already; they take effect in the
     // phase that brings raw-while-typing.
+#ifndef FASTMD_PREVIEW_DLL
     b.map = opt && opt->wantMap;
+#else
+    (void)opt;
+#endif
     if (b.map) {
         d.blockSrc.reserve(n / 60 + 16);
         d.segs.reserve(n / 16 + 16);
