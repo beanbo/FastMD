@@ -13,6 +13,7 @@
 static const wchar_t kClass[] = L"FastMD.Document";
 static const float kZoomSteps[] = {0.5f, 0.67f, 0.75f, 0.8f, 0.9f, 1.f, 1.1f, 1.25f, 1.5f, 1.75f, 2.f, 2.5f, 3.f};
 static UINT g_msgSettings = 0;      // registered "settings changed" message between FastMD windows
+static UINT g_msgEditOwner = 0;     // registered "are you editing this file?" (EDIT-MODE.md §10.11)
 static bool g_findHadFocus = false;  // the find box had the keyboard when the window was deactivated
 
 void Invalidate() {
@@ -23,7 +24,8 @@ void Invalidate() {
 static std::vector<std::vector<RenderResult>*> g_deferredImages;  // picture batches that arrived inside a modal loop
 
 ModalScope::~ModalScope() {
-    if (--g.editModal == 0 && g.hwnd && !g_deferredImages.empty()) PostMessageW(g.hwnd, WM_APP_REPLAY, 0, 0);
+    if (--g.editModal == 0 && g.hwnd && (!g_deferredImages.empty() || EditPendingReplay()))
+        PostMessageW(g.hwnd, WM_APP_REPLAY, 0, 0);
 }
 
 // ------------------------------------------------------------------------------------------------ window placement
@@ -67,8 +69,10 @@ static void SavePlacement() {
     RegWriteBinary(L"Window", &s, sizeof(s));
 }
 
-// Everything that must happen before the window may go away (close, restart after an update). false = stay open.
-bool PrepareToClose() { return true; }
+// Everything that must happen before the window may go away (close, restart after an update): edits into the file,
+// or the reader chose what becomes of them (EDIT-MODE.md §10.9). false = stay open; inside a modal loop the close
+// waits for its end.
+bool PrepareToClose() { return EditBeforeClose(); }
 
 static void SaveAll() {  // window closes / session ends
     EditLeaveDocument();    // a flush point: the file's bytes on disk for good, the recovery file that stood by goes
@@ -129,8 +133,12 @@ void ApplyTheme() {
     }
     FindRelayoutInput();
     SettingsRefresh();
-    // a <picture> chose its source by the old theme: read the document again to pick the other one
-    if (g.doc.themed && !g.path.empty() && g.ready && !g.firstFrame) ReloadDocument();
+    // a <picture> chose its source by the old theme: read the document again to pick the other one - or, in edit mode,
+    // parse the source again (the file on disk may be behind the edits)
+    if (g.doc.themed && !g.path.empty() && g.ready && !g.firstFrame) {
+        if (g.editing) EditThemeChanged();
+        else ReloadDocument();
+    }
     Invalidate();
 }
 
@@ -199,8 +207,10 @@ static void OnSettingsBroadcast() {  // another window changed the settings: tak
     if (c.column != g.cfg.column) changed |= SC_COLUMN;
     if (c.language != g.cfg.language) changed |= SC_LANGUAGE;
     if (c.smoothScroll != g.cfg.smoothScroll || c.editor != g.cfg.editor || c.remoteImages != g.cfg.remoteImages ||
-        c.updateCheck != g.cfg.updateCheck)
+        c.updateCheck != g.cfg.updateCheck || c.autosave != g.cfg.autosave)
         changed |= SC_OTHER;
+    bool autosave = c.autosave != g.cfg.autosave;
+    g.cfg.autosave = c.autosave;
     g.cfg.theme = c.theme;
     g.cfg.column = c.column;
     g.cfg.wrapCode = c.wrapCode;
@@ -212,6 +222,7 @@ static void OnSettingsBroadcast() {  // another window changed the settings: tak
     g.cfg.remoteImages = c.remoteImages;  // otherwise this window's SaveAll at close would put the old values back
     g.cfg.updateCheck = c.updateCheck;
     if (changed) ApplySettings(changed, false);
+    if (autosave) EditAutosaveChanged();
 }
 
 // ------------------------------------------------------------------------------------------------ scrolling / zoom / column
@@ -274,6 +285,7 @@ static int FirstVisibleImage() {  // automation: the image commands without a co
 }
 
 void Command(UINT id, UINT arg) {
+    if (EditCommand(id, arg)) return;  // edit mode's own, and what edit mode does differently (select all, F5, Ctrl+E)
     int li = g.ctxLink >= 0 ? g.ctxLink : g.focusLink;
     switch (id) {
     case CMD_COPY: CopySelection(); break;
@@ -335,11 +347,14 @@ void Command(UINT id, UINT arg) {
     case CMD_FIND_CLOSE: FindClose(); break;
     case CMD_LINK_NEXT: FocusLinkStep(1); break;
     case CMD_LINK_PREV: FocusLinkStep(-1); break;
-    case CMD_RECOVERY_OPEN: case CMD_RECOVERY_RESTORE: case CMD_RECOVERY_DELETE: EditCommand(id, arg); break;
     }
 }
 
 static void ContextMenu(int sx, int sy, bool keyboard) {
+    if (g.editing) {  // edit mode has a menu of its own (§2.9)
+        EditContextMenu(sx, sy, keyboard);
+        return;
+    }
     POINT cp{sx, sy};
     ScreenToClient(g.hwnd, &cp);
     float x = cp.x / Scale(), y = cp.y / Scale();
@@ -347,6 +362,11 @@ static void ContextMenu(int sx, int sy, bool keyboard) {
     g.ctxImage = keyboard ? -1 : ImageAt(x, y);
     HMENU m = CreatePopupMenu(), theme = CreatePopupMenu(), zoom = CreatePopupMenu(), column = CreatePopupMenu();
     UINT hasDoc = g.path.empty() ? MF_GRAYED : 0;
+    if (!g.path.empty() && !g.loadFailed) {  // edit mode, entered where the menu was opened (a key: at the caret)
+        EditSetContextPoint(keyboard ? -1.f : x, keyboard ? -1.f : y);
+        AppendMenuW(m, MF_STRING, CMD_EDIT_HERE, Tr(S_MENU_EDIT_HERE));
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    }
     if (g.ctxLink >= 0) {
         AppendMenuW(m, MF_STRING, CMD_LINK_OPEN, Tr(S_LINK_OPEN));
         AppendMenuW(m, MF_STRING, CMD_LINK_COPY, Tr(S_LINK_COPY));
@@ -489,6 +509,7 @@ static void AfterFirstFrame() {
     DragAcceptFiles(g.hwnd, TRUE);
     if (!g.path.empty()) SHAddToRecentDocs(SHARD_PATHW, g.path.c_str());
     if (!g_msgSettings) g_msgSettings = RegisterWindowMessageW(L"FastMD.SettingsChanged");
+    if (!g_msgEditOwner) g_msgEditOwner = RegisterWindowMessageW(L"FastMD.EditOwner");
     LoadPositionsAsync();  // reading position of this document; marks it as recently opened
     CrashReportIfAny();    // the previous run left a minidump: offer the folder, once
     UpdateCheckAsync();    // once a day, one request, and only if it is switched on
@@ -524,13 +545,17 @@ static void Frame() {  // animation frame outside WM_PAINT, paced by DWM
 
 // ------------------------------------------------------------------------------------------------ mouse
 static bool InScrollbar(float x) { return !g.path.empty() && g.docH > ViewH() + 1 && x >= ViewW() - 14; }
-static float ThumbTop(float* th) {
-    float trackH = ViewH() - 4;
+static float ThumbTop(float* th) {  // the track starts under edit mode's bar and a strip
+    float top = ScrollTrackTop(), trackH = ViewH() - 2 - top;
     *th = std::max(32.f, trackH * ViewH() / g.docH);
-    return 2 + (trackH - *th) * (MaxScroll() > 0 ? g.scrollY / MaxScroll() : 0);
+    return top + (trackH - *th) * (MaxScroll() > 0 ? g.scrollY / MaxScroll() : 0);
 }
 
 static void UpdateSelectionTo(float x, float y) {
+    if (g.editing) {  // edit mode's selection lives in the source
+        EditMouseDrag(x, y);
+        return;
+    }
     uint32_t pos;
     if (HitTestDoc(x, y, &pos, nullptr) && pos != g.selFocus) {
         g.selFocus = pos;
@@ -567,8 +592,8 @@ static void OnMouseMove(int mx, int my) {
     if (g.draggingThumb) {
         float th;
         ThumbTop(&th);
-        float trackH = ViewH() - 4 - th;
-        UserScrollTo(trackH > 0 ? (y - g.dragGrab - 2) / trackH * MaxScroll() : 0, false);
+        float top = ScrollTrackTop(), trackH = ViewH() - 2 - top - th;
+        UserScrollTo(trackH > 0 ? (y - g.dragGrab - top) / trackH * MaxScroll() : 0, false);
         return;
     }
     if (g.dragHBlock >= 0) {
@@ -591,9 +616,15 @@ static void OnMouseMove(int mx, int my) {
     }
     TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, g.hwnd, 0};
     TrackMouseEvent(&tme);
-    // overlays first: find bar, the strip over the document, outline panel, outline button, settings button
+    // overlays first: find bar, the outline drawer (it lies over everything), a strip, edit mode's bar, the outline
+    // panel, the outline button, the pencil, the settings button (EDIT-MODE.md §12.4)
     int fpart = FindPartAt(x, y);
-    if (fpart == FP_NONE && StripMouse(x, y, false)) {
+    int tocItem = -1;
+    bool drawer = fpart == FP_NONE && TocOverlayOpen() && TocHit(x, y, &tocItem);
+    bool onStrip = fpart == FP_NONE && !drawer && StripMouse(x, y, false);
+    bool onBar = fpart == FP_NONE && !drawer && !onStrip && BarMouse(x, y, false);
+    if (!onBar) BarMouse(-1.f, -1.f, false);  // leaves the bar's hover
+    if (onStrip || onBar) {
         if (g.hoverLink >= 0 || g.hoverTask >= 0 || g.hoverHeading >= 0 || g.hoverCode >= 0 || !g.tip.empty()) {
             g.hoverLink = g.hoverTask = g.hoverHeading = g.hoverCode = -1;
             g.tip.clear();
@@ -601,11 +632,11 @@ static void OnMouseMove(int mx, int my) {
         }
         return;
     }
-    int tocItem = -1;
-    bool inToc = fpart == FP_NONE && TocHit(x, y, &tocItem);
+    bool inToc = drawer || (fpart == FP_NONE && TocHit(x, y, &tocItem));
     bool tocBtn = fpart == FP_NONE && !inToc && TocButtonHit(x, y);
-    bool gear = fpart == FP_NONE && !inToc && !tocBtn && SettingsButtonHit(x, y);
-    bool overlay = fpart != FP_NONE || inToc || tocBtn || gear;
+    bool pencil = fpart == FP_NONE && !inToc && !tocBtn && PencilMouse(x, y, false);
+    bool gear = fpart == FP_NONE && !inToc && !tocBtn && !pencil && SettingsButtonHit(x, y);
+    bool overlay = fpart != FP_NONE || inToc || tocBtn || gear || pencil;
     int home = g.path.empty() ? HomeItemAt(x, y) : -1;
     bool hot = !overlay && InScrollbar(x);
     bool onHBar = false, onBtn = false;
@@ -617,6 +648,7 @@ static void OnMouseMove(int mx, int my) {
     int heading = (overlay || hot || link >= 0 || task >= 0) ? -1 : HeadingAt(x, y, &onAnchor);
     bool onSummary = !overlay && !hot && link < 0 && SummaryAt(x, y) >= 0;
     std::wstring tip = tocBtn ? std::wstring(Tr(S_TOC_BUTTON_TIP))
+                     : pencil ? std::wstring(Tr(S_ED_PENCIL_TIP))
                      : gear   ? (UpdateAvailable() ? Tr(S_SETTINGS_BUTTON_UPDATE_TIP) + UpdateVersion()
                                                    : std::wstring(Tr(S_SETTINGS_BUTTON_TIP)))
                               : std::wstring(FindTip(fpart));
@@ -641,11 +673,14 @@ static void OnMouseMove(int mx, int my) {
         Invalidate();
     }
     LPCWSTR cur = IDC_ARROW;
-    if (link >= 0 || onBtn || tocBtn || gear || onAnchor || onSummary || task >= 0 || tocItem >= 0 || tocItem == -2 ||
-        home >= 0 || (fpart != FP_NONE && fpart != FP_BAR && fpart != FP_FIELD && fpart != FP_COUNT))
+    bool linkHand = link >= 0 && (!g.editing || GetKeyState(VK_CONTROL) < 0);  // edit mode: a click edits the link text
+    if (linkHand || onBtn || tocBtn || gear || pencil || onAnchor || onSummary || task >= 0 || tocItem >= 0 ||
+        tocItem == -2 || home >= 0 || (fpart != FP_NONE && fpart != FP_BAR && fpart != FP_FIELD && fpart != FP_COUNT))
         cur = IDC_HAND;
     else if (fpart == FP_FIELD) cur = IDC_IBEAM;
-    else if (!overlay && !hot && !onHBar && !g.path.empty()) {
+    else if (g.editing && !overlay && !hot && !onHBar) {  // the whole document column takes text; objects are clicked
+        cur = x >= DocLeft() && ImageAt(x, y) < 0 ? IDC_IBEAM : IDC_ARROW;
+    } else if (!overlay && !hot && !onHBar && !g.path.empty()) {
         uint32_t pos;
         bool inside = false;
         if (HitTestDoc(x, y, &pos, &inside) && inside) cur = IDC_IBEAM;
@@ -661,10 +696,13 @@ static void OnLButtonDown(int mx, int my, WPARAM keys) {
     g.downTask = -1;  // a press whose button-up never came (capture lost) must not tick a box later
     int fpart = FindPartAt(x, y);
     if (fpart != FP_NONE) { FindClick(fpart); return; }
-    if (StripMouse(x, y, true)) return;  // a strip's button, or the strip itself over the document
     int item;
+    if (TocOverlayOpen() && TocHit(x, y, &item)) { TocClick(item); return; }  // the drawer lies over the bar
+    if (StripMouse(x, y, true)) return;  // a strip's button, or the strip itself over the document
+    if (BarMouse(x, y, true)) return;    // edit mode's toolbar
     if (TocHit(x, y, &item)) { TocClick(item); return; }
     if (TocButtonHit(x, y)) { TocSetOpen(true); return; }
+    if (PencilMouse(x, y, true)) return;  // into edit mode
     if (SettingsButtonHit(x, y)) { SettingsOpen(); return; }
     if (TocOverlayOpen()) { TocSetOpen(false); return; }  // a click beside the drawer closes it
     if (g.path.empty()) {
@@ -722,15 +760,29 @@ static void OnLButtonDown(int mx, int my, WPARAM keys) {
             return;
         }
     }
-    g.downOnLink = LinkAt(x, y) >= 0;
+    // in edit mode a click on a link puts the caret in its text; Ctrl+click opens it (Ctrl from the message, T5)
+    g.downOnLink = LinkAt(x, y) >= 0 && EditOpenLinkOnClick(keys);
     DWORD now = GetMessageTime();
     bool isNear = std::abs(mx - g.lastClickPt.x) <= GetSystemMetrics(SM_CXDOUBLECLK) &&
                   std::abs(my - g.lastClickPt.y) <= GetSystemMetrics(SM_CYDOUBLECLK);
     g.clickCount = (isNear && now - g.lastClickTime <= GetDoubleClickTime()) ? g.clickCount % 3 + 1 : 1;
     g.lastClickTime = now;
     g.lastClickPt = POINT{mx, my};
+    if (g.editing) {
+        // a third press right after the double click that entered was a triple click: reading mode's paragraph
+        if (!EditTripleClickCancels(x, y) && !g.downOnLink) EditMouseDown(x, y, keys, g.clickCount);
+        Invalidate();
+        return;
+    }
     uint32_t pos;
     if (!HitTestDoc(x, y, &pos, nullptr)) return;
+    // a double click enters edit mode at its second press (§2.1) - not on a link, whose first click opened it
+    if (g.clickCount == 2 && !(keys & MK_SHIFT) && LinkAt(x, y) < 0 && EditEnter(ENTER_POINT, x, y)) {
+        g.selecting = false;
+        g.downOnLink = false;
+        Invalidate();
+        return;
+    }
     g.caretOn = false;  // the mouse takes the selection over: no caret until the keyboard asks for one again
     g.caretWantX = -1.f;
     // What this press could drag out of the window if it starts moving (plan 3.5): a link, a picture, or the
@@ -760,13 +812,22 @@ static void OnLButtonUp(int mx, int my) {
     if (g.downTask >= 0) {  // pressed on a task box: released on the same box ticks it, anywhere else lets it be
         int task = g.downTask;
         g.downTask = -1;
-        if (TaskAt(mx / Scale(), my / Scale()) == task) ToggleTask((uint32_t)task);
+        if (TaskAt(mx / Scale(), my / Scale()) == task) {
+            if (g.editing) EditTaskClick((uint32_t)task);  // an undoable splice, saved by autosave (§8.10)
+            else ToggleTask((uint32_t)task);
+        }
         return;
     }
     g.selecting = false;
     int dx = mx - g.downX, dy = my - g.downY;
-    if (g.dragKind == DRAG_TEXT) g.selAnchor = g.selFocus = g.dragPos;  // a press inside a selection that never
-    g.dragKind = -1;                                                    // moved was a click after all
+    if (g.dragKind == DRAG_TEXT) {  // a press inside a selection that never moved was a click after all
+        g.selAnchor = g.selFocus = g.dragPos;
+        if (g.editing) {
+            EditMouseDown(mx / Scale(), my / Scale(), 0, 1);
+            g.selecting = false;
+        }
+    }
+    g.dragKind = -1;
     if (g.downOnLink && dx * dx + dy * dy < 16 && g.clickCount == 1) {
         int li = LinkAt(mx / Scale(), my / Scale());
         g.selAnchor = g.selFocus;  // a click is not a selection
@@ -860,7 +921,8 @@ bool KeyCommand(WPARAM vk, bool ctrl, bool shift, bool alt) {
 
 static bool OnKeyDown(WPARAM vk, bool ctrl, bool shift, bool alt) {
     if (g.path.empty() && !ctrl && !alt && HomeKey(vk)) return true;
-    if (shift && !alt && KeySelect((unsigned)vk, ctrl, shift)) return true;  // Shift+arrows select (plan 3.3)
+    if (g.editing && EditKey((unsigned)vk, ctrl, shift, alt)) return true;  // edit mode first (EDIT-MODE.md §12.5)
+    if (!g.editing && shift && !alt && KeySelect((unsigned)vk, ctrl, shift)) return true;  // Shift+arrows select (3.3)
     if (!ctrl && !alt) {
         switch (vk) {
         case VK_ESCAPE:
@@ -868,7 +930,10 @@ static bool OnKeyDown(WPARAM vk, bool ctrl, bool shift, bool alt) {
             else if (TocOverlayOpen()) TocSetOpen(false);
             else if (g.focusLink >= 0) { g.focusLink = -1; Invalidate(); }
             else if (HasSelection() || g.caretOn) { g.selAnchor = g.selFocus; g.caretOn = false; Invalidate(); }
-            else PostMessageW(g.hwnd, WM_CLOSE, 0, 0);
+            else if (!EditEscGuard()) PostMessageW(g.hwnd, WM_CLOSE, 0, 0);  // not right after the Esc that left editing
+            return true;
+        case VK_F2:  // into edit mode at the caret (or the top of the view)
+            if (!g.path.empty() && !shift) Command(CMD_EDIT_TOGGLE);
             return true;
         case VK_TAB:
             if (!g.path.empty()) FocusLinkStep(shift ? -1 : 1);
@@ -891,6 +956,7 @@ static bool OnKeyDown(WPARAM vk, bool ctrl, bool shift, bool alt) {
 // ------------------------------------------------------------------------------------------------ automation queries
 static LRESULT Query(WPARAM q, LPARAM lp) {
     float s = Scale();
+    if (q == Q_CARET || q == Q_SEL_ANCHOR || q == Q_SEL_FOCUS || q == Q_MAP_SELFCHECK) EditSync();  // geometry: not stale
     size_t n = g.doc.blocks.size();
     LRESULT edit = 0;
     if (EditQuery((UINT)q, lp, &edit)) return edit;
@@ -983,7 +1049,6 @@ static LRESULT Query(WPARAM q, LPARAM lp) {
         return MAKELONG(std::lround((l + r) * 0.5f * s), std::lround((t + b) * 0.5f * s));
     }
     case Q_DOC_SERIAL: return g.docSerial;
-    case Q_EDITING: return 0;
     case Q_BLOCK_COUNT: return (LRESULT)n;
     case Q_RENDERS: return (LRESULT)g.rendersStarted.load();
     case Q_MAP_SELFCHECK: {  // edit mode's map (EDIT-MODE.md §4.5), on a map parse of the whole source made just for this
@@ -1010,6 +1075,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g.ready && !g.firstFrame) OnSettingsBroadcast();
         return 0;
     }
+    if (g_msgEditOwner && msg == g_msgEditOwner) return EditOwnerMessage(wp, lp);  // another window asks (§10.11)
     switch (msg) {
     case WM_GETOBJECT: {  // a screen reader asking for the document (plan 6.1)
         LRESULT r = UiaHandleGetObject(wp, lp);
@@ -1065,17 +1131,27 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SYSCHAR:
         if (g.findOpen && (towlower((wint_t)wp) == L'c' || towlower((wint_t)wp) == L'w')) return 0;  // no menu beep
         break;
-    case WM_CHAR:
+    case WM_CHAR:  // typing goes to the document whenever it has the keyboard, even with the find bar open (§12.5)
         if (g.path.empty()) HomeChar((wchar_t)wp);
+        else if (FindInputFocused()) FindTypeChar((wchar_t)wp);
+        else if (g.editing) EditChar((wchar_t)wp);
         else if (g.findOpen) FindTypeChar((wchar_t)wp);
         return 0;
     case WM_ACTIVATE:
         if (LOWORD(wp) == WA_INACTIVE) g_findHadFocus = FindInputFocused();
         else {
-            // back from another program: a picture that could not be read is tried again if its file changed
-            if (g.ready && !g.firstFrame) RetryChangedPictures();
+            // back from another program: a picture that could not be read is tried again if its file changed; a file
+            // edit mode could not write to is looked at again
+            if (g.ready && !g.firstFrame) {
+                RetryChangedPictures();
+                EditActivated();
+            }
             if (g.findOpen && g_findHadFocus) { FindFocusInput(); return 0; }
         }
+        break;
+    case WM_SETFOCUS:  // the edit caret blinks only while the document has the keyboard
+    case WM_KILLFOCUS:
+        EditFocus(msg == WM_SETFOCUS);
         break;
     case WM_LBUTTONDOWN:
         if (!g.ready || g.firstFrame) return 0;
@@ -1086,6 +1162,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         OnMouseMove(GET_X(lp), GET_Y(lp));
         return 0;
     case WM_MOUSELEAVE:
+        BarMouseLeave();  // edit mode's bar, strip buttons and the pencil
         if (g.hotScroll || g.hoverLink >= 0 || g.hoverCode >= 0 || g.hoverHBlock >= 0 || g.findHot != -1 ||
             g.tocHover != -1 || g.tocBtnHot || g.settingsBtnHot || g.recentHover >= 0 || g.hoverHeading >= 0 ||
             g.hoverTask >= 0 || !g.tip.empty()) {
@@ -1101,7 +1178,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (!g.ready || g.firstFrame) return 0;
         OnLButtonUp(GET_X(lp), GET_Y(lp));
         return 0;
-    case WM_XBUTTONUP:
+    case WM_XBUTTONUP:  // through the leave-document rules, like Alt+←/→ (T20)
+        if (!g.ready || g.firstFrame) return TRUE;
         if (GET_XBUTTON_WPARAM(wp) == XBUTTON1) NavigateBack();
         else NavigateForward();
         return TRUE;
@@ -1172,7 +1250,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             std::vector<std::vector<RenderResult>*> q;
             q.swap(g_deferredImages);
             for (auto* batch : q) OnImagesLoaded(batch);
+            EditReplay();  // a save's result, and a close that was asked for meanwhile
         }
+        return 0;
+    case WM_APP_SAVED:  // the save worker is done (inside a modal loop: later)
+        if (!EditDeferred(msg, wp, lp)) EditOnSaved(wp);
         return 0;
     case WM_APP_UPDATE: OnUpdateMessage(wp, lp); return 0;
     case WM_APP_SCALED: OnScaledImages((std::vector<ScaledImage>*)lp); return 0;
@@ -1184,13 +1266,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (EditTestHooks() && g.ready && !g.firstFrame) OnKeyDown(wp, (lp & 1) != 0, (lp & 2) != 0, (lp & 4) != 0);
         return 0;
     case WM_CLOSE:
+        if (g.ready && !g.firstFrame && !PrepareToClose()) return 0;  // unsaved edits the reader chose to stay with
         g.closing = true;
         if (HWND s = SettingsHwnd()) DestroyWindow(s);
         SaveAll();
         DestroyWindow(hwnd);
         return 0;
+    case WM_QUERYENDSESSION:  // the journal first, then the save; no UI, and the session may end (§10.9)
+        if (g.ready && !g.firstFrame) EditQueryEndSession();
+        return TRUE;
     case WM_ENDSESSION:  // logoff / shutdown / restart: no WM_CLOSE is sent
-        if (wp) SaveAll();
+        if (wp) {
+            if (g.ready && !g.firstFrame) EditEndSession();
+            SaveAll();
+        }
         return 0;
     case WM_DESTROY:
         UiaShutdown();  // let go of the screen-reader provider before the window is gone
@@ -1228,18 +1317,21 @@ static std::vector<std::wstring> SplitArgs(const wchar_t* cl) {  // CommandLineT
 static int MessageLoop() {
     MSG msg;
     for (;;) {
-        if (g.animating) {
+        if (g.animating || g.barSliding) {  // a scroll glide, edit mode's bar sliding in or out: one frame per refresh
             while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
                 if (msg.message == WM_QUIT) goto done;
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
-            if (!g.animating || g.closing) continue;
-            // the frame is drawn on whole device pixels (Render snaps the scroll), so a step below half a pixel would
-            // land on the same row again and the glide would never end: from there go straight to the target
-            float d = g.targetY - g.scrollY, px = 1.f / std::max(0.01f, Scale());
-            if (std::fabs(d) < 2.f * px) { g.scrollY = g.targetY; g.animating = false; }
-            else g.scrollY += d * 0.3f;
+            if ((!g.animating && !g.barSliding) || g.closing) continue;
+            if (g.barSliding) EditSlideStep();
+            if (g.animating) {
+                // the frame is drawn on whole device pixels (Render snaps the scroll), so a step below half a pixel
+                // would land on the same row again and the glide would never end: from there go straight to the target
+                float d = g.targetY - g.scrollY, px = 1.f / std::max(0.01f, Scale());
+                if (std::fabs(d) < 2.f * px) { g.scrollY = g.targetY; g.animating = false; }
+                else g.scrollY += d * 0.3f;
+            }
             Frame();
         } else {
             BOOL r = GetMessageW(&msg, nullptr, 0, 0);

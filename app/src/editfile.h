@@ -107,6 +107,11 @@ struct SaveRequest {
     bool flushPoint = false;             // leave, close, session end, Ctrl+S: a local volume is flushed too
     bool fullProof = false;              // FASTMD_EDIT_SELFCHECK: the whole output is decoded back whatever its size
     const RecoveryInfo* pending = nullptr;  // the last save's SaveResult::pending, if it left one
+    // The whole file written anew instead of the changed bytes only: in toCp with toHeader (the encoding strip's
+    // "Save as UTF-8"), or in the baseline's own encoding when toCp is 0 (an overwrite of bytes that cannot be spliced).
+    bool whole = false;
+    UINT toCp = 0;
+    std::string toHeader;
 };
 struct SaveResult {
     SaveState state = SS_FAILED;
@@ -123,6 +128,35 @@ struct SaveResult {
     double flushMs = -1;                 // the target's flush took this long (-1: not flushed)
 };
 SaveResult SaveSource(const SaveRequest& rq);
+
+// ---- around edit mode (§10.4-§10.7, §10.11)
+// The write probe at entry (D17): the file opened for writing and closed at once. SS_SAVED = writable, else the error
+// class (SS_DENIED for a read-only file, a denied ACL, Controlled Folder Access - which says so once, before any typing).
+SaveState WriteProbe(const wchar_t* path, DWORD* err);
+// A file written whole under a temporary name beside it, flushed, then moved over the target (Save As: a new file, so
+// the in-place rule does not apply). false = nothing was replaced.
+bool WriteNewFile(const wchar_t* path, const std::string& bytes, DWORD* err);
+// The journal of unsaved edits (§10.6): recovery\<volume>-<index>-<pid>.unsaved, the whole source as UTF-16 after a
+// header (FMDJRN1: the document's path, when, a hash of the text the disk held then, its code page, the writer). Written
+// under a temporary name, flushed, moved into place; local files only.
+struct JournalInfo {
+    std::wstring file, path, text;
+    uint64_t time = 0;                  // when it was written (FILETIME ticks)
+    uint64_t diskHash = 0;              // Fnv64 of the UTF-16 text the disk held (the baseline's text)
+    UINT cp = 0;
+    DWORD pid = 0;
+    uint64_t created = 0;               // the writer's start time: a live one is not offered
+};
+bool WriteJournal(const std::wstring& dir, uint32_t volume, uint64_t index, bool encrypted, const std::wstring& path,
+                  uint64_t diskHash, UINT cp, const std::wstring& text, std::wstring* file);
+// journals left for this file identity by processes that are gone (and this one's own), newest first
+std::vector<JournalInfo> FindJournals(const std::wstring& dir, uint32_t volume, uint64_t index, const std::wstring& path);
+uint64_t TextHash(const std::wstring& t);  // Fnv64 of the UTF-16 units: what a journal compares the disk text with
+// Recovery files, journals and kept disk versions older than 14 days go at edit entry (D22).
+void PurgeRecovery(const std::wstring& dir, uint32_t days);
+// "Overwrite the file with my edits": the disk's version is kept beside the recovery files until the document closes.
+bool WriteTheirs(const std::wstring& dir, uint32_t volume, uint64_t index, const std::string& bytes, std::wstring* file);
+std::wstring EditMutexName(uint32_t volume, uint64_t index);  // Local\FastMD.edit.<volume>-<index> (§10.11)
 
 // FASTMD_TEST_FAIL_WRITE=<kind>[:<n>][,always][,norollback] (§13.5), read once. Tests of the core set it directly.
 void SetFailWriteForTests(const wchar_t* spec);

@@ -384,7 +384,7 @@ void FindClose() {
 }
 
 void FindRelayoutInput() {
-    if (g_host) PushSetup(g.findOpen);
+    if (g_host) PushSetup(g.findOpen && !g.barSliding);  // hidden while edit mode's bar slides past it (R18)
 }
 
 bool FindInputFocused() { return g_host && g_fieldFocused; }
@@ -444,7 +444,9 @@ void FindOnInput(WPARAM ev, LPARAM lp) {
 
 // ------------------------------------------------------------------------------------------------ bar
 void FindPartRect(int part, float* l, float* t, float* r, float* b) {
-    float w = std::max(260.f, std::min(480.f, ViewW() - 24.f)), h = 40.f, x = std::max(4.f, ViewW() - w - 20.f), y = 12.f;
+    // under edit mode's bar and a strip, when they are there (§12.1)
+    float w = std::max(260.f, std::min(480.f, ViewW() - 24.f)), h = 40.f, x = std::max(4.f, ViewW() - w - 20.f);
+    float y = 12.f + EditInset() + g.stripH;
     float bs = 28.f, by = y + 6.f;
     float closeL = x + w - 6.f - bs, nextL = closeL - 2.f - bs, prevL = nextL - 2.f - bs;
     float countW = CountAreaW(), countL = prevL - 6.f - countW;
@@ -573,7 +575,7 @@ void DrawFindBar() {
 void DrawFindMarks(float x0, float x1) {
     size_t nb = g.doc.blocks.size();
     if (!nb || g.docH <= 0 || g.matches.empty()) return;
-    float trackT = 2.f, trackH = ViewH() - 4.f, s = Scale();
+    float trackT = ScrollTrackTop(), trackH = ViewH() - 2.f - trackT, s = Scale();
     auto yOf = [&](uint32_t pos, size_t& bi) {
         while (bi + 1 < nb && g.doc.blocks[bi + 1].textOff <= pos) bi++;
         const Block& b = g.doc.blocks[bi];

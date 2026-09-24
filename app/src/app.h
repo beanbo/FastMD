@@ -125,6 +125,7 @@ struct Config {
     bool updateCheck = true;    // once a day, ask GitHub whether a newer release exists (plan 5.6)
     std::wstring editor;        // exe for Ctrl+E; "" = the system "edit" verb
     bool findCase = false, findWord = false;
+    bool autosave = true;       // edit mode writes the edits into the file by itself (EDIT-MODE.md §2.12)
 };
 
 struct MeasureJob {
@@ -212,6 +213,18 @@ struct App {
     DiskState disk;                // what the disk holds (§10.2): encoding and identity from the load, the rest once
                                    // something is to be written
     float stripH = 0;              // the strip over the top of the document (editbar.cpp), 0 = none
+    // what view.cpp reads of edit mode (plain fields: they stay zero in the preview DLL, which has no editor)
+    float barT = 0;                // the toolbar's eased slide progress 0..1 (it covers the top of the page, §12.1)
+    float barComp = 0;             // scroll added so far to make up for it
+    bool barSliding = false;       // the slide is paced by the message loop's animation branch
+    int32_t caretBlock = -1, caretCell = -1;  // the edit caret's block and cell (its text offset is selFocus)
+    uint16_t caretTrail = 0;       // columns of trailing blanks the caret stands right of its text position (§6.5)
+    bool caretVisible = false;     // edit mode: the blink phase is on and the document has the keyboard
+    int32_t selAtomBlock = -1, selAtomImage = -1;  // the selected object atom: drawn with an outline, no caret
+    uint32_t framesPartial = 0, framesFull = 0;    // scrolled and full frames (Q_FRAME_STATS)
+    bool pencilHot = false;        // the pencil button (reading mode, left of the gear) is under the mouse
+    uint32_t editChrome = 0;       // bumped whenever the bar, a strip or the pencil would draw differently (frame key)
+    bool editOverText = false;     // a bar tooltip is drawn over the text: frames are drawn in full
     std::unordered_map<std::wstring, RenderEntry> renders;  // the render table (loader.cpp), UI thread only
     std::atomic<uint32_t> loadGen{0};         // bumped by every load: queued picture jobs of the old document are skipped
     std::atomic<uint32_t> rendersStarted{0};  // renders and decodes the workers started (Q_RENDERS)
@@ -372,6 +385,17 @@ bool HScrollBarRect(uint32_t i, float* l, float* t, float* r, float* b, float* t
 
 // positions & links
 bool HitTestDoc(float x, float y, uint32_t* pos, bool* inside);  // client DIP → absolute text offset
+// the same with where the offset belongs: its block and (in a table) cell, and the character under the point
+struct DocHit { uint32_t pos = 0; int32_t block = -1, cell = -1; uint32_t under = UINT32_MAX; bool inside = false,
+                above = false; /* in the gap above the block */ };
+bool HitTestDocAt(float x, float y, DocHit* h);
+// caret geometry at a text offset of a known block / cell (-1 = found from the offset): client x, document y, line
+// height. relayout = false never lays out (the paint path).
+bool CaretGeomAt(uint32_t pos, int32_t block, int32_t cell, float* cx, float* docY, float* h, bool relayout);
+float SpaceAdvance(uint32_t block);  // a blank in the block's font (DIP)
+float EditInset();                   // edit mode's bar over the top of the page, times its slide (0 when printing)
+float EditRevealTop();               // the caret counts as hidden above this line (bar, strip, find bar)
+float ScrollTrackTop();              // the scrollbar's track starts under the bar and a strip
 int LinkAt(float x, float y);        // link index or -1
 int ImageAt(float x, float y);       // image block index or -1
 int CodeBlockAt(float x, float y, bool* onCopyButton);
@@ -503,6 +527,8 @@ void LoadConfig(Config& c, std::wstring* findQuery);  // everything but the wind
 void SaveConfig(const Config& c, const std::wstring& findQuery);
 bool RegReadBinary(const wchar_t* name, void* data, DWORD size);
 void RegWriteBinary(const wchar_t* name, const void* data, DWORD size);
+uint32_t RegGetDword(const wchar_t* name, uint32_t def);  // one value of the settings key (EditHintShown …)
+void RegSetDword(const wchar_t* name, uint32_t v);
 bool PositionsLoad(std::vector<PosEntry>& out);             // most recently opened first
 void PositionsSave(const PosEntry& e, bool keepPosition);   // merge one entry (keepPosition: only touch `opened`)
 void PositionsRemove(const std::wstring& path);
@@ -555,6 +581,7 @@ void UiaShutdown();                                // on close
 
 // ------------------------------------------------------------------------------------------------ crash.cpp
 void CrashHandlerInstall();          // wWinMain: minidumps into %LOCALAPPDATA%\FastMD\crashes
+void CrashPrivacy(bool on);          // editing or unsaved edits: a dump takes no memory it only points at (§10.12)
 void CrashReportIfAny();             // after the first frame: offer the folder if the last run left a dump
 uint64_t LastCrashSeen();            // store.cpp
 void SetLastCrashSeen(uint64_t t);
@@ -576,7 +603,8 @@ bool ToggleTask(uint32_t block);     // tick or untick a task list item in the f
 
 // ------------------------------------------------------------------------------------------------ edit.cpp
 // The model swap (§5.5): g.src changed in [at, at + oldLen) → [at, at + newLen) (at = UINT32_MAX: nothing changed).
-void EditReparse(uint32_t at = UINT32_MAX, uint32_t oldLen = 0, uint32_t newLen = 0);
+// keepOld: the model before the change is handed back (typing checks what the new one renders against it, §7.3).
+void EditReparse(uint32_t at = UINT32_MAX, uint32_t oldLen = 0, uint32_t newLen = 0, Doc* keepOld = nullptr);
 bool EditSplice(uint32_t at, uint32_t len, std::wstring text);  // the one way g.src changes (§7.1); false = refused
 bool EditDirty();                    // g.src != the baseline's text (compared, not flagged)
 enum BaselineResult { BL_OK, BL_CHANGED, BL_UNREADABLE, BL_REFUSED };
@@ -589,21 +617,74 @@ void EditOnLoad();                   // a document was (re)loaded: a new session
 void EditLeaveDocument();            // before another document (or a reload, or the close): a flush point
 void EditAfterOpen();                // after the first frame of an open: an interrupted save's recovery file?
 bool EditRecoveryRestorable();       // the recovery strip may offer Restore (the file is still the torn one)
-void EditCommand(UINT id, UINT arg); // the recovery strip's commands
+bool EditCommand(UINT id, UINT arg); // edit mode's commands (§13.1) and the strips': true = it was one of them
 LRESULT EditCopyData(const COPYDATASTRUCT* cd);  // FASTMD_TEST_HOOKS: splice / save
 bool EditTestHooks();                // FASTMD_TEST_HOOKS=1 (read once)
 void EditTimer(UINT_PTR id);
 bool EditQuery(UINT q, LPARAM lp, LRESULT* out);  // edit mode's queries; false = not one of them
+// entering and leaving (§2.1, §2.2)
+enum EnterHow : uint8_t { ENTER_CARET, ENTER_POINT };  // at the reading caret (F2, pencil) / at a client point (DIP)
+bool EditEnter(EnterHow how, float x = 0, float y = 0);  // false = refused (a toast said why) or deferred
+bool EditLeave();                    // Esc, ✕, F2: flush and leave; false = the edits could not be saved (leave strip)
+void EditExit(bool silent);          // leave with nothing left to save; silent: no slide (another document follows)
+bool CanLeaveDocument();             // §10.8: before the document goes - flushed, or the reader chose; false = stay
+bool EditBeforeClose();              // PrepareToClose's part: false = stay open (or the close waits for a modal loop)
+void EditQueryEndSession();          // §10.9: journal, then the save, no UI
+void EditEndSession();
+// input in edit mode (§2.7, §2.8)
+bool EditKey(unsigned vk, bool ctrl, bool shift, bool alt);  // true = handled (never for Ctrl+Alt: AltGr text)
+void EditChar(wchar_t c);
+void EditMouseDown(float x, float y, WPARAM keys, int clickCount);  // a press on the document
+void EditMouseDrag(float x, float y);  // the button is down and the mouse moves: the selection follows
+bool EditContextPoint(float x, float y);  // right-click outside the selection moves the caret there first
+void EditContextMenu(int sx, int sy, bool keyboard);
+bool EditTripleClickCancels(float x, float y);  // a third click right after the double click that entered (UX-5)
+void EditTaskClick(uint32_t block);  // a task box in edit mode: an undoable splice, saved by autosave (§8.10)
+bool EditOpenLinkOnClick(WPARAM keys);  // a click on a link opens it only with Ctrl in edit mode
+void EditFocus(bool on);             // WM_SETFOCUS / WM_KILLFOCUS: the caret blinks only with the keyboard
+void EditActivated();                // WM_ACTIVATE: a read-only or missing file is looked at again
+void EditOnFileChanged();            // the watcher, in edit mode (§10.7)
+void EditOnFullDoc();                // a big document's full parse arrived: an entry asked for meanwhile happens now
+void EditSlideStep();                // one animation step of the bar (message loop)
+void EditSync();                     // the re-parse a big document's typing deferred (§5.7), now
+void EditThemeChanged();             // the palette changed: re-parse the source instead of reloading the file
+LRESULT EditOwnerMessage(WPARAM vol, LPARAM index);  // FastMD.EditOwner: is this window editing that file?
+bool EditDeferred(UINT msg, WPARAM wp, LPARAM lp);  // inside a modal loop: queued for WM_APP_REPLAY (§10.10)
+void EditReplay();                   // WM_APP_REPLAY: what waited, in order, then a close that was asked for
+void EditOnSaved(WPARAM serial);     // WM_APP_SAVED: the save worker is done
+bool EditPendingReplay();            // something waits for the end of the modal loop (WM_APP_REPLAY is due)
+bool EditEscGuard();                 // within 1 s of the Esc that left edit mode: an Esc never closes the window (UX-6)
+void EditAutosaveChanged();          // the setting was switched: arm or stop the autosave of the open edits
+void EditSetContextPoint(float x, float y);  // where the reading menu was opened: "Edit here" enters there
+std::wstring EditSelectionSource();  // copy as Markdown in edit mode: the source of the selection
+// what the bar shows (editbar.cpp)
+SaveState EditSaveState();           // Q_EDIT_SAVE_STATE
+SaveState EditStatusShown();         // the status slot now: a change shows only after 300 ms (UX-24)
+std::wstring EditStatusTip();        // the status in full (the slot elides it), with a kept recovery file's path
+bool EditCanUndo();
+bool EditCanRedo();
+int EditStyleId();                   // the style label: 0 text, 1-6 heading, 7 code, 8 table, 9 atom, 10 footnote
+std::wstring EditStripText(int kind);  // the conflict, encoding, leave and journal strips say what happened
 
 // ------------------------------------------------------------------------------------------------ editbar.cpp
 enum StripId : int { STRIP_NONE, STRIP_CONFLICT, STRIP_ENCODING, STRIP_LEAVE, STRIP_READONLY, STRIP_MISSING,
-                     STRIP_RECOVERY, STRIP_OTHER_WINDOW };  // Q_EDIT_STRIP
-void StripShow(int kind);
-void StripHide(int kind);            // only if that one is shown
-int StripKind();
+                     STRIP_RECOVERY, STRIP_OTHER_WINDOW };  // Q_EDIT_STRIP, in the order of their priority
+void StripShow(int kind);            // that condition holds: the strip of the highest priority is shown
+void StripHide(int kind);            // that condition is over
+void StripHideEditing();             // leaving edit mode: its strips go (the reading-mode ones stay)
+int StripKind();                     // the strip shown, STRIP_NONE = none
+float StripTop();                    // under the bar in edit mode, at the top of the document in reading mode
 LRESULT StripButtonCenter(UINT cmd); // Q_EDIT_TOOL: client px MAKELONG(x, y), -1 = not shown
 bool StripMouse(float x, float y, bool click);  // true = the point is on the strip (a click runs its button)
-void DrawEditChrome();               // view.cpp, over the document and under the find bar
+void DrawEditChrome(int layer);      // view.cpp: 0 = the bar, a strip, the pencil; 1 = a bar tooltip, over all
+int EditChromeRects(float (*rects)[4], int max);  // what a scrolled frame must repair (client DIP l, t, r, b)
+bool BarMouse(float x, float y, bool click);  // the toolbar: true = the point is on it (a click runs its button)
+bool PencilMouse(float x, float y, bool click);  // reading mode's pencil button, left of the gear
+void BarMouseLeave();
+void BarChanged();                   // something the bar shows changed: repaint (and a full frame)
+LRESULT BarToolCenter(UINT cmd);     // Q_EDIT_TOOL for a bar button or the pencil
+int BarCollapse();                   // Q_EDIT_COLLAPSE
+std::wstring BarTipText();           // the tooltip shown now ("" = none)
 
 // ------------------------------------------------------------------------------------------------ settings_ui.cpp
 void SettingsOpen();

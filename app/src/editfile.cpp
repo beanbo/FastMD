@@ -576,35 +576,46 @@ SaveResult SaveSource(const SaveRequest& rq) {
         pend = nullptr;
     }
     const std::wstring& old = base->text;
-    const UINT cp = base->cp;
+    // A whole rewrite may change the encoding (the encoding strip's "Save as UTF-8"): its code page and mark from here on.
+    const bool whole = rq.whole;
+    const UINT cp = whole && rq.toCp ? rq.toCp : base->cp;
+    const std::string hdr = whole && rq.toCp ? rq.toHeader : base->header;
 
     // 3. The bytes that change: from the first differing character to the last, moved outwards so that neither end
-    // splits a surrogate pair or a CRLF; the rest of the file keeps its bytes (D1).
+    // splits a surrogate pair or a CRLF; the rest of the file keeps its bytes (D1). A whole rewrite changes them all.
     size_t on = old.size(), nn = text.size(), lim = std::min(on, nn), p = 0, s = 0;
-    while (p < lim && old[p] == text[p]) p++;
-    while (s < lim - p && old[on - 1 - s] == text[nn - 1 - s]) s++;
-    auto splits = [](const std::wstring& t, size_t i) {
-        return i > 0 && i < t.size() && ((HighSur(t[i - 1]) && LowSur(t[i])) || (t[i - 1] == L'\r' && t[i] == L'\n'));
-    };
-    while (p > 0 && (splits(old, p) || splits(text, p))) p--;
-    while (s > 0 && (splits(old, on - s) || splits(text, nn - s))) s--;
-    // The baseline is byte-exact, so its text up to p is exactly the bytes up to pb (and the same for the suffix). Only
-    // the shorter side is encoded to count its bytes: the longer one is what the file's length leaves (a tick at the
-    // top of a big file would otherwise encode all of it once more).
-    const size_t body = bytes.size() - std::min(bytes.size(), base->header.size());
-    size_t mid = EncodedLen(cp, old.data() + p, on - s - p), pl = SIZE_MAX, sb = SIZE_MAX;
-    if (p <= s) pl = EncodedLen(cp, old.data(), p);
-    else sb = EncodedLen(cp, old.data() + on - s, s);
-    size_t known = p <= s ? pl : sb;
-    if (mid != SIZE_MAX && known != SIZE_MAX && known + mid <= body) (p <= s ? sb : pl) = body - known - mid;
-    size_t pb = pl == SIZE_MAX ? SIZE_MAX : base->header.size() + pl;
-    if (pb > bytes.size() || sb > bytes.size() - pb) return give(SS_FAILED, "ENCODER_ERROR");
-    std::string middle;
-    size_t bad = SIZE_MAX;
-    const char* why = "";
-    if (!EncodeText(cp, text.data() + p, nn - s - p, middle, &bad, &why)) {
-        r.bad = bad == SIZE_MAX ? UINT32_MAX : (uint32_t)(p + bad);
-        return give(strcmp(why, "ENCODER_ERROR") ? SS_UNENCODABLE : SS_FAILED, why);
+    size_t pb = 0, sb = 0;
+    if (!whole) {
+        while (p < lim && old[p] == text[p]) p++;
+        while (s < lim - p && old[on - 1 - s] == text[nn - 1 - s]) s++;
+        auto splits = [](const std::wstring& t, size_t i) {
+            return i > 0 && i < t.size() && ((HighSur(t[i - 1]) && LowSur(t[i])) || (t[i - 1] == L'\r' && t[i] == L'\n'));
+        };
+        while (p > 0 && (splits(old, p) || splits(text, p))) p--;
+        while (s > 0 && (splits(old, on - s) || splits(text, nn - s))) s--;
+        // The baseline is byte-exact, so its text up to p is exactly the bytes up to pb (and the same for the suffix).
+        // Only the shorter side is encoded to count its bytes: the longer one is what the file's length leaves (a tick
+        // at the top of a big file would otherwise encode all of it once more).
+        const size_t body = bytes.size() - std::min(bytes.size(), base->header.size());
+        size_t mid = EncodedLen(cp, old.data() + p, on - s - p), pl = SIZE_MAX;
+        sb = SIZE_MAX;
+        if (p <= s) pl = EncodedLen(cp, old.data(), p);
+        else sb = EncodedLen(cp, old.data() + on - s, s);
+        size_t known = p <= s ? pl : sb;
+        if (mid != SIZE_MAX && known != SIZE_MAX && known + mid <= body) (p <= s ? sb : pl) = body - known - mid;
+        pb = pl == SIZE_MAX ? SIZE_MAX : base->header.size() + pl;
+        if (pb > bytes.size() || sb > bytes.size() - pb) return give(SS_FAILED, "ENCODER_ERROR");
+    }
+    std::string middle = whole ? hdr : std::string();
+    {
+        std::string enc;
+        size_t bad = SIZE_MAX;
+        const char* why = "";
+        if (!EncodeText(cp, text.data() + p, nn - s - p, enc, &bad, &why)) {
+            r.bad = bad == SIZE_MAX ? UINT32_MAX : (uint32_t)(p + bad);
+            return give(strcmp(why, "ENCODER_ERROR") ? SS_UNENCODABLE : SS_FAILED, why);
+        }
+        middle += enc;
     }
     const uint64_t oldLen = bytes.size(), newLen = pb + middle.size() + sb;
     const char* suffix = bytes.data() + (oldLen - sb);
@@ -615,7 +626,7 @@ SaveResult SaveSource(const SaveRequest& rq) {
     // would take it for the mark. Without a mark that is EF BB BF, FF FE or FE FF; after a UTF-8 mark (an ANSI file
     // can have one) the read looks for FF FE once more.
     if (cp != 1200) {
-        const uint64_t hs = base->header.size();
+        const uint64_t hs = hdr.size();
         uint8_t head[3] = {};
         uint64_t k = 0;
         for (; k < 3 && hs + k < newLen; k++) head[k] = outAt(hs + k);
@@ -632,7 +643,7 @@ SaveResult SaveSource(const SaveRequest& rq) {
     // FASTMD_EDIT_SELFCHECK), the changed window with whole characters on both sides above.
     uint64_t hash = Fnv64(suffix, sb, Fnv64(middle.data(), middle.size(), Fnv64(bytes.data(), pb)));
     std::wstring back;
-    if (rq.fullProof || nn < (1u << 20)) {
+    if (rq.fullProof || nn < (1u << 20) || whole) {
         std::string all;
         all.reserve((size_t)newLen);
         all.append(bytes, 0, pb);
@@ -665,7 +676,7 @@ SaveResult SaveSource(const SaveRequest& rq) {
                         (pb > 0 && (uint8_t)bytes[pb - 1] >= 0x80) || (sb > 0 && (uint8_t)suffix[0] >= 0x80);
             if (high) {
                 Utf8Check u;
-                const uint64_t hs = base->header.size();
+                const uint64_t hs = hdr.size();
                 u.Feed(bytes.data() + hs, pb - hs);
                 u.Feed(middle.data(), middle.size());
                 u.Feed(suffix, sb);
@@ -820,7 +831,7 @@ SaveResult SaveSource(const SaveRequest& rq) {
     d.valid = true;
     d.text = text;
     d.cp = cp;
-    d.header = base->header;
+    d.header = hdr;
     d.length = newLen;
     d.hash = hash;
     d.volume = after.dwVolumeSerialNumber;
@@ -994,6 +1005,172 @@ bool RecoveryFlushPending(const RecoveryInfo& r, const wchar_t* target) {
     if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
     if (ok) DeleteFileW(r.file.c_str());
     return ok;
+}
+
+// ------------------------------------------------------------------------------------------------ around edit mode
+SaveState WriteProbe(const wchar_t* path, DWORD* err) {
+    *err = 0;
+    HANDLE f = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) {
+        *err = GetLastError();
+        SaveState st = ErrorClass(*err, path);
+        return st == SS_DENIED ? SS_READONLY : st;
+    }
+    CloseHandle(f);
+    return SS_SAVED;
+}
+
+bool WriteNewFile(const wchar_t* path, const std::string& bytes, DWORD* err) {
+    *err = 0;
+    std::wstring tmp = std::wstring(path) + L".fastmd-tmp";
+    HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) { *err = GetLastError(); return false; }
+    bool ok = WriteAllAt(f, 0, bytes.data(), bytes.size(), err);
+    if (ok && !FlushFileBuffers(f)) { *err = GetLastError(); ok = false; }
+    CloseHandle(f);
+    if (ok && !MoveFileExW(tmp.c_str(), path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        *err = GetLastError();
+        ok = false;
+    }
+    if (!ok) DeleteFileW(tmp.c_str());
+    return ok;
+}
+
+namespace {
+const char kJrnMagic[8] = {'F', 'M', 'D', 'J', 'R', 'N', '1', 0};
+
+std::wstring JournalFileName(uint32_t volume, uint64_t index, DWORD pid) {
+    wchar_t b[80];
+    swprintf_s(b, L"%08x-%016llx-%lu.unsaved", volume, (unsigned long long)index, (unsigned long)pid);
+    return b;
+}
+}  // namespace
+
+uint64_t TextHash(const std::wstring& t) { return Fnv64(t.data(), t.size() * sizeof(wchar_t)); }
+
+bool WriteJournal(const std::wstring& dir, uint32_t volume, uint64_t index, bool encrypted, const std::wstring& path,
+                  uint64_t diskHash, UINT cp, const std::wstring& text, std::wstring* file) {
+    if (dir.empty()) return false;
+    std::wstring d = dir;
+    if (d.back() != L'\\') d += L'\\';
+    CreateDirectoryW(DirOf(d.substr(0, d.size() - 1)).c_str(), nullptr);
+    CreateDirectoryW(d.c_str(), nullptr);
+    std::string h(kJrnMagic, sizeof kJrnMagic);
+    Put<uint32_t>(h, (uint32_t)path.size());
+    h.append((const char*)path.data(), path.size() * sizeof(wchar_t));
+    Put<uint64_t>(h, NowFileTime());
+    Put<uint64_t>(h, diskHash);
+    Put<uint32_t>(h, cp);
+    Put<uint32_t>(h, GetCurrentProcessId());
+    Put<uint64_t>(h, ProcessStart());
+    Put<uint64_t>(h, (uint64_t)text.size());
+    Put<uint64_t>(h, TextHash(text));
+    Put<uint64_t>(h, Fnv64(h.data(), h.size()));
+    std::wstring dst = d + JournalFileName(volume, index, GetCurrentProcessId()), tmp = dst + L".tmp";
+    HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           encrypted ? FILE_ATTRIBUTE_ENCRYPTED : FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    DWORD e = 0;
+    bool ok = WriteAllAt(f, 0, h.data(), h.size(), &e) &&
+              WriteAllAt(f, h.size(), (const char*)text.data(), text.size() * sizeof(wchar_t), &e) && FlushFileBuffers(f);
+    CloseHandle(f);
+    ok = ok && MoveFileExW(tmp.c_str(), dst.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    if (!ok) DeleteFileW(tmp.c_str());
+    else if (file) *file = dst;
+    return ok;
+}
+
+static bool ReadJournal(const std::wstring& file, JournalInfo& out) {
+    std::string bytes;
+    DWORD e = 0;
+    if (ReadDisk(file.c_str(), bytes, nullptr, &e) != SS_SAVED) return false;
+    size_t at = sizeof kJrnMagic;
+    uint32_t pathLen = 0, cp = 0, pid = 0;
+    uint64_t len = 0, hash = 0, headHash = 0;
+    if (bytes.size() < at || memcmp(bytes.data(), kJrnMagic, at) != 0 || !Get(bytes, at, pathLen) || pathLen > 32768 ||
+        bytes.size() - at < pathLen * sizeof(wchar_t))
+        return false;
+    out.path.assign((const wchar_t*)(bytes.data() + at), pathLen);
+    at += pathLen * sizeof(wchar_t);
+    if (!Get(bytes, at, out.time) || !Get(bytes, at, out.diskHash) || !Get(bytes, at, cp) || !Get(bytes, at, pid) ||
+        !Get(bytes, at, out.created) || !Get(bytes, at, len) || !Get(bytes, at, hash))
+        return false;
+    size_t headEnd = at;
+    if (!Get(bytes, at, headHash) || headHash != Fnv64(bytes.data(), headEnd)) return false;
+    if ((bytes.size() - at) / sizeof(wchar_t) != len || (bytes.size() - at) % sizeof(wchar_t)) return false;
+    out.text.assign((const wchar_t*)(bytes.data() + at), (size_t)len);
+    if (TextHash(out.text) != hash) return false;  // a journal cut short is no copy of anything
+    out.cp = cp;
+    out.pid = pid;
+    out.file = file;
+    return true;
+}
+
+std::vector<JournalInfo> FindJournals(const std::wstring& dir, uint32_t volume, uint64_t index, const std::wstring& path) {
+    std::vector<JournalInfo> out;
+    std::wstring d = dir;
+    if (d.empty()) return out;
+    if (d.back() != L'\\') d += L'\\';
+    wchar_t pat[64];
+    swprintf_s(pat, L"%08x-%016llx-*.unsaved", volume, (unsigned long long)index);
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW((d + pat).c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return out;
+    do {
+        JournalInfo j;
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !ReadJournal(d + fd.cFileName, j)) continue;
+        if (CompareStringOrdinal(j.path.c_str(), (int)j.path.size(), path.c_str(), (int)path.size(), TRUE) != CSTR_EQUAL)
+            continue;
+        if (LiveOtherWriter(j.pid, j.created)) continue;  // another window still edits it: its own business
+        size_t k = out.size();  // newest first
+        out.push_back(std::move(j));
+        for (; k > 0 && out[k - 1].time < out[k].time; k--) std::swap(out[k - 1], out[k]);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return out;
+}
+
+void PurgeRecovery(const std::wstring& dir, uint32_t days) {
+    std::wstring d = dir;
+    if (d.empty()) return;
+    if (d.back() != L'\\') d += L'\\';
+    const uint64_t limit = NowFileTime() - (uint64_t)days * 24 * 3600 * 10000000ull;
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW((d + L"*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        bool ours = EndsWithI(fd.cFileName, L".rec") || EndsWithI(fd.cFileName, L".unsaved") || EndsWithI(fd.cFileName, L".theirs");
+        if (ours && U64(fd.ftLastWriteTime.dwHighDateTime, fd.ftLastWriteTime.dwLowDateTime) < limit)
+            DeleteFileW((d + fd.cFileName).c_str());
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+bool WriteTheirs(const std::wstring& dir, uint32_t volume, uint64_t index, const std::string& bytes, std::wstring* file) {
+    if (dir.empty()) return false;
+    std::wstring d = dir;
+    if (d.back() != L'\\') d += L'\\';
+    CreateDirectoryW(DirOf(d.substr(0, d.size() - 1)).c_str(), nullptr);
+    CreateDirectoryW(d.c_str(), nullptr);
+    wchar_t b[80];
+    swprintf_s(b, L"%08x-%016llx-%lu.theirs", volume, (unsigned long long)index, GetCurrentProcessId());
+    std::wstring f = d + b;
+    HANDLE h = CreateFileW(f.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD e = 0;
+    bool ok = WriteAllAt(h, 0, bytes.data(), bytes.size(), &e) && FlushFileBuffers(h);
+    CloseHandle(h);
+    if (!ok) DeleteFileW(f.c_str());
+    else if (file) *file = f;
+    return ok;
+}
+
+std::wstring EditMutexName(uint32_t volume, uint64_t index) {
+    wchar_t b[96];
+    swprintf_s(b, L"Local\\FastMD.edit.%08x-%016llx", volume, (unsigned long long)index);
+    return b;
 }
 
 void SetFailWriteForTests(const wchar_t* spec) {

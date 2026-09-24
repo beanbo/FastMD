@@ -4,6 +4,10 @@ project(FastMD VERSION 1.2.0 LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# Every target names its optimisation level itself (edit mode's sources build with /O1, the rest with /O2): CMake's
+# default /O2 in the Release flags would clash with that
+string(REPLACE "/O2" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+string(REPLACE "/O2" "" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
 # static CRT: no VC runtime DLLs to load or ship
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 option(FASTMD_CFG "Control Flow Guard (+ /GS)" ON)
@@ -32,7 +36,6 @@ add_executable(FastMD WIN32
     src/highlight.cpp src/theme.cpp src/util.cpp
     src/find.cpp src/toc.cpp src/home.cpp src/store.cpp src/shell.cpp src/settings_ui.cpp src/strings.cpp
     src/copy.cpp src/drag.cpp src/crash.cpp src/update.cpp src/uia.cpp src/tasks.cpp
-    src/editcore.cpp src/editfile.cpp src/edit.cpp src/editbar.cpp
     third_party/md4c/md4c.c
     res/fastmd.rc)
 
@@ -42,6 +45,17 @@ target_compile_definitions(FastMD PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN N
 target_compile_options(FastMD PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus /EHsc
     $<$<CONFIG:Release>:/O2 /Oi /GL /Gy /DNDEBUG> ${FASTMD_SEC_C})
 set_source_files_properties(third_party/md4c/md4c.c PROPERTIES COMPILE_OPTIONS "/wd4244;/wd4267")
+
+# Edit mode's sources favour size (docs/EDIT-MODE.md §1 principle 3): none of them is on a hot path except the map
+# queries, which are measured, and the exe pays ~1.5 ms per MB on every launch whether edit mode is used or not. They
+# are compiled on their own with /O1 (the rest of the program keeps /O2) and linked into the exe with everything else.
+add_library(fastmd_edit OBJECT src/editcore.cpp src/editfile.cpp src/edit.cpp src/editbar.cpp)
+target_include_directories(fastmd_edit PRIVATE ${CMAKE_BINARY_DIR}/generated)
+target_compile_definitions(fastmd_edit PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS
+    MD4C_USE_UTF16)
+target_compile_options(fastmd_edit PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus /EHsc
+    $<$<CONFIG:Release>:/O1 /Oi /GL /Gy /DNDEBUG> ${FASTMD_SEC_C})
+target_sources(FastMD PRIVATE $<TARGET_OBJECTS:fastmd_edit>)
 # the version resource is generated from version.h, and the resource compiler's dependencies are not scanned:
 # without this a version bump left the old number inside the exe
 set_source_files_properties(res/fastmd.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_BINARY_DIR}/generated/version.h)

@@ -189,6 +189,10 @@ static void BuildRich(std::string& html, std::string& rtf) {
 
 // The source of the selection, as the author wrote it: the map says where each piece of text came from.
 std::wstring SelectionMarkdown() {
+    if (g.editing) {  // edit mode's map says exactly which source the selection stands for
+        std::wstring md = EditSelectionSource();
+        return md.empty() ? SelectionText() : md;
+    }
     if (!HasSelection() || g.src.empty() || g.doc.srcMap.empty()) return SelectionText();
     uint32_t from = SelFrom(), to = SelTo();
     auto srcOf = [&](uint32_t pos) -> size_t {

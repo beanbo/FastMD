@@ -97,7 +97,8 @@ const TestSlow& TestSlowMs() {
 
 std::wstring WindowTitle() {
     if (g.path.empty()) return L"FastMD";
-    std::wstring t = FileNameOf(g.path) + L" — FastMD";
+    // unsaved edits: a star right after the name (so "name.md…" still starts the title, EDIT-MODE.md §2.6)
+    std::wstring t = FileNameOf(g.path) + (EditDirty() ? L"*" : L"") + L" — FastMD";
     if (g.cfg.id[0]) t += std::wstring(L" (") + g.cfg.id + L")";
     return t;
 }
@@ -226,6 +227,8 @@ static void RestorePositionFor(const std::wstring& path);
 static void OnFullDocRestore();
 
 void OpenDocument(const std::wstring& path, bool pushHistory, float scrollY, bool restorePosition) {
+    // edits go into the file (or the reader decides what becomes of them) before the document goes (§10.8)
+    if (!g.path.empty() && !CanLeaveDocument()) return;
     wchar_t full[MAX_PATH * 4];
     std::wstring p = GetFullPathNameW(path.c_str(), MAX_PATH * 4, full, nullptr) ? std::wstring(full) : path;
     bool other = g.path.empty() || !SamePath(g.path, p);
@@ -280,7 +283,7 @@ void ReloadDocument() {
 }
 
 void NavigateBack() {
-    if (g.back.empty()) return;
+    if (g.back.empty() || !CanLeaveDocument()) return;  // before the history moves (T20)
     HistoryEntry e = g.back.back();
     g.back.pop_back();
     g.fwd.push_back(HistoryEntry{g.path, g.scrollY});
@@ -288,7 +291,7 @@ void NavigateBack() {
 }
 
 void NavigateForward() {
-    if (g.fwd.empty()) return;
+    if (g.fwd.empty() || !CanLeaveDocument()) return;
     HistoryEntry e = g.fwd.back();
     g.fwd.pop_back();
     g.back.push_back(HistoryEntry{g.path, g.scrollY});
@@ -1062,6 +1065,7 @@ void OnFullDoc() {
     StartMeasure();
     StartImages();
     Invalidate();
+    EditOnFullDoc();  // edit mode was asked for while this was on its way: it is entered now
 }
 
 static DWORD g_rereadMs = 0;  // OnFileChanged's backoff for a file that cannot be read now
@@ -1171,6 +1175,10 @@ void StopWatcher() {
 // history. Other text is reloaded. A file that cannot be read now is not taken for an empty or a changed one: it is
 // read again a little later (250 ms, doubling to 4 s), and a file that is gone waits for the watcher to see it again.
 void OnFileChanged() {
+    if (g.editing) {  // edit mode never reloads under the edits: it adopts, or asks (§10.7)
+        EditOnFileChanged();
+        return;
+    }
     FILETIME t{};
     uint64_t size = 0;
     bool there = GetFileStamp(g.path.c_str(), &t, &size);

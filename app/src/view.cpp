@@ -66,8 +66,16 @@ bool BlockHidden(const Block& b) {
     return gi < g.doc.detailsOpen.size() && !g.doc.detailsOpen[gi];
 }
 
+// Edit mode's toolbar covers the top of the page (EDIT-MODE.md §12.1): the document starts that much lower, and the
+// scroll position absorbs it (edit.cpp), so a document scrolled past the top does not move when the bar slides in.
+// The bar is sized in DIP of the screen, not of the zoomed document. Printing and the Explorer pane: none.
+float EditInset() { return (g.barT > 0 && !g.fitWide) ? 44.f / g.cfg.zoom * g.barT : 0.f; }
+// where the caret counts as hidden at the top: under the bar, a strip and the find bar
+float EditRevealTop() { return EditInset() + g.stripH + (g.findOpen ? 52.f : 0.f) + 8.f; }
+float ScrollTrackTop() { return 2.f + EditInset() + g.stripH; }
+
 void RecomputeY() {
-    float y = Metrics::kPadTop;
+    float y = Metrics::kPadTop + EditInset();
     size_t n = g.doc.blocks.size();
     for (size_t i = 0; i < n; i++) {
         const Block& b = g.doc.blocks[i];
@@ -709,13 +717,94 @@ void DrawPill(const std::wstring& s, float cx, float y, bool centered) {
 static void DrawScrollbar() {
     float vh = ViewH(), vw = ViewW();
     if (g.docH <= vh + 1) return;
-    float trackT = 2, trackB = vh - 2, trackH = trackB - trackT;
+    float trackT = ScrollTrackTop(), trackB = vh - 2, trackH = trackB - trackT;
     float th = std::max(32.f, trackH * vh / g.docH);
     float ty = trackT + (trackH - th) * (g.scrollY / MaxScroll());
     if (g.findOpen && !g.matches.empty()) DrawFindMarks(vw - 12.f, vw - 2.f);
     bool hot = g.draggingThumb || g.hotScroll;
     float w = hot ? 8.f : 5.f;
     g.canvas->FillRoundRect(vw - w - 3, ty, vw - 3, ty + th, w * 0.5f, hot ? P_SCROLL_HOT : P_SCROLL);
+}
+
+// ------------------------------------------------------------------------------------------------ the edit caret
+// the width of a blank in a block's font: the caret stands that far right per column of trailing blanks (§6.5)
+float SpaceAdvance(uint32_t bi) {
+    const Block& b = g.doc.blocks[bi];
+    int role = b.kind == BK_CODE ? R_CODE : b.heading ? b.heading : R_BODY;
+    IDWriteTextLayout* L = nullptr;
+    if (FAILED(g.dwf->CreateTextLayout(L" ", 1, g.typo.fmt[role], 100.f, 100.f, &L))) return 4.f;
+    DWRITE_TEXT_METRICS m{};
+    L->GetMetrics(&m);
+    L->Release();
+    return m.widthIncludingTrailingWhitespace;
+}
+
+// the selected object atom: a 1 px accent outline 2 px outside its box (§12.2), no caret
+static void DrawAtomOutline(float top, float bottom) {
+    size_t n = g.doc.blocks.size();
+    int32_t bi = g.selAtomBlock;
+    if (bi < 0 || (size_t)bi >= n || BlockHidden(g.doc.blocks[bi])) return;
+    float l, t, r, b;
+    if (g.selAtomImage >= 0) {  // a picture or formula in the line: the box of its one character
+        const Block& bl = g.doc.blocks[bi];
+        uint32_t at = UINT32_MAX;
+        int32_t cell = -1;
+        auto scan = [&](uint32_t runOff, uint32_t runCount, int32_t c) {
+            for (uint32_t k = 0; k < runCount && at == UINT32_MAX; k++) {
+                const Run& run = g.doc.runs[runOff + k];
+                if ((run.flags & F_IMAGE) && run.image == (uint32_t)g.selAtomImage) { at = run.start; cell = c; }
+            }
+        };
+        scan(bl.runOff, bl.runCount, -1);
+        if (bl.kind == BK_TABLE && bl.aux < g.doc.tables.size()) {
+            const Table& tb = g.doc.tables[bl.aux];
+            for (uint32_t c = 0; c < tb.rows * tb.cols && at == UINT32_MAX; c++)
+                scan(g.doc.cells[tb.cellOff + c].runOff, g.doc.cells[tb.cellOff + c].runCount, (int32_t)c);
+        }
+        float x0, y0, h0, x1, y1, h1;
+        if (at == UINT32_MAX || !g.cache[bi] || !CaretGeomAt(at, bi, cell, &x0, &y0, &h0, false) ||
+            !CaretGeomAt(at + 1, bi, cell, &x1, &y1, &h1, false))
+            return;
+        l = x0;
+        r = std::max(x1, x0 + 4.f);
+        t = y0 - g.scrollY;
+        b = t + h0;
+    } else {  // a block of its own; an HTML block or front matter may have been drawn as several
+        int32_t last = bi;
+        if (g.doc.blockSrc.size() == n && g.doc.blockSrc[bi].rawId >= 0)
+            while ((size_t)last + 1 < n && g.doc.blockSrc[last + 1].rawId == g.doc.blockSrc[bi].rawId) last++;
+        float x, w;
+        BlockBox(bi, &x, &w);
+        const Block& bl = g.doc.blocks[bi];
+        if (bl.kind == BK_IMAGE && g.cache[bi]) w = std::min(w, g.cache[bi]->natural);
+        l = x;
+        r = x + w;
+        t = g.Y[bi] - g.scrollY;
+        b = g.Y[last] + g.H[last] - g.scrollY;
+    }
+    if (b + 3.f < top || t - 3.f > bottom) return;
+    g.canvas->StrokeRoundRect(l - 2.f, t - 2.f, r + 2.f, b + 2.f, 2.f, 1.f, P_ACCENT);
+}
+
+// The caret of edit mode (§12.2): the width Windows asks for, only while the blink phase is on and the document has
+// the keyboard (edit.cpp decides), in a block that is laid out already - the paint path never lays out - and clipped to
+// the block's box inside the document column.
+static void DrawEditCaret(float top, float bottom) {
+    if (g.selAtomBlock >= 0) { DrawAtomOutline(top, bottom); return; }
+    int32_t bi = g.caretBlock;
+    if (!g.caretOn || !g.caretVisible || g.fitWide || bi < 0 || (size_t)bi >= g.cache.size() || !g.cache[bi]) return;
+    float cx, dy, ch;
+    if (!CaretGeomAt(g.selFocus, bi, g.caretCell, &cx, &dy, &ch, false)) return;
+    float bx, bw;
+    BlockBox(bi, &bx, &bw);
+    UINT sysW = 1;
+    SystemParametersInfoW(SPI_GETCARETWIDTH, 0, &sysW, 0);
+    float w = std::max(2.f, sysW * g.dpi / 96.f) / Scale();
+    float right = std::min(bx + bw, ViewW() - Metrics::kPadX) - w;
+    if (g.caretTrail) cx = std::min(cx + g.caretTrail * SpaceAdvance((uint32_t)bi), std::max(cx, right));
+    float ct = dy - g.scrollY, cb = ct + ch;
+    if (cb <= top || ct >= bottom || cx < std::max(bx, DocLeft()) - w || cx > right + w) return;
+    g.canvas->FillRect(cx, ct, cx + w, cb, P_TEXT);
 }
 
 // the document itself: the blocks of a band of the window and the quote bars beside them
@@ -738,7 +827,9 @@ static void DrawDocumentBand(float top, float bottom) {
         uint8_t pal = q.alert ? (uint8_t)(P_ALERT_NOTE + q.alert - 1) : P_BORDER;
         g.canvas->FillRect(tl + q.x, t, tl + q.x + Metrics::kQuoteBar, b, pal);
     }
-    if (g.caretOn) {  // the blocks around it are laid out already: no need to measure anything here
+    if (g.editing) {
+        DrawEditCaret(top, bottom);
+    } else if (g.caretOn) {  // the blocks around it are laid out already: no need to measure anything here
         float cx, dy, ch;
         if (CaretGeom(g.selFocus, &cx, &dy, &ch, false)) {
             float ct = dy - g.scrollY, cb = ct + ch;
@@ -819,8 +910,8 @@ static void RedrawDocRect(float l, float t, float r, float b) {
 static void DrawChrome() {
     if (!g.path.empty()) DrawScrollbar();
     DrawSettingsButton();  // under the outline drawer: in a narrow window the drawer may cover it (and takes the click)
-    DrawToc();
-    DrawEditChrome();      // a strip over the top of the document (it covers the buttons in the corners)
+    DrawEditChrome(0);     // edit mode's bar, a strip over the top of the document (it covers the corners), the pencil
+    DrawToc();             // the drawer over them all; docked, the panel is beside them
     if (g.findOpen) DrawFindBar();
     const std::wstring* pill = nullptr;
     if (!g.tip.empty()) pill = &g.tip;
@@ -829,6 +920,7 @@ static void DrawChrome() {
     if (pill && !g.path.empty()) DrawPill(*pill, DocLeft() + 10.f, ViewH() - 40.f, false);
     else if (pill) DrawPill(*pill, 10.f, ViewH() - 40.f, false);
     if (!g.toast.empty() && GetTickCount() < g.toastUntil) DrawPill(g.toast, DocLeft() + DocW() * 0.5f, ViewH() - 64.f, true);
+    DrawEditChrome(1);     // a toolbar button's tooltip, over everything
 }
 
 // ------------------------------------------------------------------------------------------------ scrolled frames
@@ -846,6 +938,13 @@ struct FrameKey {
     size_t matches = 0;
     bool hoverCopyBtn = false, hotHBar = false, hotScroll = false, dark = false, selecting = false, tocBtnHot = false,
          settingsBtnHot = false, draggingThumb = false, home = false, overText = false;
+    // edit mode (§12.3): the bar's slide and the state of everything it draws, the caret, the selected atom
+    bool editing = false, caretVisible = false, pencilHot = false;
+    int barT = 0;
+    uint32_t chrome = 0, editSerial = 0;
+    int32_t caretBlock = -1, caretCell = -1, atomBlock = -1, atomImage = -1;
+    uint16_t caretTrail = 0;
+    float stripH = 0;
     bool operator==(const FrameKey&) const = default;
 };
 FrameKey g_last;
@@ -890,10 +989,22 @@ FrameKey CurrentKey() {
     k.settingsBtnHot = g.settingsBtnHot;
     k.draggingThumb = g.draggingThumb;
     k.home = g.path.empty();
+    k.editing = g.editing;
+    k.caretVisible = g.caretVisible;
+    k.pencilHot = g.pencilHot;
+    k.barT = (int)std::lround(g.barT * 256);
+    k.chrome = g.editChrome;
+    k.editSerial = g.editSerial;
+    k.caretBlock = g.caretBlock;
+    k.caretCell = g.caretCell;
+    k.caretTrail = g.caretTrail;
+    k.atomBlock = g.selAtomBlock;
+    k.atomImage = g.selAtomImage;
+    k.stripH = g.stripH;
     // things drawn over the text: they would have to be repaired pixel by pixel, so those frames are drawn in full
     bool pill = !g.tip.empty() || (g.hoverLink >= 0 && !g.selecting) || g.focusLink >= 0;
     bool toast = !g.toast.empty() && GetTickCount() < g.toastUntil;
-    k.overText = g.findOpen || TocOverlayOpen() || pill || toast || g.stripH > 0;
+    k.overText = g.findOpen || TocOverlayOpen() || pill || toast || g.editOverText;
     return k;
 }
 
@@ -915,6 +1026,9 @@ bool ScrollFrame(const FrameKey& k) {
     float l, t, r, b;
     if (SettingsButtonRect(&l, &t, &r, &b)) RedrawDocRect(l, std::min(t, t - d), r, std::max(b, b - d));
     if (TocButtonRect(&l, &t, &r, &b)) RedrawDocRect(l, std::min(t, t - d), r, std::max(b, b - d));
+    float rc[4][4];  // edit mode's bar, strip and pencil stay put too
+    for (int k = 0, n = EditChromeRects(rc, 4); k < n; k++)
+        RedrawDocRect(rc[k][0], std::min(rc[k][1], rc[k][1] - d), rc[k][2], std::max(rc[k][3], rc[k][3] - d));
     DrawChrome();  // the outline panel is opaque and repaints itself
     return true;
 }
@@ -930,7 +1044,10 @@ void Render() {
     FrameKey k = CurrentKey();
     k.scrollY = g.scrollY;
     g.canvas->Begin();
-    if (!ScrollFrame(k)) {
+    if (ScrollFrame(k)) {
+        g.framesPartial++;
+    } else {
+        g.framesFull++;
         g.canvas->Clear(P_BG);
         if (g.path.empty()) DrawHome();
         else DrawDocumentBand(0, ViewH());
@@ -951,34 +1068,40 @@ void ShowToast(const std::wstring& text, DWORD ms) {
 // ------------------------------------------------------------------------------------------------ hit-testing
 static uint32_t BlockEnd(const Block& b) { return b.textOff + b.textLen; }
 
-static uint32_t HitLayout(IDWriteTextLayout* tl, uint32_t textOff, float lx, float ly, bool* inside) {
+static uint32_t HitLayout(IDWriteTextLayout* tl, uint32_t textOff, float lx, float ly, DocHit* h) {
     BOOL trailing = FALSE, in = FALSE;
     DWRITE_HIT_TEST_METRICS m{};
     if (FAILED(tl->HitTestPoint(lx, ly, &trailing, &in, &m))) return textOff;
-    if (inside) *inside = in != FALSE;
+    h->inside = in != FALSE;
+    h->under = textOff + m.textPosition;
     return textOff + m.textPosition + (trailing ? m.length : 0);
 }
 
-bool HitTestDoc(float px, float py, uint32_t* pos, bool* inside) {
-    if (inside) *inside = false;
+bool HitTestDocAt(float px, float py, DocHit* h) {
+    *h = DocHit();
     size_t n = g.doc.blocks.size();
-    if (!n) { *pos = 0; return false; }
+    if (!n) return false;
     float docY = py + g.scrollY;
     uint32_t i = FirstVisible(docY);
-    if (i >= n) { *pos = BlockEnd(g.doc.blocks[n - 1]); return true; }
+    if (i >= n) {
+        h->block = (int32_t)n - 1;
+        h->pos = BlockEnd(g.doc.blocks[n - 1]);
+        return true;
+    }
     const Block& b = g.doc.blocks[i];
-    if (docY < g.Y[i]) { *pos = b.textOff; return true; }
+    h->block = (int32_t)i;
+    if (docY < g.Y[i]) { h->pos = b.textOff; h->above = true; return true; }
     BlockLayout* L = EnsureLayout(i);
     float bx, bw;
     BlockBox(i, &bx, &bw);
     float ly = docY - g.Y[i];
     switch (b.kind) {
     case BK_TEXT:
-        *pos = L->text ? HitLayout(L->text, b.textOff, px - bx, ly, inside) : b.textOff;
+        h->pos = L->text ? HitLayout(L->text, b.textOff, px - bx, ly, h) : b.textOff;
         return true;
     case BK_CODE:
-        *pos = L->text ? HitLayout(L->text, b.textOff, px - bx - Metrics::kCodePad + HScrollOf(i), ly - Metrics::kCodePad, inside)
-                       : b.textOff;
+        h->pos = L->text ? HitLayout(L->text, b.textOff, px - bx - Metrics::kCodePad + HScrollOf(i), ly - Metrics::kCodePad, h)
+                         : b.textOff;
         return true;
     case BK_TABLE: {
         const Table& t = g.doc.tables[b.aux];
@@ -992,9 +1115,10 @@ bool HitTestDoc(float px, float py, uint32_t* pos, bool* inside) {
                     if (px < xx + cw || c + 1 == t.cols) {
                         const Cell& cell = g.doc.cells[t.cellOff + r * t.cols + c];
                         IDWriteTextLayout* cl = L->table->cells[r * t.cols + c];
-                        *pos = cl ? HitLayout(cl, cell.textOff, px - xx - 1 - Metrics::kCellPadX,
-                                              ly - yy - 1 - Metrics::kCellPadY, inside)
-                                  : cell.textOff;
+                        h->cell = (int32_t)(r * t.cols + c);
+                        h->pos = cl ? HitLayout(cl, cell.textOff, px - xx - 1 - Metrics::kCellPadX,
+                                                ly - yy - 1 - Metrics::kCellPadY, h)
+                                    : cell.textOff;
                         return true;
                     }
                     xx += cw;
@@ -1002,13 +1126,22 @@ bool HitTestDoc(float px, float py, uint32_t* pos, bool* inside) {
             }
             yy += rh;
         }
-        *pos = b.textOff;
+        h->pos = b.textOff;
         return true;
     }
     default:
-        *pos = (px < bx + bw * 0.5f) ? b.textOff : BlockEnd(b);
+        h->pos = (px < bx + bw * 0.5f) ? b.textOff : BlockEnd(b);
+        h->inside = px >= bx && px <= bx + bw;
         return true;
     }
+}
+
+bool HitTestDoc(float px, float py, uint32_t* pos, bool* inside) {
+    DocHit h;
+    bool ok = HitTestDocAt(px, py, &h);
+    *pos = h.pos;
+    if (inside) *inside = h.inside && h.block >= 0 && g.doc.blocks[h.block].kind != BK_HR && g.doc.blocks[h.block].kind != BK_IMAGE;
+    return ok;
 }
 
 static int LinkOfRuns(uint32_t p, uint32_t runOff, uint32_t runCount) {
@@ -1218,12 +1351,14 @@ void SelectBlockAt(uint32_t pos) {
 // visual line, Ctrl+Shift+Home/End to the ends of the document. The caret appears only once the keyboard starts a
 // selection — the mouse hides it again.
 
-// client x and document y of the caret at pos, and the height of its line
-static bool CaretGeom(uint32_t pos, float* cx, float* docY, float* h, bool relayout) {
+// client x and document y of the caret at pos, and the height of its line. block / cell: where pos is, when the caller
+// knows (an empty block or cell shares its offset with the next one); -1 = found from pos.
+bool CaretGeomAt(uint32_t pos, int32_t block, int32_t cellIdx, float* cx, float* docY, float* h, bool relayout) {
     if (g.doc.blocks.empty()) return false;
-    uint32_t bi = BlockOfPos(pos);
+    uint32_t bi = block >= 0 && (size_t)block < g.doc.blocks.size() ? (uint32_t)block : BlockOfPos(pos);
     const Block& b = g.doc.blocks[bi];
     if (BlockHidden(b)) return false;
+    if (!relayout && !g.cache[bi]) return false;  // the paint path never lays out
     BlockLayout* L = EnsureLayout(bi);
     if (relayout) RecomputeY();
     float bx, bw;
@@ -1244,7 +1379,9 @@ static bool CaretGeom(uint32_t pos, float* cx, float* docY, float* h, bool relay
             float xx = bx - HScrollOf(bi);
             for (uint32_t c = 0; c < t.cols; c++) {
                 const Cell& cell = g.doc.cells[t.cellOff + r * t.cols + c];
-                if (pos >= cell.textOff && pos <= cell.textOff + cell.textLen && L->table->cells[r * t.cols + c]) {
+                bool mine = cellIdx >= 0 ? (int32_t)(r * t.cols + c) == cellIdx
+                                         : pos >= cell.textOff && pos <= cell.textOff + cell.textLen;
+                if (mine && L->table->cells[r * t.cols + c]) {
                     tl = L->table->cells[r * t.cols + c];
                     off = cell.textOff;
                     lx = xx + 1 + Metrics::kCellPadX;
@@ -1264,17 +1401,24 @@ static bool CaretGeom(uint32_t pos, float* cx, float* docY, float* h, bool relay
     }
     FLOAT px = 0, py = 0;
     DWRITE_HIT_TEST_METRICS m{};
-    if (FAILED(tl->HitTestTextPosition(pos - off, FALSE, &px, &py, &m))) return false;
+    if (FAILED(tl->HitTestTextPosition(pos >= off ? pos - off : 0, FALSE, &px, &py, &m))) return false;
     *cx = lx + px;
     *docY = g.Y[bi] + ly + py;
     *h = m.height > 1.f ? m.height : 16.f;
     return true;
 }
 
-// where the caret stands in client DIP — automation reads it to see what the keyboard did
+static bool CaretGeom(uint32_t pos, float* cx, float* docY, float* h, bool relayout) {
+    return CaretGeomAt(pos, -1, -1, cx, docY, h, relayout);
+}
+
+// where the caret stands in client DIP — automation reads it to see what the keyboard did; in edit mode the caret
+// knows its block and cell, and stands right of trailing blanks it was typed after
 bool CaretPoint(uint32_t pos, float* x, float* y, float* h) {
     float dy;
-    if (!CaretGeom(pos, x, &dy, h, true)) return false;
+    bool edit = g.editing && pos == g.selFocus && g.caretBlock >= 0;
+    if (!CaretGeomAt(pos, edit ? g.caretBlock : -1, edit ? g.caretCell : -1, x, &dy, h, true)) return false;
+    if (edit && g.caretTrail) *x += g.caretTrail * SpaceAdvance((uint32_t)g.caretBlock);
     *y = dy - g.scrollY;
     return true;
 }
@@ -1362,7 +1506,7 @@ static uint32_t LineEdge(uint32_t pos, int dir) {
 }
 
 bool KeySelect(unsigned vk, bool ctrl, bool shift) {
-    if (!shift || g.path.empty() || g.doc.blocks.empty() || g.findOpen) return false;
+    if (!shift || g.path.empty() || g.doc.blocks.empty() || g.findOpen || g.editing) return false;
     uint32_t pos = g.selFocus;
     if (!g.caretOn && !HasSelection()) {  // start where the reader is looking, not at a document top far above
         float cx, dy, h;
@@ -1527,7 +1671,8 @@ void RevealTextPos(uint32_t pos, bool center) {
             haveX = true;
         }
     }
-    if (center || y < g.scrollY + 56.f || y > g.scrollY + ViewH() - 48.f) ScrollTo(y - ViewH() * 0.35f, false);
+    float topMargin = std::max(56.f, EditRevealTop());  // edit mode: under the bar, a strip and the find bar
+    if (center || y < g.scrollY + topMargin || y > g.scrollY + ViewH() - 48.f) ScrollTo(y - ViewH() * 0.35f, false);
     float vx, vw, cw;
     if (haveX && HScrollInfo(bi, &vx, &vw, &cw)) {
         float cur = HScrollOf(bi);

@@ -44,7 +44,16 @@ struct EditCtx {
     const wchar_t* eol;                // g.eol: L"\n", L"\r\n" or L"\r"
     ClusterFn clusters; void* clusterCtx;  // app: IDWriteTextLayout::GetClusterMetrics; tests: a grapheme-lite table
     uint64_t nowMs;
+    // Where the caret and the anchor are drawn, when the caller knows (block -1: found from the source offsets). An
+    // empty block or cell shares its text offset with the next one, so the source offset alone can be ambiguous.
+    TextPos focusPos{0, -1, -1}, anchorPos{0, -1, -1};
+    uint16_t trail = 0;                // columns of trailing blanks the caret stands in (§6.5)
 };
+// the next cluster boundary from pos in dir inside [lo, hi] (surrogate pairs whole when there is no ClusterFn)
+uint32_t ClusterStep(const EditCtx&, uint32_t pos, int dir, uint32_t lo, uint32_t hi);
+// A test / app helper for ClusterFn: surrogate pairs, combining marks, variation selectors, ZWJ sequences and
+// regional-indicator pairs stay whole (a grapheme-lite table, §6.2).
+uint32_t GraphemeLite(const std::wstring& text, uint32_t pos, int dir, void* ctx);
 struct EditResult {
     std::vector<Splice> splices;       // applied in order
     EditState after;
@@ -99,6 +108,19 @@ EditResult OpInsertHr(const EditCtx&, const EditState&);
 EditResult OpTable(const EditCtx&, const EditState&, int op /* CMD_TABLE_* − CMD_TABLE_ROW_ABOVE */);
 EditResult OpTaskToggle(const EditCtx&, const EditState&, int task);
 EditResult OpAtomSource(const EditCtx&, const EditState&, int atom, int field, std::wstring_view text);
+
+// ---- typing's check (§7.3 step 5): an ordinary character (none of the Markdown-significant ones) must render as
+// itself at the caret, and its neighbours must keep their formatting. When it does not, the glue tries the other places
+// TypeFallbacks names, in order; if none renders right, the first splice stays (typing is never blocked).
+bool NeedsTypeCheck(std::wstring_view text);
+bool TypedOk(const Doc& oldD, uint32_t t, const Doc& newD, std::wstring_view rendered);
+struct TypeCandidate { uint32_t at; std::wstring text; uint32_t caret; std::wstring rendered; };
+std::vector<TypeCandidate> TypeFallbacks(const EditCtx&, const EditState&, uint32_t s, std::wstring_view text);
+// object atoms (§6.2): ids are the image index for one in a line, 0x40000000 | block for a block of its own
+constexpr int32_t kAtomBlock = 0x40000000;
+int32_t AtomOfBlock(const Doc&, int32_t block);   // the atom id of a block atom (an HTML block's first block), -1 = none
+int32_t AtomBlockOf(const Doc&, int32_t atom);    // the block that draws an atom (inline: the block holding it)
+bool IsAtomBlock(const Doc&, int32_t block);
 
 // ---- undo (§11)
 struct EditStep { std::vector<Splice> splices; EditState before, after; EditKind kind = EK_OTHER; uint64_t t0 = 0, t1 = 0; };

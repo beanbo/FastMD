@@ -14,6 +14,9 @@ using WriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE, PMINIDUM
                                   PMINIDUMP_USER_STREAM_INFORMATION, PMINIDUMP_CALLBACK_INFORMATION);
 wchar_t g_dir[MAX_PATH] = L"";  // %LOCALAPPDATA%\FastMD\crashes\, filled before the handler can ever run
 LPTOP_LEVEL_EXCEPTION_FILTER g_prev = nullptr;
+// While the reader edits (or has edits nobody saved), a dump takes only the stacks: memory they merely point at can
+// be the text being written (EDIT-MODE.md §10.12, D22).
+std::atomic<bool> g_private{false};
 
 void Stamp(wchar_t* out, size_t n) {
     SYSTEMTIME t;
@@ -35,8 +38,8 @@ LONG WINAPI OnCrash(EXCEPTION_POINTERS* ep) {
                 if (auto write = (WriteDumpFn)GetProcAddress(dbg, "MiniDumpWriteDump")) {
                     MINIDUMP_EXCEPTION_INFORMATION mei{GetCurrentThreadId(), ep, FALSE};
                     // small dump: the stacks and enough memory around them to read a trace, no document text
-                    auto type = (MINIDUMP_TYPE)(MiniDumpWithIndirectlyReferencedMemory | MiniDumpScanMemory |
-                                                MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules);
+                    auto type = (MINIDUMP_TYPE)(MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules |
+                                                (g_private.load() ? 0 : MiniDumpWithIndirectlyReferencedMemory | MiniDumpScanMemory));
                     write(GetCurrentProcess(), GetCurrentProcessId(), f, type, ep ? &mei : nullptr, nullptr, nullptr);
                 }
             }
@@ -67,6 +70,8 @@ bool NewestDump(std::wstring& path, uint64_t& written, int* count) {
 }  // namespace
 
 // wWinMain, before anything else: one call, no library behind it
+void CrashPrivacy(bool on) { g_private.store(on); }
+
 void CrashHandlerInstall() {
     std::wstring dir = DataDir() + L"crashes\\";
     wcsncpy_s(g_dir, dir.c_str(), _TRUNCATE);

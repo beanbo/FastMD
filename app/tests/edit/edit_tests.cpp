@@ -636,6 +636,167 @@ void RunDiffCase(const Case& c) {
     }
 }
 
+// ---- operation cases (§14.1): the operations on a caret (‸) or a selection (⟦ anchor … ⟧ focus), one after the
+// other as `do:` lists them (type "…", BS, C-BS, Del, C-Del, TaskToggle(n)); each result is re-parsed and the caret
+// normalised as the glue does (§6.4), and the typing check of §7.3 step 5 picks the fallback the glue would.
+const wchar_t kSelA = 0x27E6, kSelB = 0x27E7;  // ⟦ ⟧
+bool ParseMarked(const std::wstring& m, std::wstring* src, uint32_t* anchor, uint32_t* focus) {
+    size_t c = m.find(kCaret), a = m.find(kSelA), b = m.find(kSelB);
+    if (c != std::wstring::npos && a == std::wstring::npos && b == std::wstring::npos && m.find(kCaret, c + 1) == std::wstring::npos) {
+        *src = m.substr(0, c) + m.substr(c + 1);
+        *anchor = *focus = (uint32_t)c;
+        return true;
+    }
+    if (c == std::wstring::npos && a != std::wstring::npos && b != std::wstring::npos && a < b) {
+        *src = m.substr(0, a) + m.substr(a + 1, b - a - 1) + m.substr(b + 1);
+        *anchor = (uint32_t)a;
+        *focus = (uint32_t)(b - 1);
+        return true;
+    }
+    return false;
+}
+std::wstring Marked(const std::wstring& src, uint32_t anchor, uint32_t focus) {
+    if (anchor == focus) return src.substr(0, focus) + kCaret + src.substr(focus);
+    uint32_t a = std::min(anchor, focus), b = std::max(anchor, focus);
+    return src.substr(0, a) + kSelA + src.substr(a, b - a) + kSelB + src.substr(b);
+}
+std::string Trim(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t"), b = s.find_last_not_of(" \t");
+    return a == std::string::npos ? "" : s.substr(a, b - a + 1);
+}
+std::vector<std::string> SplitOps(const std::string& s) {  // on ';' outside quotes
+    std::vector<std::string> out;
+    std::string cur;
+    bool q = false;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '\\' && q && i + 1 < s.size()) { cur += s[i]; cur += s[++i]; continue; }
+        if (s[i] == '"') q = !q;
+        if (s[i] == ';' && !q) { out.push_back(Trim(cur)); cur.clear(); continue; }
+        cur += s[i];
+    }
+    if (!Trim(cur).empty()) out.push_back(Trim(cur));
+    return out;
+}
+
+struct OpRun { std::wstring src; EditState st; std::string refused; int dir = 1; };
+
+bool DoOp(OpRun& r, const std::string& op, const std::string& what) {
+    Parsed p;
+    ParseMap(p, r.src);
+    const wchar_t* eol = r.src.find(L"\r\n") != std::wstring::npos ? L"\r\n" : L"\n";
+    EditCtx c{p.d, p.src, eol, GraphemeLite, nullptr, 0};
+    EditResult res;
+    std::wstring typed;
+    if (op.rfind("type \"", 0) == 0 && op.size() >= 7 && op.back() == '"') {
+        typed = Unescape(op.substr(6, op.size() - 7));
+        res = OpType(c, r.st, typed);
+    } else if (op == "BS" || op == "C-BS") {
+        res = OpBackspace(c, r.st, op == "C-BS");
+    } else if (op == "Del" || op == "C-Del") {
+        res = OpDelete(c, r.st, op == "C-Del");
+    } else if (op.rfind("TaskToggle(", 0) == 0) {
+        res = OpTaskToggle(c, r.st, atoi(op.c_str() + 11));
+    } else {
+        Fail("%s: unknown op \"%s\"", what.c_str(), op.c_str());
+        return false;
+    }
+    if (!res.refused.empty()) {
+        r.refused = res.refused;
+        return true;
+    }
+    const std::wstring before = r.src;
+    std::wstring s = r.src;
+    std::string why;
+    for (const Splice& sp : res.splices)
+        Check(!SpliceSplits(s, sp.at, (uint32_t)sp.removed.size()), "%s %s: a splice cuts a pair or a CRLF", what.c_str(), op.c_str());
+    if (!Check(ApplySplices(s, res.splices, false, &why), "%s %s: %s", what.c_str(), op.c_str(), why.c_str())) return false;
+    // §7.3 step 5: an ordinary character must render as itself at the caret; else the fallbacks, in order
+    if (!typed.empty() && NeedsTypeCheck(typed) && res.splices.size() == 1 && res.splices[0].removed.empty()) {
+        uint16_t tr = 0;
+        uint32_t t0 = TextOfSrc(p.d, p.src, r.st.focus, 1, &tr).t;
+        Parsed q;
+        ParseMap(q, s);
+        if (!TypedOk(p.d, t0, q.d, typed)) {
+            for (const TypeCandidate& cand : TypeFallbacks(c, r.st, res.splices[0].at, typed)) {
+                std::wstring s2 = r.src;
+                s2.insert(cand.at, cand.text);
+                Parsed q2;
+                ParseMap(q2, s2);
+                if (TypedOk(p.d, t0, q2.d, cand.rendered)) {
+                    s = s2;
+                    res.splices = {Splice{cand.at, L"", cand.text}};
+                    res.after.focus = res.after.anchor = cand.caret;
+                    break;
+                }
+            }
+        }
+    }
+    std::wstring inv = s;
+    Check(ApplySplices(inv, res.splices, true, &why) && inv == before, "%s %s: the inverse splices do not give the old source back",
+          what.c_str(), op.c_str());
+    r.src = s;
+    r.st = res.after;
+    r.dir = res.kind == EK_DEL_BACK ? -1 : 1;
+    Parsed n;
+    ParseMap(n, r.src);
+    SelfCheck(n, what + " after " + op);
+    uint16_t trail = 0;
+    TextPos t = TextOfSrc(n.d, n.src, r.st.focus, r.dir, &trail);
+    if (r.st.atom < 0 && r.st.anchor == r.st.focus) {
+        Check(CaretStop(n.d, t), "%s %s: the caret (t%u b%d) is not a stop", what.c_str(), op.c_str(), t.t, t.block);
+        if (!trail) {  // normalised as the glue does: to where typed text would go
+            uint32_t k = SrcOfText(n.d, n.src, t, MAP_CARET);
+            if (k != UINT32_MAX) r.st.focus = r.st.anchor = k;
+        }
+    }
+    return true;
+}
+
+void OpVariant(const Case& c, const std::string& what, const std::wstring& srcMarked, const std::wstring& wantMarked) {
+    OpRun r;
+    if (!ParseMarked(srcMarked, &r.src, &r.st.anchor, &r.st.focus)) {
+        Fail("%s: src needs one ‸ or one ⟦…⟧", what.c_str());
+        return;
+    }
+    for (const std::string& op : SplitOps(*c.Get("do"))) {
+        if (!DoOp(r, op, what) || !r.refused.empty()) break;
+    }
+    const std::string* state = c.Get("state");
+    if (state) {
+        for (const std::string& kv : SplitOps(*state)) {
+            if (kv.rfind("refused=", 0) == 0) Check(r.refused == kv.substr(8), "%s: refused \"%s\", want \"%s\"", what.c_str(),
+                                                   r.refused.c_str(), kv.substr(8).c_str());
+            else if (kv.rfind("atom=", 0) == 0) {
+                std::string v = kv.substr(5);
+                int32_t want = v == "none" ? -1 : v.rfind("blk", 0) == 0 ? (kAtomBlock | atoi(v.c_str() + 3)) : atoi(v.c_str() + 3);
+                Check(r.st.atom == want, "%s: atom %d, want %d (%s)", what.c_str(), r.st.atom, want, v.c_str());
+            }
+        }
+    } else {
+        Check(r.refused.empty(), "%s: refused \"%s\"", what.c_str(), r.refused.c_str());
+    }
+    std::wstring got = Marked(r.src, r.st.anchor, r.st.focus);
+    Check(got == wantMarked, "%s: the result differs\n  want: %s\n  got:  %s", what.c_str(), Esc(wantMarked, 200).c_str(),
+          Esc(got, 200).c_str());
+}
+void RunOpCase(const Case& c) {
+    const std::string* s = c.Get("src");
+    const std::string* w = c.Get("want");
+    if (!s || !w) {
+        Fail("%s:%d %s: an op case needs src, do and want", c.file.c_str(), c.line, c.name.c_str());
+        return;
+    }
+    std::wstring src = Unescape(*s), want = Unescape(*w);
+    for (int tex : TexModes(c, src)) {
+        g_texOn = tex != 0;
+        std::string what = c.file + ":" + std::to_string(c.line) + " " + c.name + (tex ? " [tex on]" : " [tex off]");
+        OpVariant(c, what, src, want);
+        if (!HasFlag(c, "nocrlf")) OpVariant(c, what + " [crlf]", ToCrlf(src), ToCrlf(want));
+        if (!HasFlag(c, "noquote")) OpVariant(c, what + " [quote]", WrapQuote(src), WrapQuote(want));
+        if (!HasFlag(c, "nolist")) OpVariant(c, what + " [list]", WrapList(src), WrapList(want));
+    }
+}
+
 void RunCaseFile(const std::wstring& path) {
     std::vector<std::string> lines;
     std::vector<Case> cases = ReadCases(path, lines);
@@ -648,6 +809,7 @@ void RunCaseFile(const std::wstring& path) {
         if (c.hasMap) RunMapCase(c, lines, changed);
         else if (op && *op == "caret") RunCaretCase(c);
         else if (c.Get("diff")) RunDiffCase(c);
+        else if (op) RunOpCase(c);
         else Fail("%s:%d %s: no map, do or diff", c.file.c_str(), c.line, c.name.c_str());
     }
     if (changed) {
@@ -732,6 +894,41 @@ void UnitTests() {
     for (auto& m : e.srcMap)
         if (m.first <= okT) exact = m.second + (okT - m.first) == es.find(L"ok");
     Check(okT != UINT32_MAX && exact, "srcMap maps the text after an emoji exactly");
+
+    // ---- the chords of edit mode (§2.7, §12.5): Ctrl+Alt is AltGr text, never a chord (T21)
+    int altgr = 0;
+    for (unsigned vk = 0; vk < 256; vk++)
+        for (int sh = 0; sh < 2; sh++) altgr += EditChord(vk, true, sh != 0, true) != 0;
+    Check(altgr == 0, "EditChord claims %d Ctrl+Alt chords", altgr);
+    struct Ch { unsigned vk; bool ctrl, shift; unsigned want; } chords[] = {
+        {'Z', 1, 0, 144}, {'Y', 1, 0, 145}, {'Z', 1, 1, 145}, {'S', 1, 0, 148}, {'B', 1, 0, 150}, {'I', 1, 0, 151},
+        {'X', 1, 1, 152}, {VK_OEM_3, 1, 0, 153}, {'K', 1, 0, 154}, {'1', 1, 0, 157}, {'6', 1, 0, 162}, {'7', 1, 1, 164},
+        {'8', 1, 1, 163}, {'9', 1, 1, 165}, {'Q', 1, 1, 166}, {'K', 1, 1, 167}, {'T', 1, 0, 169}, {'M', 1, 0, 170},
+        {'M', 1, 1, 171}, {VK_RETURN, 1, 0, 175}, {'A', 1, 0, 101}, {'C', 1, 0, 100}, {VK_INSERT, 1, 0, 100},
+        {'C', 1, 1, 137}, {'X', 1, 0, 146}, {'V', 1, 0, 147}, {VK_DELETE, 0, 1, 146}, {VK_INSERT, 0, 1, 147},
+        {VK_F2, 0, 0, 141}, {VK_F5, 0, 0, 103}, {'E', 1, 0, 104}, {'R', 1, 0, 103},
+        {'A', 0, 0, 0}, {VK_BACK, 0, 0, 0}, {VK_DELETE, 0, 0, 0}, {VK_RETURN, 0, 0, 0}, {'7', 1, 0, 0}, {'Y', 1, 1, 0},
+    };
+    for (auto& c : chords)
+        Check(EditChord(c.vk, c.ctrl, c.shift, false) == c.want, "EditChord(%#x%s%s) = %u, want %u", c.vk, c.ctrl ? " ctrl" : "",
+              c.shift ? " shift" : "", EditChord(c.vk, c.ctrl, c.shift, false), c.want);
+
+    // ---- clusters (§6.2): what one Backspace / arrow takes whole
+    struct Cl { const wchar_t* text; uint32_t pos; int dir; uint32_t want; } clusters[] = {
+        {L"aéx", 1, 1, 3},                          // e + combining acute
+        {L"aéx", 3, -1, 1},
+        {L"a\U0001F600b", 1, 1, 3},                       // a surrogate pair
+        {L"a\U0001F600b", 3, -1, 1},
+        {L"\U0001F1F7\U0001F1FAx", 0, 1, 4},              // a flag: two regional indicators
+        {L"\U0001F1F7\U0001F1FAx", 4, -1, 0},
+        {L"\U0001F468‍\U0001F469‍\U0001F467!", 0, 1, 8},  // a ZWJ family
+        {L"\U0001F468‍\U0001F469‍\U0001F467!", 8, -1, 0},
+        {L"\U0001F44D\U0001F3FDok", 0, 1, 4},             // a skin tone
+        {L"x❤️", 3, -1, 1},                     // a variation selector
+    };
+    for (auto& c : clusters)
+        Check(GraphemeLite(c.text, c.pos, c.dir, nullptr) == c.want, "GraphemeLite(\"%s\", %u, %d) = %u, want %u",
+              Esc(c.text).c_str(), c.pos, c.dir, GraphemeLite(c.text, c.pos, c.dir, nullptr), c.want);
 }
 
 // ------------------------------------------------------------------------------------------------ undo (§11)

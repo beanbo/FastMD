@@ -84,8 +84,8 @@ int TocCurrent() {
 
 void DrawToc() {
     // icons (Segoe Fluent Icons) stay out of the first frame: the font is loaded right after it (AfterFirstFrame repaints)
-    if (!Visible()) {
-        if (TocAvailable() && !g.firstFrame) DrawButton();
+    if (!Visible()) {  // edit mode's bar has its own outline button; a strip covers this corner (and takes the click)
+        if (TocAvailable() && !g.firstFrame && g.barT <= 0 && g.stripH <= 0) DrawButton();
         return;
     }
     TocSync();
@@ -168,7 +168,7 @@ bool TocHit(float x, float y, int* item) {
 }
 
 bool TocButtonRect(float* l, float* t, float* r, float* b) {
-    if (Visible() || !TocAvailable() || g.firstFrame) return false;
+    if (Visible() || !TocAvailable() || g.firstFrame || g.barT > 0) return false;
     *l = kBtnX;
     *t = kBtnY;
     *r = kBtnX + kBtn;
@@ -177,7 +177,7 @@ bool TocButtonRect(float* l, float* t, float* r, float* b) {
 }
 
 bool TocButtonHit(float x, float y) {
-    return !Visible() && TocAvailable() && x >= kBtnX && x < kBtnX + kBtn && y >= kBtnY && y < kBtnY + kBtn;
+    return !Visible() && TocAvailable() && g.barT <= 0 && x >= kBtnX && x < kBtnX + kBtn && y >= kBtnY && y < kBtnY + kBtn;
 }
 
 void TocClick(int item) {

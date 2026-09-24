@@ -889,3 +889,674 @@ void UndoStack::Clear() {
     bytes_ = 0;
     broken_ = true;
 }
+
+// ------------------------------------------------------------------------------------------------ keyboard (§2.7, §12.5)
+// The chords of edit mode, as command ids (app.h's Cmd; the numbers are frozen, §13.1). Ctrl+Alt is AltGr on many
+// layouts - Polish ż, German € - so it is never a chord here: that text reaches WM_CHAR.
+unsigned EditChord(unsigned vk, bool ctrl, bool shift, bool alt) {
+    enum : unsigned { C_COPY = 100, C_SELECT_ALL = 101, C_RELOAD = 103, C_EDIT = 104, C_COPY_MD = 137, C_TOGGLE = 141,
+                      C_UNDO = 144, C_REDO = 145, C_CUT = 146, C_PASTE = 147, C_SAVE = 148, C_BOLD = 150, C_ITALIC = 151,
+                      C_STRIKE = 152, C_CODE = 153, C_LINK = 154, C_H1 = 157, C_BULLET = 163, C_NUMBER = 164, C_TASK = 165,
+                      C_QUOTE = 166, C_CODEBLOCK = 167, C_TABLE = 169, C_FORMULA = 170, C_FORMULA_BLOCK = 171,
+                      C_NEW_PARAGRAPH = 175 };
+    if (alt) return 0;
+    if (!ctrl) {
+        if (vk == VK_F2 && !shift) return C_TOGGLE;
+        if (vk == VK_F5 && !shift) return C_RELOAD;
+        if (shift && vk == VK_DELETE) return C_CUT;
+        if (shift && vk == VK_INSERT) return C_PASTE;
+        return 0;
+    }
+    if (vk >= '1' && vk <= '6' && !shift) return C_H1 + (vk - '1');
+    switch (vk) {
+    case 'Z': return shift ? C_REDO : C_UNDO;
+    case 'Y': return shift ? 0 : C_REDO;
+    case 'S': return shift ? 0 : C_SAVE;
+    case 'A': return shift ? 0 : C_SELECT_ALL;
+    case 'C': return shift ? C_COPY_MD : C_COPY;
+    case VK_INSERT: return shift ? 0 : C_COPY;
+    case 'X': return shift ? C_STRIKE : C_CUT;
+    case 'V': return shift ? 0 : C_PASTE;
+    case 'B': return shift ? 0 : C_BOLD;
+    case 'I': return shift ? 0 : C_ITALIC;
+    case VK_OEM_3: return shift ? 0 : C_CODE;
+    case 'K': return shift ? C_CODEBLOCK : C_LINK;
+    case '7': return shift ? C_NUMBER : 0;
+    case '8': return shift ? C_BULLET : 0;
+    case '9': return shift ? C_TASK : 0;
+    case 'Q': return shift ? C_QUOTE : 0;
+    case 'T': return shift ? 0 : C_TABLE;
+    case 'M': return shift ? C_FORMULA_BLOCK : C_FORMULA;
+    case VK_RETURN: return shift ? 0 : C_NEW_PARAGRAPH;
+    case 'E': return shift ? 0 : C_EDIT;
+    case 'R': return shift ? 0 : C_RELOAD;
+    }
+    return 0;
+}
+
+// ------------------------------------------------------------------------------------------------ clusters (§6.2)
+namespace {
+uint32_t CpAt(const std::wstring& t, uint32_t i, uint32_t* len) {
+    if (i + 1 < t.size() && HighSur(t[i]) && LowSur(t[i + 1])) {
+        *len = 2;
+        return 0x10000 + (((uint32_t)t[i] - 0xD800) << 10) + ((uint32_t)t[i + 1] - 0xDC00);
+    }
+    *len = 1;
+    return t[i];
+}
+// what joins the cluster before it: combining marks, variation selectors, emoji skin tones and tag characters
+bool Extends(uint32_t c) {
+    return (c >= 0x0300 && c <= 0x036F) || (c >= 0x1AB0 && c <= 0x1AFF) || (c >= 0x20D0 && c <= 0x20FF) ||
+           (c >= 0xFE20 && c <= 0xFE2F) || (c >= 0xFE00 && c <= 0xFE0F) || (c >= 0x1F3FB && c <= 0x1F3FF) ||
+           (c >= 0xE0020 && c <= 0xE007F) || (c >= 0xE0100 && c <= 0xE01EF);
+}
+bool Regional(uint32_t c) { return c >= 0x1F1E6 && c <= 0x1F1FF; }
+uint32_t ClusterEnd(const std::wstring& t, uint32_t pos) {
+    uint32_t n = (uint32_t)t.size(), len;
+    if (pos >= n) return n;
+    uint32_t cp = CpAt(t, pos, &len), p = pos + len;
+    if (Regional(cp) && p < n) {  // a flag is two regional indicators
+        uint32_t l2;
+        if (Regional(CpAt(t, p, &l2))) p += l2;
+    }
+    while (p < n) {
+        uint32_t l2, c2 = CpAt(t, p, &l2);
+        if (Extends(c2)) { p += l2; continue; }
+        if (c2 == 0x200D) {  // a zero-width joiner takes the next character with it
+            p += l2;
+            if (p < n) { CpAt(t, p, &l2); p += l2; }
+            continue;
+        }
+        break;
+    }
+    return p;
+}
+}  // namespace
+
+uint32_t GraphemeLite(const std::wstring& t, uint32_t pos, int dir, void*) {
+    uint32_t n = (uint32_t)t.size();
+    if (dir > 0) return ClusterEnd(t, std::min(pos, n));
+    if (pos == 0) return 0;
+    // Backwards the clusters are found from a place that surely starts one - a character below U+0300 that no joiner
+    // precedes - and walked forwards (at most 128 units back; a longer run of joined characters is stepped by pairs).
+    uint32_t s0 = pos - 1;
+    for (uint32_t k = 0; s0 > 0 && k < 128; k++, s0--)
+        if (t[s0] < 0x300 && t[s0 - 1] != 0x200D) break;
+    uint32_t last = s0, p = s0;
+    while (p < pos) {
+        last = p;
+        p = ClusterEnd(t, p);
+    }
+    return last;
+}
+
+uint32_t ClusterStep(const EditCtx& c, uint32_t pos, int dir, uint32_t lo, uint32_t hi) {
+    uint32_t r = c.clusters ? c.clusters(c.doc.text, pos, dir, c.clusterCtx) : GraphemeLite(c.doc.text, pos, dir, nullptr);
+    if (dir > 0 && r <= pos) r = pos + 1;
+    if (dir < 0 && r >= pos) r = pos ? pos - 1 : 0;
+    return std::clamp(r, lo, hi);
+}
+
+// ------------------------------------------------------------------------------------------------ atoms (§6.2)
+bool IsAtomBlock(const Doc& d, int32_t b) {
+    return ValidBlock(d, b) && AtomBlock(d.blockSrc[b]) && !(d.blockSrc[b].flags & BS_SYNTH);
+}
+int32_t AtomOfBlock(const Doc& d, int32_t b) {
+    if (!IsAtomBlock(d, b)) return -1;
+    const BlockSrc& bs = d.blockSrc[b];
+    return kAtomBlock | ((bs.flags & BS_RAW) && bs.rawId >= 0 ? bs.rawId : b);
+}
+int32_t AtomBlockOf(const Doc& d, int32_t atom) {
+    if (atom < 0) return -1;
+    if (atom & kAtomBlock) {
+        int32_t b = atom & ~kAtomBlock;
+        return (size_t)b < d.blocks.size() ? b : -1;
+    }
+    for (uint32_t i = 0; i < d.blocks.size(); i++) {  // the block (or table) that holds the picture in its line
+        const Block& b = d.blocks[i];
+        auto has = [&](uint32_t off, uint32_t n) {
+            for (uint32_t k = 0; k < n && off + k < d.runs.size(); k++)
+                if ((d.runs[off + k].flags & F_IMAGE) && d.runs[off + k].image == (uint32_t)atom) return true;
+            return false;
+        };
+        if (has(b.runOff, b.runCount)) return (int32_t)i;
+        if (b.kind == BK_TABLE && b.aux < d.tables.size()) {
+            const Table& tb = d.tables[b.aux];
+            for (uint32_t k = 0; k < tb.rows * tb.cols; k++)
+                if (has(d.cells[tb.cellOff + k].runOff, d.cells[tb.cellOff + k].runCount)) return (int32_t)i;
+        }
+    }
+    return -1;
+}
+
+// ------------------------------------------------------------------------------------------------ typing (§7.3)
+namespace {
+EditResult Nothing(const EditState& st, EditKind k) {
+    EditResult r;
+    r.after = st;
+    r.kind = k;
+    return r;
+}
+EditResult Refuse(const EditState& st, const char* why) {
+    EditResult r = Nothing(st, EK_OTHER);
+    r.refused = why;
+    return r;
+}
+TextPos FocusOf(const EditCtx& c, const EditState& st, uint16_t* trail) {
+    if (c.focusPos.block >= 0) {
+        *trail = c.trail;
+        return c.focusPos;
+    }
+    return TextOfSrc(c.doc, c.src, st.focus, 1, trail);
+}
+TextPos AnchorOf(const EditCtx& c, const EditState& st) {
+    if (c.anchorPos.block >= 0) return c.anchorPos;
+    uint16_t tr = 0;
+    return TextOfSrc(c.doc, c.src, st.anchor, 1, &tr);
+}
+bool LineEndAt(const std::wstring& src, uint32_t s) { return s >= src.size() || EolChar(src[s]); }
+// a run of blanks from s up to a line end (or, in a table, up to a cell's pipe): trailing blanks (§6.5)
+bool TrailingRun(const std::wstring& src, uint32_t s, bool cell) {
+    uint32_t n = (uint32_t)src.size(), p = s;
+    if (p >= n || !Blank(src[p])) return false;
+    while (p < n && Blank(src[p])) p++;
+    return p >= n || EolChar(src[p]) || (cell && src[p] == L'|');
+}
+bool WordChar(wchar_t c) {
+    WORD t = 0;
+    GetStringTypeW(CT_CTYPE1, &c, 1, &t);
+    return (t & (C1_ALPHA | C1_DIGIT)) || c == L'_' || HighSur(c) || LowSur(c);
+}
+bool SpaceChar(wchar_t c) { return c == L' ' || c == L'\t' || c == L'\n' || c == 0xA0 || c == 0x3000; }
+// Windows' word rules: back over blanks, then over a word or a run of punctuation (Ctrl+Backspace, Ctrl+←)
+uint32_t WordBack(const std::wstring& t, uint32_t p, uint32_t lo) {
+    while (p > lo && SpaceChar(t[p - 1])) p--;
+    if (p > lo && WordChar(t[p - 1])) while (p > lo && WordChar(t[p - 1])) p--;
+    else while (p > lo && !WordChar(t[p - 1]) && !SpaceChar(t[p - 1])) p--;
+    return p;
+}
+// forwards over a word or a run of punctuation, then over the blanks after it (Ctrl+Delete, Ctrl+→)
+uint32_t WordFwd(const std::wstring& t, uint32_t p, uint32_t hi) {
+    if (p < hi && WordChar(t[p])) while (p < hi && WordChar(t[p])) p++;
+    else while (p < hi && !WordChar(t[p]) && !SpaceChar(t[p])) p++;
+    while (p < hi && SpaceChar(t[p])) p++;
+    return p;
+}
+// the segment that covers text offset t (t inside it or at its start)
+const SrcSeg* SegCovering(SegSpan ss, uint32_t t) {
+    if (ss.b == ss.e) return nullptr;
+    const SrcSeg* it = std::upper_bound(ss.b, ss.e, t, [](uint32_t v, const SrcSeg& g) { return v < g.t; });
+    if (it == ss.b) return nullptr;
+    --it;
+    return t < it->t + it->tLen ? it : nullptr;
+}
+const SrcSeg* SegEndingAt(SegSpan ss, uint32_t t) {
+    const SrcSeg* g = t ? SegCovering(ss, t - 1) : nullptr;
+    return g && g->t + g->tLen == t ? g : nullptr;
+}
+const SrcSeg* SegStartingAt(SegSpan ss, uint32_t t) {
+    const SrcSeg* g = SegCovering(ss, t);
+    return g && g->t == t ? g : nullptr;
+}
+// a soft break (or the blank that joins the lines of a code span): an atom drawn as one blank over a line end
+bool SoftBreak(const Doc& d, const std::wstring& src, const SrcSeg* g) {
+    if (!g || g->kind != SEG_TEXTATOM || g->tLen != 1 || d.text[g->t] != L' ') return false;
+    for (uint32_t k = g->s; k < g->s + g->sLen && k < src.size(); k++)
+        if (EolChar(src[k])) return true;
+    return false;
+}
+// the text the typed characters show as, and the ones that are Markdown and render as something else
+bool Significant(wchar_t c) { return c && wcschr(L"\\`*_~$[]()!<>#|=+-:&", c) != nullptr; }
+
+// the formatting of the character at text offset t (0 = none, or outside any run)
+uint16_t FlagsAt(const Doc& d, uint32_t t) {
+    const std::vector<Block>& bl = d.blocks;
+    auto it = std::upper_bound(bl.begin(), bl.end(), t, [](uint32_t v, const Block& b) { return v < b.textOff; });
+    if (it == bl.begin()) return 0;
+    const Block& b = *(it - 1);
+    auto in = [&](uint32_t off, uint32_t n) -> int {
+        for (uint32_t k = 0; k < n && off + k < d.runs.size(); k++) {
+            const Run& r = d.runs[off + k];
+            if (t >= r.start && t < r.start + r.len) return r.flags;
+        }
+        return -1;
+    };
+    int f = in(b.runOff, b.runCount);
+    if (f < 0 && b.kind == BK_TABLE && b.aux < d.tables.size()) {
+        const Table& tb = d.tables[b.aux];
+        for (uint32_t k = 0; k < tb.rows * tb.cols && f < 0; k++) {
+            const Cell& c = d.cells[tb.cellOff + k];
+            if (t >= c.textOff && t < c.textOff + c.textLen) f = in(c.runOff, c.runCount);
+        }
+    }
+    return f < 0 ? 0 : (uint16_t)f;
+}
+
+// the block before / after b in the source (footnote definitions stand where they are written)
+int32_t PrevInSource(const Doc& d, int32_t b) {
+    const BlockSrc& bs = d.blockSrc[b];
+    int32_t best = -1;
+    for (uint32_t k : d.blockOrder) {
+        if (d.blockSrc[k].line >= bs.line) break;
+        best = (int32_t)k;
+    }
+    if (best >= 0 && (d.blockSrc[best].flags & BS_RAW) && d.blockSrc[best].rawId >= 0) best = d.blockSrc[best].rawId;
+    return best;
+}
+int32_t NextInSource(const Doc& d, int32_t b) {
+    const BlockSrc& bs = d.blockSrc[b];
+    for (uint32_t k : d.blockOrder)
+        if (d.blockSrc[k].line > bs.outerEnd) return (int32_t)k;
+    return -1;
+}
+// the picture a SEG_OBJATOM stands for
+int32_t ImageOfSeg(const Doc& d, int32_t block, const SrcSeg& g) {
+    const Block& b = d.blocks[block];
+    auto find = [&](uint32_t off, uint32_t n) -> int32_t {
+        for (uint32_t k = 0; k < n && off + k < d.runs.size(); k++) {
+            const Run& r = d.runs[off + k];
+            if ((r.flags & F_IMAGE) && r.start == g.t) return (int32_t)r.image;
+        }
+        return -1;
+    };
+    int32_t im = find(b.runOff, b.runCount);
+    if (im < 0 && b.kind == BK_TABLE && b.aux < d.tables.size()) {
+        const Table& tb = d.tables[b.aux];
+        for (uint32_t k = 0; k < tb.rows * tb.cols && im < 0; k++)
+            im = find(d.cells[tb.cellOff + k].runOff, d.cells[tb.cellOff + k].runCount);
+    }
+    return im;
+}
+// the source of the end of text offset t: before the closers of the spans ending there
+uint32_t InnerEnd(const Doc& d, const std::wstring& src, const TextPos& p, TRange r) {
+    SegSpan ss = SegsIn(d, p.block, r);
+    if (const SrcSeg* g = SegCovering(ss, p.t); g && g->kind == SEG_PLAIN && g->t < p.t) return g->s + (p.t - g->t);
+    if (const SrcSeg* L = SegEndingAt(ss, p.t); L && L->kind != SEG_SYNTH) return L->s + L->sLen;
+    if (const SrcSeg* R = SegStartingAt(ss, p.t)) return R->s;
+    return InsertionPoint(d, src, p);
+}
+// a line that holds nothing but blanks and quote markers
+bool BlankLine(const std::wstring& src, uint32_t ls, uint32_t le) {
+    for (uint32_t k = ls; k < le; k++)
+        if (!Blank(src[k]) && src[k] != L'>') return false;
+    return true;
+}
+uint32_t SkipEol(const std::wstring& src, uint32_t s) {
+    if (s < src.size() && src[s] == L'\r') s++;
+    if (s < src.size() && src[s] == L'\n') s++;
+    return s;
+}
+
+// A deletion of [s0, s1) (the text [t0, t1) of one block or cell). A span it empties loses its delimiters with it
+// (`****`, `[]()`, a code span's backticks, §7.7); a setext heading it empties becomes an empty ATX heading of its
+// level, never a lone underline, which is a rule (F17).
+EditResult Deletion(const EditCtx& c, const EditState& st, const TextPos& p, TRange rg, uint32_t t0, uint32_t t1,
+                    uint32_t s0, uint32_t s1, EditKind kind) {
+    const Doc& d = c.doc;
+    const std::wstring& src = c.src;
+    EditResult r = Nothing(st, kind);
+    const BlockSrc& bs = d.blockSrc[p.block];
+    if (p.cell < 0 && (bs.flags & BS_SETEXT) && t0 <= rg.beg && t1 >= rg.end && bs.outerEnd > bs.beg) {
+        std::wstring hashes(std::max<uint8_t>(1, d.blocks[p.block].heading), L'#');
+        r.splices.push_back(Splice{bs.beg, src.substr(bs.beg, bs.outerEnd - bs.beg), hashes});
+        r.after.focus = r.after.anchor = bs.beg + (uint32_t)hashes.size();
+        return r;
+    }
+    uint32_t a = s0, b = s1;
+    for (bool grew = true; grew;) {
+        grew = false;
+        ForSpans(d, p, rg, [&](const SpanSrc& sp) {
+            if ((sp.flags & SF_UNCLOSED) || sp.tBeg < t0 || sp.tEnd > t1) return;
+            if (sp.openEnd >= a && sp.closeBeg <= b && (sp.openBeg < a || sp.closeEnd > b)) {
+                a = std::min(a, sp.openBeg);
+                b = std::max(b, sp.closeEnd);
+                grew = true;
+            }
+        });
+    }
+    if (b <= a) return r;
+    // blanks the deletion leaves at the start of the content would be stripped there anyway (§7.9): they go with it
+    if (t0 <= rg.beg && d.blocks[p.block].kind != BK_CODE) {
+        uint32_t start = SrcOfText(d, src, TextPos{rg.beg, p.block, p.cell}, MAP_OUTER_START);
+        if (a <= start)
+            while (b < src.size() && Blank(src[b])) b++;
+    }
+    r.splices.push_back(Splice{a, src.substr(a, b - a), L""});
+    r.after.focus = r.after.anchor = a;
+    return r;
+}
+
+// The selection's cut inside one block or cell (§7.9, the part Phase 2a needs): the text between its ends goes, and a
+// span it cuts in two gets its delimiter written back at the cut - a closer of a span that began before it, an opener
+// of one that goes on after it - so formatting never leaks. A selection over several blocks is Phase 2b's.
+struct SelCut { bool ok = false; uint32_t a = 0, b = 0; std::wstring closers, openers; TextPos A, B; TRange rg{}; };
+SelCut CutSelection(const EditCtx& c, const EditState& st) {
+    SelCut cut;
+    const Doc& d = c.doc;
+    const std::wstring& src = c.src;
+    uint16_t tr = 0;
+    TextPos f = FocusOf(c, st, &tr), an = AnchorOf(c, st);
+    if (f.block != an.block || f.cell != an.cell || !ValidBlock(d, f.block)) return cut;
+    const BlockSrc& bs = d.blockSrc[f.block];
+    if (AtomBlock(bs) || (bs.flags & BS_SYNTH)) return cut;
+    cut.A = f.t <= an.t ? f : an;
+    cut.B = f.t <= an.t ? an : f;
+    if (!RangeOf(d, cut.A, &cut.rg)) return cut;
+    cut.a = SrcOfText(d, src, cut.A, MAP_INNER_START);
+    cut.b = InnerEnd(d, src, cut.B, cut.rg);
+    if (cut.a == UINT32_MAX || cut.b == UINT32_MAX || cut.a > cut.b || cut.b > src.size()) return cut;
+    std::vector<std::pair<uint32_t, std::wstring>> closers;
+    bool torn = false;
+    ForSpans(d, cut.A, cut.rg, [&](const SpanSrc& sp) {
+        bool unclosed = (sp.flags & SF_UNCLOSED) != 0;
+        auto straddles = [&](uint32_t x, uint32_t y) { return (x < cut.a && y > cut.a) || (x < cut.b && y > cut.b); };
+        if (straddles(sp.openBeg, sp.openEnd) || (!unclosed && straddles(sp.closeBeg, sp.closeEnd))) torn = true;
+        bool oIn = sp.openEnd > sp.openBeg && sp.openBeg >= cut.a && sp.openEnd <= cut.b;
+        bool cIn = !unclosed && sp.closeEnd > sp.closeBeg && sp.closeBeg >= cut.a && sp.closeEnd <= cut.b;
+        if (oIn && !cIn) cut.openers += src.substr(sp.openBeg, sp.openEnd - sp.openBeg);
+        if (cIn && !oIn) closers.push_back({sp.closeBeg, src.substr(sp.closeBeg, sp.closeEnd - sp.closeBeg)});
+    });
+    if (torn) return cut;
+    std::sort(closers.begin(), closers.end(), [](const auto& x, const auto& y) { return x.first < y.first; });
+    for (auto& k : closers) cut.closers += k.second;
+    cut.ok = true;
+    return cut;
+}
+}  // namespace
+
+bool NeedsTypeCheck(std::wstring_view text) {
+    for (wchar_t ch : text)
+        if (Significant(ch)) return false;
+    return !text.empty();
+}
+
+bool TypedOk(const Doc& a, uint32_t t, const Doc& b, std::wstring_view rendered) {
+    size_t n = rendered.size();
+    if (t > a.text.size() || b.text.size() != a.text.size() + n) return false;
+    if (a.text.compare(0, t, b.text, 0, t) != 0 || b.text.compare(t, n, rendered.data(), n) != 0 ||
+        a.text.compare(t, std::wstring::npos, b.text, t + n, std::wstring::npos) != 0)
+        return false;
+    if (t > 0 && FlagsAt(a, t - 1) != FlagsAt(b, t - 1)) return false;
+    if (t < a.text.size() && FlagsAt(a, t) != FlagsAt(b, (uint32_t)(t + n))) return false;
+    return true;
+}
+
+std::vector<TypeCandidate> TypeFallbacks(const EditCtx& c, const EditState& st, uint32_t s, std::wstring_view text) {
+    std::vector<TypeCandidate> out;
+    uint16_t tr = 0;
+    TextPos p = FocusOf(c, st, &tr);
+    TRange rg;
+    if (!ValidBlock(c.doc, p.block) || !RangeOf(c.doc, p, &rg)) return out;
+    const std::wstring t(text);
+    const uint32_t n = (uint32_t)t.size();
+    // past the closers that begin at s, one after the other (`**API‸**s` + `.` → `**API**.s`) ...
+    for (uint32_t at = s, more = 1; more;) {
+        more = 0;
+        ForSpans(c.doc, p, rg, [&](const SpanSrc& sp) {
+            if (!more && !(sp.flags & SF_UNCLOSED) && sp.closeBeg == at && sp.closeEnd > at) { at = sp.closeEnd; more = 1; }
+        });
+        if (more) out.push_back(TypeCandidate{at, t, at + n, t});
+    }
+    // ... before the openers that end at s
+    for (uint32_t at = s, more = 1; more;) {
+        more = 0;
+        ForSpans(c.doc, p, rg, [&](const SpanSrc& sp) {
+            if (!more && sp.openEnd == at && sp.openBeg < at) { at = sp.openBeg; more = 1; }
+        });
+        if (more) out.push_back(TypeCandidate{at, t, at + n, t});
+    }
+    // beside a formula's dollar: a separating blank (`the $E$‸ is` + `x` → `the $E$ x is`, F9-4)
+    if (s > 0 && c.src[s - 1] == L'$') out.push_back(TypeCandidate{s, L" " + t, s + 1 + n, L" " + t});
+    if (s < c.src.size() && c.src[s] == L'$') out.push_back(TypeCandidate{s, t + L" ", s + n, t + L" "});
+    return out;
+}
+
+EditResult OpType(const EditCtx& c, const EditState& st, std::wstring_view text) {
+    EditResult r = Nothing(st, EK_TYPE);
+    if (text.empty()) return r;
+    if (st.atom >= 0) return Refuse(st, "atom");  // typing never goes into the text next to a selected atom (§2.10)
+    if (st.anchor != st.focus) return OpReplaceSelection(c, st, text);
+    const Doc& d = c.doc;
+    const std::wstring& src = c.src;
+    uint16_t trail = 0;
+    TextPos p = FocusOf(c, st, &trail);
+    if (!ValidBlock(d, p.block)) return Refuse(st, "nowhere");
+    const BlockSrc& bs = d.blockSrc[p.block];
+    if (bs.flags & (BS_SYNTH | BS_OBJECT | BS_RAW)) return Refuse(st, "atom");
+    TRange rg;
+    if (!RangeOf(d, p, &rg)) return Refuse(st, "nowhere");
+    const Table* tb = TableOf(d, p.block);
+    if (tb && tb->cellOff + (uint32_t)p.cell < d.cellSrc.size() && d.cellSrc[tb->cellOff + p.cell].missing)
+        return Refuse(st, "missing cell");  // a short row is completed when typed into (§7.10, Phase 2b)
+    const bool code = d.blocks[p.block].kind == BK_CODE;
+    uint32_t s = trail ? st.focus : SrcOfText(d, src, p, MAP_CARET);
+    if (s == UINT32_MAX || s > src.size()) return Refuse(st, "nowhere");
+    if (!code && !trail && std::all_of(text.begin(), text.end(), Blank)) {
+        // A blank where it would be stripped (or four of them would make indented code) is not written (§6.5); at a
+        // soft break the break already shows as that blank: at its left edge the caret goes over it (§6.6).
+        if (p.t == rg.beg) return r;
+        SegSpan ss = SegsIn(d, p.block, rg);
+        if (SoftBreak(d, src, SegEndingAt(ss, p.t))) return r;
+        if (const SrcSeg* R = SegStartingAt(ss, p.t); SoftBreak(d, src, R)) {
+            r.after.focus = r.after.anchor = R->s + R->sLen;
+            r.kind = EK_OTHER;
+            return r;
+        }
+    }
+    std::wstring ins(text), pre, post;
+    if (!code && text == L"\\" && LineEndAt(src, s)) ins = L"\\\\";  // one there would be a hard break
+    if (tb) {  // a pipe would end the cell
+        std::wstring e;
+        for (wchar_t ch : ins) {
+            if (ch == L'|') e += L'\\';
+            e += ch;
+        }
+        ins = e;
+    }
+    if (rg.beg == rg.end) {  // the first character of an empty heading, item, footnote, cell or fence (§6.3.1)
+        if (!tb && (bs.flags & (BS_ATX | BS_EMPTYITEM)) && (s == 0 || !Blank(src[s - 1]))) pre = L" ";
+        if (!tb && (bs.flags & BS_ATX) && s < src.size() && !Blank(src[s]) && !EolChar(src[s])) post = L" ";
+        if (!tb && (bs.flags & BS_NOCONTENT)) pre = std::wstring(LineEol(src, s, c.eol)) + ContPrefix(d, src, p.block);
+        if (tb && s < src.size() && src[s] == L'|') post = L" ";
+    }
+    r.splices.push_back(Splice{s, L"", pre + ins + post});
+    r.after.focus = r.after.anchor = s + (uint32_t)(pre.size() + ins.size());
+    return r;
+}
+
+// ------------------------------------------------------------------------------------------------ deleting (§7.7)
+namespace {
+// The second Backspace or Delete on a selected object atom (§2.10): one in a line goes with its whole source (`![…](…)`,
+// `$…$`, `<img …>`); a block goes with its lines and one blank line beside it.
+EditResult DeleteAtom(const EditCtx& c, const EditState& st) {
+    const Doc& d = c.doc;
+    const std::wstring& src = c.src;
+    EditResult r = Nothing(st, EK_OTHER);
+    r.after.atom = -1;
+    uint32_t a = UINT32_MAX, e = UINT32_MAX;
+    if (st.atom & kAtomBlock) {
+        int32_t b = st.atom & ~kAtomBlock;
+        if (!ValidBlock(d, b)) return r;
+        const BlockSrc& bs = d.blockSrc[b];
+        a = bs.line;
+        e = SkipEol(src, bs.outerEnd);
+        uint32_t le = LineEndOf(src, e);
+        if (e < src.size() && e < le && BlankLine(src, e, le)) e = SkipEol(src, le);
+        else if (e < src.size() && e == le) e = SkipEol(src, le);  // an empty line after it
+        else if (a > 0) {  // the blank line before it, when none follows
+            uint32_t pe = a;
+            if (pe > 0 && src[pe - 1] == L'\n') pe--;
+            if (pe > 0 && src[pe - 1] == L'\r') pe--;
+            uint32_t ps = LineStartOf(src, pe);
+            if (pe < a && BlankLine(src, ps, pe)) a = ps;
+        }
+    } else if ((size_t)st.atom < d.images.size()) {
+        const Image& im = d.images[st.atom];
+        a = im.outerBeg;
+        e = im.outerEnd;
+    }
+    if (a == UINT32_MAX || e == UINT32_MAX || e < a || e > src.size()) return Refuse(st, "atom");
+    r.splices.push_back(Splice{a, src.substr(a, e - a), L""});
+    r.after.focus = r.after.anchor = a;
+    return r;
+}
+}  // namespace
+
+EditResult OpBackspace(const EditCtx& c, const EditState& st, bool word) {
+    if (st.atom >= 0) return DeleteAtom(c, st);
+    if (st.anchor != st.focus) return OpDeleteSelection(c, st);
+    const Doc& d = c.doc;
+    const std::wstring& src = c.src;
+    EditResult r = Nothing(st, EK_DEL_BACK);
+    uint16_t trail = 0;
+    TextPos p = FocusOf(c, st, &trail);
+    if (!ValidBlock(d, p.block)) return r;
+    const BlockSrc& bs = d.blockSrc[p.block];
+    if (AtomBlock(bs) || (bs.flags & BS_SYNTH)) return r;
+    if (trail && st.focus > 0 && Blank(src[st.focus - 1])) {  // one of the trailing blanks, one at a time (§6.5)
+        r.splices.push_back(Splice{st.focus - 1, src.substr(st.focus - 1, 1), L""});
+        r.after.focus = r.after.anchor = st.focus - 1;
+        return r;
+    }
+    TRange rg;
+    if (!RangeOf(d, p, &rg)) return r;
+    if (p.t <= rg.beg) {  // a block's start: joining is Phase 2b's; an object atom before it is selected (§7.7)
+        if (p.cell < 0) {
+            int32_t prev = PrevInSource(d, p.block);
+            if (prev >= 0 && IsAtomBlock(d, prev)) {
+                r.after.atom = AtomOfBlock(d, prev);
+                r.kind = EK_OTHER;
+            }
+        }
+        return r;
+    }
+    SegSpan ss = SegsIn(d, p.block, rg);
+    const SrcSeg* L = SegCovering(ss, p.t - 1);
+    if (!L) return r;
+    if (L->kind == SEG_OBJATOM) {  // the first press selects it, the second deletes it
+        r.after.atom = ImageOfSeg(d, p.block, *L);
+        r.kind = EK_OTHER;
+        return r;
+    }
+    if (L->kind == SEG_SYNTH) return r;
+    uint32_t t0, s0, s1;
+    if (L->kind == SEG_TEXTATOM) {  // an entity, an escape, an emoji, a break: whole
+        t0 = L->t;
+        s0 = L->s;
+        s1 = L->s + L->sLen;
+    } else {
+        t0 = word ? WordBack(d.text, p.t, rg.beg) : ClusterStep(c, p.t, -1, L->t, p.t);
+        const SrcSeg* k = L;  // a word goes on into the plain text before only where no delimiter stands between
+        while (t0 < k->t && k > ss.b && (k - 1)->kind == SEG_PLAIN && (k - 1)->s + (k - 1)->sLen == k->s &&
+               (k - 1)->t + (k - 1)->tLen == k->t)
+            k--;
+        t0 = std::max(t0, k->t);
+        s0 = k->s + (t0 - k->t);
+        s1 = L->s + (p.t - L->t);
+    }
+    return Deletion(c, st, p, rg, t0, p.t, s0, s1, EK_DEL_BACK);
+}
+
+EditResult OpDelete(const EditCtx& c, const EditState& st, bool word) {
+    if (st.atom >= 0) return DeleteAtom(c, st);
+    if (st.anchor != st.focus) return OpDeleteSelection(c, st);
+    const Doc& d = c.doc;
+    const std::wstring& src = c.src;
+    EditResult r = Nothing(st, EK_DEL_FWD);
+    uint16_t trail = 0;
+    TextPos p = FocusOf(c, st, &trail);
+    if (!ValidBlock(d, p.block)) return r;
+    const BlockSrc& bs = d.blockSrc[p.block];
+    if (AtomBlock(bs) || (bs.flags & BS_SYNTH)) return r;
+    if (TrailingRun(src, st.focus, p.cell >= 0)) {  // trailing blanks go one at a time (§6.5)
+        r.splices.push_back(Splice{st.focus, src.substr(st.focus, 1), L""});
+        return r;
+    }
+    TRange rg;
+    if (!RangeOf(d, p, &rg)) return r;
+    if (p.t >= rg.end) {  // a block's end: joining is Phase 2b's; an object atom after it is selected (§7.7)
+        if (p.cell < 0) {
+            int32_t next = NextInSource(d, p.block);
+            if (next >= 0 && IsAtomBlock(d, next)) {
+                r.after.atom = AtomOfBlock(d, next);
+                r.kind = EK_OTHER;
+            }
+        }
+        return r;
+    }
+    SegSpan ss = SegsIn(d, p.block, rg);
+    const SrcSeg* R = SegCovering(ss, p.t);
+    if (!R || R->kind == SEG_SYNTH) return r;
+    if (R->kind == SEG_OBJATOM) {
+        r.after.atom = ImageOfSeg(d, p.block, *R);
+        r.kind = EK_OTHER;
+        return r;
+    }
+    uint32_t t1, s0, s1;
+    if (R->kind == SEG_TEXTATOM) {
+        t1 = R->t + R->tLen;
+        s0 = R->s;
+        s1 = R->s + R->sLen;
+    } else {
+        t1 = word ? WordFwd(d.text, p.t, rg.end) : ClusterStep(c, p.t, 1, p.t, R->t + R->tLen);
+        const SrcSeg* k = R;
+        while (t1 > k->t + k->tLen && k + 1 < ss.e && (k + 1)->kind == SEG_PLAIN && k->s + k->sLen == (k + 1)->s &&
+               k->t + k->tLen == (k + 1)->t)
+            k++;
+        t1 = std::min(t1, k->t + k->tLen);
+        s0 = R->s + (p.t - R->t);
+        s1 = k->s + (t1 - k->t);
+    }
+    return Deletion(c, st, p, rg, p.t, t1, s0, s1, EK_DEL_FWD);
+}
+
+EditResult OpDeleteSelection(const EditCtx& c, const EditState& st) {
+    SelCut cut = CutSelection(c, st);
+    if (!cut.ok) return Refuse(st, "selection");
+    const std::wstring& src = c.src;
+    std::wstring keep = cut.closers + cut.openers;
+    if (keep.empty()) {
+        // Spans the cut empties go with their delimiters, and blanks left at the start of the content with them.
+        EditResult del = Deletion(c, st, cut.A, cut.rg, cut.A.t, cut.B.t, cut.a, cut.b, EK_OTHER);
+        del.after.atom = -1;
+        return del;
+    }
+    EditResult r = Nothing(st, EK_OTHER);
+    r.splices.push_back(Splice{cut.a, src.substr(cut.a, cut.b - cut.a), keep});
+    r.after.focus = r.after.anchor = cut.a + (uint32_t)cut.closers.size();
+    r.after.atom = -1;
+    return r;
+}
+
+EditResult OpReplaceSelection(const EditCtx& c, const EditState& st, std::wstring_view text) {
+    SelCut cut = CutSelection(c, st);
+    if (!cut.ok) return Refuse(st, "selection");
+    EditResult r = Nothing(st, EK_TYPE);
+    // The typed text takes the place of the first selected character, inside the spans that held it: `**⟦bold⟧**` +
+    // `strong` → `**strong**`; the delimiters of spans the selection cut in two follow it.
+    std::wstring ins(text);
+    if (TableOf(c.doc, cut.A.block)) {
+        std::wstring e;
+        for (wchar_t ch : ins) {
+            if (ch == L'|') e += L'\\';
+            e += ch;
+        }
+        ins = e;
+    }
+    r.splices.push_back(Splice{cut.a, c.src.substr(cut.a, cut.b - cut.a), ins + cut.closers + cut.openers});
+    r.after.focus = r.after.anchor = cut.a + (uint32_t)ins.size();
+    r.after.atom = -1;
+    return r;
+}
+
+// ------------------------------------------------------------------------------------------------ task boxes (§8.10)
+EditResult OpTaskToggle(const EditCtx& c, const EditState& st, int task) {
+    const Doc& d = c.doc;
+    if (task < 0 || (size_t)task >= d.tasks.size()) return Refuse(st, "task");
+    uint32_t at = d.tasks[task].src;
+    if (at == 0 || at + 1 >= c.src.size() || c.src[at - 1] != L'[' || c.src[at + 1] != L']') return Refuse(st, "task");
+    wchar_t was = c.src[at];
+    EditResult r = Nothing(st, EK_TASK);
+    r.splices.push_back(Splice{at, std::wstring(1, was), std::wstring(1, was == L'x' || was == L'X' ? L' ' : L'x')});
+    return r;
+}

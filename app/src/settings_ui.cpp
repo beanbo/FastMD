@@ -13,8 +13,9 @@ const wchar_t kRepoUrl[] = L"https://github.com/beanbo/FastMD";
 const float kW = 680.f, kLabelX = 28.f, kCtlX = 236.f, kRowH = 48.f, kTop = 20.f, kCtlH = 32.f;
 const int kSizes[] = {14, 15, 16, 17, 18, 20};
 
+// ROW_AUTOSAVE came last (EDIT-MODE.md §2.12): the hit ids of the rows before it (row * 100 + option) never move
 enum Row { ROW_THEME, ROW_FONT, ROW_SIZE, ROW_COLUMN, ROW_WRAP, ROW_SMOOTH, ROW_REMOTE, ROW_UPDATE, ROW_VERSION,
-           ROW_LANG, ROW_EDITOR, ROW_ASSOC, ROW_COUNT };
+           ROW_LANG, ROW_EDITOR, ROW_ASSOC, ROW_AUTOSAVE, ROW_COUNT };
 const int kLinkId = 9000;
 
 HWND g_wnd = nullptr;
@@ -44,7 +45,7 @@ std::vector<std::wstring> Options(int row) {
         return v;
     }
     case ROW_COLUMN: return {Tr(S_COL_NARROW), Tr(S_COL_NORMAL), Tr(S_COL_WIDE), Tr(S_COL_FULL)};
-    case ROW_WRAP: case ROW_SMOOTH: case ROW_UPDATE: return {Tr(S_OFF), Tr(S_ON)};
+    case ROW_WRAP: case ROW_SMOOTH: case ROW_UPDATE: case ROW_AUTOSAVE: return {Tr(S_OFF), Tr(S_ON)};
     case ROW_REMOTE: return {Tr(S_REMOTE_ALWAYS), Tr(S_REMOTE_ASK), Tr(S_REMOTE_NEVER)};
     case ROW_LANG: return {Tr(S_LANG_SYSTEM), L"Русский", L"English"};
     default: return {};
@@ -64,6 +65,7 @@ int Selected(int row) {
     case ROW_REMOTE: return g.cfg.remoteImages;
     case ROW_UPDATE: return g.cfg.updateCheck;
     case ROW_LANG: return g.cfg.language;
+    case ROW_AUTOSAVE: return g.cfg.autosave;
     default: return -1;
     }
 }
@@ -71,7 +73,7 @@ int Selected(int row) {
 const wchar_t* Label(int row) {
     static const StrId ids[ROW_COUNT] = {S_SET_THEME,  S_SET_FONT,   S_SET_SIZE,    S_SET_COLUMN,   S_SET_WRAP,
                                          S_SET_SMOOTH, S_SET_REMOTE, S_SET_UPDATE,  S_SET_VERSION,  S_SET_LANGUAGE,
-                                         S_SET_EDITOR, S_SET_ASSOC};
+                                         S_SET_EDITOR, S_SET_ASSOC,  S_SET_AUTOSAVE};
     return Tr(ids[row]);
 }
 
@@ -314,6 +316,11 @@ void Pick(int id) {
         return;
     }
     case ROW_ASSOC: Command(CMD_ASSOCIATE); return;
+    case ROW_AUTOSAVE:
+        g.cfg.autosave = opt == 1;
+        ApplySettings(SC_OTHER, true);
+        EditAutosaveChanged();  // edits open right now are saved (or journalled) by the new rule
+        return;
     default: return;
     }
     ApplySettings(changed, true);
@@ -443,7 +450,7 @@ void SettingsRefresh() {
 // column's side padding. An icon-font glyph, so it waits for the second frame; the find bar takes that corner while open.
 bool SettingsButtonRect(float* l, float* t, float* r, float* b) {
     const float kBtn = 30.f, kTop = 8.f, kRight = 14.f;
-    if (g.firstFrame || g.findOpen) return false;
+    if (g.firstFrame || g.findOpen || g.editing || g.barT > 0) return false;  // edit mode's ✕ takes that corner
     *r = ViewW() - kRight;
     *l = *r - kBtn;
     *t = kTop;

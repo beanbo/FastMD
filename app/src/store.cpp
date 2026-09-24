@@ -226,6 +226,7 @@ void LoadConfig(Config& c, std::wstring* findQuery) {
     c.editor = GetString(k, L"Editor");
     c.findCase = GetDword(k, L"FindCase", 0) != 0;
     c.findWord = GetDword(k, L"FindWord", 0) != 0;
+    c.autosave = GetDword(k, L"Autosave", 1) != 0;
     if (findQuery) *findQuery = GetString(k, L"FindQuery");
     c.sizeW = (int)std::clamp(GetDword(k, L"Width", 1000), 400ul, 4000ul);  // v0.1: client size only
     c.sizeH = (int)std::clamp(GetDword(k, L"Height", 800), 300ul, 3000ul);
@@ -249,8 +250,23 @@ void SaveConfig(const Config& c, const std::wstring& findQuery) {
     SetString(k, L"Editor", c.editor);
     SetDword(k, L"FindCase", c.findCase);
     SetDword(k, L"FindWord", c.findWord);
+    SetDword(k, L"Autosave", c.autosave);
     SetString(k, L"FindQuery", findQuery.substr(0, 256));
     RegCloseKey(k);
+}
+
+uint32_t RegGetDword(const wchar_t* name, uint32_t def) {
+    HKEY k = OpenKey(false);
+    DWORD v = GetDword(k, name, def);
+    if (k) RegCloseKey(k);
+    return v;
+}
+
+void RegSetDword(const wchar_t* name, uint32_t v) {
+    if (HKEY k = OpenKey(true)) {
+        SetDword(k, name, v);
+        RegCloseKey(k);
+    }
 }
 
 bool RegReadBinary(const wchar_t* name, void* data, DWORD size) {

@@ -46,7 +46,8 @@ void HomeRebuild() {}
 int HomeItemAt(float, float) { return -1; }
 
 // ---------------------------------------------------------------------------------------------- editbar.cpp
-void DrawEditChrome() {}  // the pane never edits: no toolbar, no strips
+void DrawEditChrome(int) {}  // the pane never edits: no toolbar, no strips, no pencil
+int EditChromeRects(float (*)[4], int) { return 0; }
 
 // ---------------------------------------------------------------------------------------------- settings_ui.cpp
 void DrawSettingsButton() {}
