@@ -252,25 +252,28 @@ void SelectionRichFormats(std::wstring& text, std::string& cfHtml, std::string& 
 }
 
 // text + CF_HTML + RTF in one go
-void CopySelectionRich() {
+bool CopySelectionRich() {
     std::wstring text;
     std::string cfHtml, rtf;
     SelectionRichFormats(text, cfHtml, rtf);
-    if (text.empty()) return;
-    if (!OpenClipboard(g.hwnd)) return;
+    if (text.empty()) return false;
+    if (!OpenClipboardRetry()) return false;
     EmptyClipboard();
     auto set = [](UINT fmt, const void* data, size_t bytes) {
-        if (!fmt || !bytes) return;
+        if (!fmt || !bytes) return false;
         if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
             memcpy(GlobalLock(h), data, bytes);
             GlobalUnlock(h);
-            if (!SetClipboardData(fmt, h)) GlobalFree(h);
+            if (SetClipboardData(fmt, h)) return true;
+            GlobalFree(h);
         }
+        return false;
     };
-    set(CF_UNICODETEXT, text.c_str(), (text.size() + 1) * sizeof(wchar_t));
+    bool ok = set(CF_UNICODETEXT, text.c_str(), (text.size() + 1) * sizeof(wchar_t));
     static UINT fmtHtml = RegisterClipboardFormatW(L"HTML Format");
     static UINT fmtRtf = RegisterClipboardFormatW(L"Rich Text Format");
     set(fmtHtml, cfHtml.c_str(), cfHtml.size() + 1);
     set(fmtRtf, rtf.c_str(), rtf.size() + 1);
     CloseClipboard();
+    return ok;
 }

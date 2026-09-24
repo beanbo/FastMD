@@ -6,8 +6,9 @@
 // fastmd-edit-tests (tests/edit) and the fuzzer drive it without a window.
 //
 // Phase 1a implements the map queries (CaretStop, SrcOfText, TextOfSrc), MapSelfCheck, DiffBlocks, ContPrefix,
-// BlankPrefix and LineEol; phase 1c the undo stack and the splice helpers. The operations are declared in their final
-// shape and arrive with the phases that use them (2a-3b).
+// BlankPrefix and LineEol; phase 1c the undo stack and the splice helpers; 2a typing and deleting inside a block; 2b
+// the structure: Enter, Backspace and Delete across blocks, Tab, selections, the phantom rows, escaping, cut and plain
+// paste. The operations are declared in their final shape and arrive with the phases that use them (2a-3b).
 #pragma once
 #include "doc.h"
 
@@ -27,6 +28,10 @@ struct Phantom {
     std::wstring prefix, blankPrefix;  // ContPrefix / BlankPrefix the materialised text gets
     uint8_t depth = 0;                 // container depth (Enter/Backspace in an empty phantom pop one level)
     uint8_t style = 0;                 // 0 paragraph, 1..6 heading, 7 bullet, 8 numbered, 9 task, 10 quote (§8.1)
+    // The caret stands in the phantom row (focus = anchor = anchorSrc). A phantom before a block made by Enter at the
+    // block's start keeps the caret in the block: ↑ goes into the row (§6.7, UX-7), so this cannot be told from the
+    // offsets alone.
+    uint8_t in = 0;
 };
 enum Fmt : uint16_t { FMT_BOLD = 1, FMT_ITALIC = 2, FMT_STRIKE = 4, FMT_CODE = 8, FMT_LINK = 16 };
 struct EditState {
@@ -60,8 +65,13 @@ struct EditResult {
     EditKind kind = EK_OTHER;
     struct Expect { uint32_t sBeg, sEnd; uint16_t fmt; bool present; };
     std::vector<Expect> verify;        // post-reparse checks of emitted delimiters (§7.5); empty = none
+    // The check the glue runs after the re-parse when an operation wrote delimiters back (a split's closers and openers,
+    // a cut's rebalancing, §7.5 step 5): the rendered text must be the old one with [t0, t1) replaced by `text`, and the
+    // characters beside the change must keep their formatting. When it fails the step is taken back and refused.
+    struct Keep { bool on = false; uint32_t t0 = 0, t1 = 0; std::wstring text; } keep;
     std::string refused;               // non-empty: nothing applied, the glue shows the toast named here
 };
+bool Kept(const Doc& oldD, const Doc& newD, const EditResult::Keep&);
 
 // ---- mapping (§6)
 // Is pos a place the caret may stand? Not inside an atom or a synthesized piece, not in a hidden or synthesized block;
@@ -121,6 +131,16 @@ constexpr int32_t kAtomBlock = 0x40000000;
 int32_t AtomOfBlock(const Doc&, int32_t block);   // the atom id of a block atom (an HTML block's first block), -1 = none
 int32_t AtomBlockOf(const Doc&, int32_t atom);    // the block that draws an atom (inline: the block holding it)
 bool IsAtomBlock(const Doc&, int32_t block);
+// phantoms (§6.7): the block a phantom stands next to (-1: none), found again from its anchorSrc after every re-parse;
+// whether it lives on with the caret where it is (in the row, or in that block)
+int32_t PhantomBlock(const Doc&, const std::wstring& src, const Phantom&);
+bool PhantomAlive(const Doc&, const std::wstring& src, const EditState&, int32_t caretBlock);
+// a new phantom next to a block, the caret in it (the document's edges next to code, a table or an object, a click below
+// the last block, §6.8): inside the block's `depth` outermost containers (< 0: all of them)
+EditResult OpPhantom(const EditCtx&, const EditState&, int32_t block, bool before, int depth);
+// A source offset moved by splices applied in order (the caret, a phantom's anchor, a raw-while-typing range): after
+// an insertion at it when `after`, else before it; inside removed text, to where the replacement starts.
+uint32_t MapThrough(const std::vector<Splice>&, uint32_t pos, bool after);
 
 // ---- undo (§11)
 struct EditStep { std::vector<Splice> splices; EditState before, after; EditKind kind = EK_OTHER; uint64_t t0 = 0, t1 = 0; };

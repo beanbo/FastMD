@@ -222,6 +222,11 @@ struct App {
     int8_t caretAff = 0;           // -1: at a soft-wrap boundary the caret is drawn at the end of the upper line (§12.2)
     bool caretVisible = false;     // edit mode: the blink phase is on and the document has the keyboard
     int32_t selAtomBlock = -1, selAtomImage = -1;  // the selected object atom: drawn with an outline, no caret
+    // A phantom row (§6.7): an empty paragraph only the editor shows, after (before) phantomBlock or, phantomBreak, as the
+    // line a pending hard break starts at that block's end. RecomputeY makes room for it; phantomY is its line's top.
+    int32_t phantomBlock = -1;
+    bool phantomBefore = false, phantomBreak = false, phantomCaret = false;  // phantomCaret: the caret stands in it
+    float phantomH = 0, phantomX = 0, phantomY = 0, phantomLine = 0;
     uint32_t framesPartial = 0, framesFull = 0;    // scrolled and full frames (Q_FRAME_STATS)
     bool pencilHot = false;        // the pencil button (reading mode, left of the gear) is under the mouse
     uint32_t editChrome = 0;       // bumped whenever the bar, a strip or the pencil would draw differently (frame key)
@@ -541,8 +546,10 @@ std::vector<EditorInfo> DetectEditors();
 // ------------------------------------------------------------------------------------------------ shell.cpp
 void OpenLink(int linkIndex);
 void CopyToClipboard(const std::wstring& text);
-// copy.cpp: the selection with its formatting (CF_HTML + RTF + text), and as the Markdown source it came from
-void CopySelectionRich();
+bool OpenClipboardRetry();  // OpenClipboard(g.hwnd), a few tries while another program reads what was just put there
+// copy.cpp: the selection with its formatting (CF_HTML + RTF + text), and as the Markdown source it came from; false when
+// the clipboard could not be opened (Cut then keeps the text)
+bool CopySelectionRich();
 void SelectionRichFormats(std::wstring& text, std::string& cfHtml, std::string& rtf);  // clipboard and drag
 std::wstring SelectionMarkdown();
 bool CopyImageToClipboard(uint32_t imageBlock);

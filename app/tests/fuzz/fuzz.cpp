@@ -193,11 +193,173 @@ bool ParseOnce(const std::wstring& text, std::string* why) {
     if (g_trace) { wprintf(L"  done\n"); fflush(stdout); }
     return ok;
 }
+
+// ---- --edit (docs/EDIT-MODE.md §14.2, from Phase 2b): 50 random operations of edit mode's core at random caret stops of
+// an input (cut to a few thousand characters). Every result must apply, never cut a surrogate pair or a CRLF in two,
+// invert to the text before it, and leave a map that passes MapSelfCheck; at the end, undoing every step in turn must
+// give back the original bytes.
+bool g_editWalk = false;
+const size_t kWalkChars = 3000;
+
+bool Parse(Doc& d, const std::wstring& src) {
+    d = Doc{};
+    d.baseDir = L"C:\\fuzz\\";
+    ParseOptions opt;
+    opt.wantMap = true;
+    ParseMarkdown(d, src.data(), src.size(), &opt);
+    return d.hasMap;
+}
+
+// a random caret stop: a block, a cell of a table, a text position there that CaretStop accepts
+bool RandomStop(std::mt19937& rng, const Doc& d, TextPos* p) {
+    if (d.blocks.empty()) return false;
+    for (int tries = 0; tries < 16; tries++) {
+        int32_t b = (int32_t)(rng() % d.blocks.size());
+        const Block& bl = d.blocks[b];
+        uint32_t lo = bl.textOff, hi = bl.textOff + bl.textLen;
+        int32_t cell = -1;
+        if (bl.kind == BK_TABLE && bl.aux < d.tables.size()) {
+            const Table& tb = d.tables[bl.aux];
+            if (!tb.rows || !tb.cols) continue;
+            cell = (int32_t)(rng() % (tb.rows * tb.cols));
+            const Cell& c = d.cells[tb.cellOff + cell];
+            lo = c.textOff;
+            hi = c.textOff + c.textLen;
+        }
+        TextPos q{lo + (uint32_t)(rng() % (hi - lo + 1)), b, cell};
+        for (int k = 0; k < 8 && !CaretStop(d, q); k++) q.t = lo + (uint32_t)(rng() % (hi - lo + 1));
+        if (CaretStop(d, q)) {
+            *p = q;
+            return true;
+        }
+    }
+    return false;
+}
+
+std::wstring RandomText(std::mt19937& rng, bool lines) {
+    static const wchar_t kChars[] = L"ab xyZ#*_`~[]()<>!|$\\-+=:&1.\xE9\x0301\xD83D\xDE00";
+    std::wstring s;
+    int n = 1 + (int)(rng() % 6);
+    for (int k = 0; k < n; k++) {
+        if (lines && rng() % 4 == 0) s += rng() % 2 ? L"\n" : L"\r\n";
+        s += kChars[rng() % (std::size(kChars) - 1)];
+    }
+    return s;
+}
+
+bool EditWalk(std::mt19937& rng, const std::wstring& input, std::string* why) {
+    size_t n = std::min(input.size(), kWalkChars);
+    while (n > 0 && n < input.size() && ((input[n] >= 0xDC00 && input[n] <= 0xDFFF) || (input[n] == L'\n' && input[n - 1] == L'\r'))) n--;
+    const std::wstring original = input.substr(0, n);
+    std::wstring src = original;
+    std::vector<std::vector<Splice>> steps;
+    EditState st;
+    Doc d;
+    char buf[256];
+    for (int i = 0; i < 50; i++) {
+        if (!Parse(d, src)) break;
+        const wchar_t* eol = src.find(L"\r\n") != std::wstring::npos ? L"\r\n" : L"\n";
+        EditCtx c{d, src, eol, GraphemeLite, nullptr, 0};
+        bool keep = i > 0 && rng() % 2 && st.focus <= src.size() && st.anchor <= src.size();
+        if (!keep) {  // a new caret (and now and then a selection)
+            TextPos p;
+            if (!RandomStop(rng, d, &p)) break;
+            st = EditState{};
+            st.focus = st.anchor = SrcOfText(d, src, p, MAP_CARET);
+            c.focusPos = c.anchorPos = p;
+            if (rng() % 5 == 0) {
+                TextPos a;
+                if (RandomStop(rng, d, &a)) {
+                    st.anchor = SrcOfText(d, src, a, MAP_CARET);
+                    c.anchorPos = a;
+                }
+            }
+            if (st.focus == UINT32_MAX || st.anchor == UINT32_MAX) continue;
+        }
+        EditResult r;
+        const unsigned op = rng() % 16;
+        switch (op) {
+        case 0: case 1: case 2: r = OpType(c, st, RandomText(rng, false)); break;
+        case 3: r = OpBackspace(c, st, false); break;
+        case 4: r = OpBackspace(c, st, true); break;
+        case 5: r = OpDelete(c, st, rng() % 2 != 0); break;
+        case 6: case 7: r = OpEnter(c, st, 0); break;
+        case 8: r = OpEnter(c, st, 1); break;
+        case 9: r = OpEnter(c, st, 2); break;
+        case 10: r = OpTab(c, st, false); break;
+        case 11: r = OpTab(c, st, true); break;
+        case 12: r = OpPaste(c, st, RandomText(rng, true), false); break;
+        case 13: r = OpDeleteSelection(c, st); break;
+        case 14: r = OpPhantom(c, st, (int32_t)(rng() % std::max<size_t>(1, d.blocks.size())), rng() % 2 != 0, (int)(rng() % 3) - 1); break;
+        default: r = OpType(c, st, L" "); break;
+        }
+        if (!r.refused.empty()) continue;
+        if (g_trace) {  // --file: every step, to place a failure
+            wprintf(L"  step %d op %u focus %u anchor %u phantom %d/%d at %u:", i, op, st.focus, st.anchor, st.phantom.kind,
+                    st.phantom.in, st.phantom.anchorSrc);
+            for (const Splice& sp : r.splices) wprintf(L" [%u -%zu +%zu]", sp.at, sp.removed.size(), sp.inserted.size());
+            wprintf(L"\n");
+        }
+        std::wstring next = src;
+        std::string w;
+        for (const Splice& sp : r.splices) {
+            // (each splice against the text the ones before it made)
+            if (SpliceSplits(next, sp.at, (uint32_t)sp.removed.size())) {
+                snprintf(buf, sizeof buf, "edit walk step %d (op %u): a splice at %u cuts a pair or a CRLF", i, op, sp.at);
+                *why = buf;
+                if (g_trace) WriteRawFile(L"out\\fuzz\\walk-step.u16", src);
+                return false;
+            }
+            std::vector<Splice> one{sp};
+            if (!ApplySplices(next, one, false, &w)) {
+                snprintf(buf, sizeof buf, "edit walk step %d (op %u): %s", i, op, w.c_str());
+                *why = buf;
+                if (g_trace) WriteRawFile(L"out\\fuzz\\walk-step.u16", src);  // the text the failing step was given
+                return false;
+            }
+        }
+        std::wstring back = next;
+        if (!ApplySplices(back, r.splices, true, &w) || back != src) {
+            snprintf(buf, sizeof buf, "edit walk step %d (op %u): the inverse splices do not give the text back", i, op);
+            *why = buf;
+            return false;
+        }
+        if (!r.splices.empty()) {
+            Doc nd;
+            Parse(nd, next);
+            std::string sc;
+            if (!MapSelfCheck(nd, next, &sc)) {
+                snprintf(buf, sizeof buf, "edit walk step %d (op %u): %s", i, op, sc.c_str());
+                *why = buf;
+                if (g_trace) {  // the text before the step and the one it made (a map fault: replay the latter with --file)
+                    WriteRawFile(L"out\\fuzz\\walk-step.u16", src);
+                    WriteRawFile(L"out\\fuzz\\walk-made.u16", next);
+                }
+                return false;
+            }
+            steps.push_back(r.splices);
+            src = std::move(next);
+        }
+        st = r.after;
+    }
+    std::string w;
+    for (size_t k = steps.size(); k-- > 0;) {
+        if (!ApplySplices(src, steps[k], true, &w)) {
+            *why = "edit walk: undo failed: " + w;
+            return false;
+        }
+    }
+    if (src != original) {
+        *why = "edit walk: undoing every step does not give the original bytes back";
+        return false;
+    }
+    return true;
+}
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
     long runs = 20000;
-    unsigned seed = (unsigned)GetTickCount();
+    unsigned seed = (unsigned)GetTickCount(), walkSeed = 1;
     std::wstring single, corpus = L"..\\..\\..\\bench\\corpus";
     for (int i = 1; i < argc; i++) {
         std::wstring a = argv[i];
@@ -206,6 +368,8 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--file" && i + 1 < argc) single = argv[++i];
         else if (a == L"--corpus" && i + 1 < argc) corpus = argv[++i];
         else if (a == L"--tex" && i + 1 < argc) g_texOn = wcstol(argv[++i], nullptr, 10) != 0;
+        else if (a == L"--edit") g_editWalk = true;  // also the random walk of edit operations (§14.2)
+        else if (a == L"--walkseed" && i + 1 < argc) walkSeed = (unsigned)wcstoul(argv[++i], nullptr, 10);
     }
     if (!single.empty()) {
         g_trace = true;
@@ -220,6 +384,11 @@ int wmain(int argc, wchar_t** argv) {
         std::string why;
         bool ok = ParseOnce(text, &why);
         wprintf(L"parsed %s (tex %d): %hs\n", single.c_str(), g_texOn ? 1 : 0, ok ? "map ok" : why.c_str());
+        if (ok && g_editWalk) {
+            std::mt19937 wr(walkSeed);
+            ok = EditWalk(wr, text, &why);
+            wprintf(L"edit walk (seed %u): %hs\n", walkSeed, ok ? "ok" : why.c_str());
+        }
         return ok ? 0 : 3;
     }
     LoadSeeds(corpus);
@@ -248,8 +417,21 @@ int wmain(int argc, wchar_t** argv) {
                     i, why.c_str(), name.c_str(), g_texOn ? 1 : 0);
             return 3;
         }
+        if (g_editWalk) {
+            unsigned ws = rng();
+            std::mt19937 wr(ws);
+            if (!EditWalk(wr, text, &why)) {
+                std::wstring name = L"out\\fuzz\\walk-" + std::to_wstring(i) + L"-tex" + (g_texOn ? L"1" : L"0");
+                WriteRawFile(name + L".u16", text);
+                WriteUtf8File(name + L".md", text);
+                wprintf(L"the edit walk failed on run %ld: %hs\n  replay: --file app\\tests\\%s.u16 --tex %d --edit --walkseed %u\n",
+                        i, why.c_str(), name.c_str(), g_texOn ? 1 : 0, ws);
+                return 3;
+            }
+        }
         if ((i & 1023) == 1023) wprintf(L"  %ld runs, %.1f s\n", i + 1, (GetTickCount() - t0) / 1000.0);
     }
-    wprintf(L"done: %ld runs in %.1f s, nothing fell over, every map checked\n", runs, (GetTickCount() - t0) / 1000.0);
+    wprintf(L"done: %ld runs in %.1f s, nothing fell over, every map checked%s\n", runs, (GetTickCount() - t0) / 1000.0,
+            g_editWalk ? L", every edit walk undone to the byte" : L"");
     return 0;
 }

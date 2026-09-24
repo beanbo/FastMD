@@ -2,7 +2,7 @@ The operations of Phase 2a (docs/EDIT-MODE.md §6.3, §6.5, §6.6, §7.3, §7.7 
 at a caret, Backspace and Delete inside a block, a selection inside one block, a task box. src holds the caret ‸ (or a
 selection ⟦ … ⟧, anchor first); `do` lists the operations; want is the source after them, with the caret where the glue
 puts it (normalised: where typed text would go next). Each case also runs with CRLF line ends, inside a quote and inside a
-list item. Phase 2b adds the structure (Enter, joins across blocks, selections across blocks, escaping).
+list item. Phase 2b's structure (Enter, joins across blocks, selections across blocks, escaping) is in the other files.
 
 === type_bold_end (§6.3 **bold‸** tail: typing continues the bold)
 src: **bold‸** tail\n
@@ -231,10 +231,10 @@ src: a![i](x.png)‸b\n
 do: BS; BS
 want: a‸b\n
 
-=== bs_block_start_nothing (§7.7: joining blocks is Phase 2b's; nothing happens)
+=== bs_block_start_joins (§7.7: at a paragraph's start after a paragraph, Phase 2b joins them)
 src: abc\n\n‸def\n
 do: BS
-want: abc\n\n‸def\n
+want: abc‸def\n
 
 === del_char (§7.7)
 src: a‸bc\n
@@ -299,12 +299,11 @@ src: # ⟦Title⟧\n
 do: type "New"
 want: # New‸\n
 
-=== sel_across_blocks_refused (§7.9: across blocks is Phase 2b's; nothing changes)
+=== sel_across_blocks (§7.9: across blocks, Phase 2b: the text goes, the blocks are joined)
 src: ⟦a\n\nb⟧\n
 flags: noquote nolist
 do: BS
-state: refused=selection
-want: ⟦a\n\nb⟧\n
+want: ‸\n
 
 === task_toggle (§8.10: a task box is a splice of its mark)
 src: - [ ] a‸\n

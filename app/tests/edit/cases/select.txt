@@ -1,0 +1,115 @@
+Deleting and replacing a selection across blocks and cells (docs/EDIT-MODE.md §7.9), cut (§7.11). Inside one block
+see ops.txt. Format as in enter.txt.
+
+=== sel_two_paras (§7.9: the first block keeps its text before, the last its text after; they are joined)
+src: ab⟦c\n\nde⟧f\n
+do: Del
+want: ab‸f\n
+
+=== sel_keeps_refdef (§7.9, F6: a reference definition inside the range is kept, after the joined block)
+src: ab⟦c\n\n[x]: u\n\nde⟧f\n
+do: Del
+want: ab‸f\n\n[x]: u\n
+
+=== sel_across_bold (§7.5, §7.9: the halves of one span type meet and become one span)
+src: **ab⟦c**\n\n**d⟧e**\n
+do: Del
+want: **ab‸e**\n
+
+=== sel_rebalanced (§7.9: a span cut at the start gets its closer back; the caret inside it, where typing goes)
+src: *ab⟦c*\n\nde⟧f\n
+do: Del
+want: *ab‸*f\n
+
+=== sel_into_heading (§7.9: into a heading, the rest of the last block joins it)
+src: # Ti⟦tle\n\npar⟧a\n
+do: Del
+want: # Ti‸a\n
+
+=== sel_heading_marks_go (§7.9: the last block's heading marks go with the range)
+src: ⟦abc\n\n# ⟧Head\n
+flags: nolist
+do: Del
+want: ‸Head\n
+
+=== sel_list_items (§7.9: across items)
+src: - a⟦b\n- c⟧d\n
+do: Del
+want: - a‸d\n
+
+=== sel_three_blocks (§7.9: the blocks between go whole)
+src: a⟦b\n\nmiddle\n\n# H\n\nc⟧d\n
+do: Del
+want: a‸d\n
+
+=== sel_code_middle (§7.9: code between goes whole)
+src: a⟦b\n\n```\ncode\n```\n\nc⟧d\n
+do: Del
+want: a‸d\n
+
+=== sel_code_partial (§7.9, F6: a code block at the end keeps what the range did not cover)
+src: ab⟦c\n\n```\nco⟧de\n```\n
+do: Del
+want: ab‸\n\n```\nde\n```\n
+
+=== sel_code_whole_end (§7.9: a code block covered to its end goes with its fences)
+src: ab⟦c\n\n```\ncode⟧\n```\n\nz\n
+do: Del
+want: ab‸\n\nz\n
+
+=== sel_escape_rest (§7.4, §7.9: what the range leaves at a block's start is checked)
+src: ⟦abc\n\ndef ⟧# x\n
+flags: nolist
+do: Del
+want: ‸\\# x\n
+
+=== sel_replace_multi (§7.9: typing over it)
+src: ab⟦c\n\nde⟧f\n
+do: type "X"
+want: abX‸f\n
+
+=== sel_replace_multi_bold (§7.9: the typed text stays in the span that held the first selected character)
+src: **ab⟦c**\n\nd⟧e\n
+do: type "X"
+want: **abX‸**e\n
+
+=== sel_cells (§7.9, F20: across cells each cell is cleared on its own; no pipe goes)
+src: | a⟦b | c⟧d |\n|---|---|\n
+do: Del
+want: | a‸ | d |\n|---|---|\n
+
+=== sel_cells_rows (§7.9: whole cells between are emptied)
+src: | a | b |\n|---|---|\n| x⟦y | z |\n| u | v⟧w |\n
+do: Del
+want: | a | b |\n|---|---|\n| x‸ |  |\n|  | w |\n
+
+=== sel_type_cells (§7.9: typed over several cells, the text goes into the first)
+src: | a⟦b | c⟧d |\n|---|---|\n
+do: type "|"
+want: | a\\|‸ | d |\n|---|---|\n
+
+=== cut_one_block (§7.11: cut takes the selection away)
+src: a⟦bc⟧d\n
+do: Cut
+want: a‸d\n
+
+=== cut_blocks (§7.11: across blocks too)
+src: ab⟦c\n\nde⟧f\n
+do: Cut
+want: ab‸f\n
+
+=== enter_over_blocks (§7.6: Enter over a selection across blocks takes the selection away first)
+src: ab⟦c\n\nde⟧f\n
+do: Enter
+want: ab‸f\n
+
+=== sel_lone_cr_lines (§7.9, D15: the lines between and the end block's covered part go as one splice - one at a time, a lone CR and a lone LF met as a CRLF the second splice cut; found by the edit walk)
+src: ⟦<div>x</div>\r\rab⟧\ncd\n
+flags: nocrlf noquote nolist
+do: Del
+want: \n‸cd\n
+
+=== sel_item_picture_start (§7.9: an item that starts with a picture keeps its marker when the rest of its text stays)
+src: - ⟦![p](x.png)\n  te⟧xt more\n
+do: Del
+want: - ‸xt more\n

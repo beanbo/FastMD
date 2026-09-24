@@ -94,7 +94,7 @@ std::wstring StyleLabel(int id) {
     case 7: return Tr(S_ED_STYLE_CODE);
     case 8: return Tr(S_ED_STYLE_TABLE);
     case 10: return Tr(S_ED_STYLE_FOOTNOTE);
-    case 9: return L"—";
+    case 9: case 11: return L"—";  // an object, a raw leaf (§8.1)
     default:
         swprintf_s(b, Tr(S_ED_STYLE_HEADING_FMT), id);
         return b;

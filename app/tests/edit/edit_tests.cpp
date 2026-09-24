@@ -14,7 +14,13 @@
 //   tex:   on | off | both (default: both, on when the source holds '$'). Mermaid follows the same switch.
 //   flags: noquote nolist nocrlf - skip the automatic variants
 //   do:    caret - the ‸ of src is a source offset; TextOfSrc then SrcOfText(MAP_CARET) must land on want's ‸
-//   want:  the expected source with its ‸
+//          or the operations, `;`-separated: type "x", BS, C-BS, Del, C-Del, Enter, S-Enter, C-Enter, Tab, S-Tab,
+//          Paste("…"), Cut, Phantom (the caret into the phantom row), click(t,b[,c]) (the caret at a text position),
+//          TaskToggle(n); src may hold a selection ⟦ … ⟧ (anchor first) instead of the ‸
+//   want:  the expected source with its ‸ (or ⟦ … ⟧)
+//   state: (operation cases) refused=<why> and atom=<none|blkN|N>: what the last operation left besides the source
+//   phantom: (operation cases) none | after <b> | before <b> | break <b> [in] [style <n>] [depth <n>]: the phantom row
+//          afterwards (default none)
 //   new:   (diff cases) the source after an edit; with
 //   diff:  p=<common prefix> q=<common suffix> of DiffBlocks(src, new)
 //   map:   (map cases) the expected dump of the whole map, one record per line, indented by two spaces
@@ -678,15 +684,30 @@ std::vector<std::string> SplitOps(const std::string& s) {  // on ';' outside quo
     return out;
 }
 
-struct OpRun { std::wstring src; EditState st; std::string refused; int dir = 1; };
+struct OpRun { std::wstring src; EditState st; std::string refused; int dir = 1; TextPos click{0, -1, -1}; };
+
+bool InPhantom(const EditState& st) { return st.phantom.kind != PH_NONE && st.phantom.in; }
+
+// a quoted argument: Paste("…")
+bool QuotedArg(const std::string& op, const char* name, std::wstring* out) {
+    size_t n = strlen(name);
+    if (op.rfind(name, 0) != 0 || op.size() < n + 3 || op[n] != '(' || op[n + 1] != '"' || op.substr(op.size() - 2) != "\")")
+        return false;
+    *out = Unescape(op.substr(n + 2, op.size() - n - 4));
+    return true;
+}
 
 bool DoOp(OpRun& r, const std::string& op, const std::string& what) {
     Parsed p;
     ParseMap(p, r.src);
     const wchar_t* eol = r.src.find(L"\r\n") != std::wstring::npos ? L"\r\n" : L"\n";
     EditCtx c{p.d, p.src, eol, GraphemeLite, nullptr, 0};
+    if (r.click.block >= 0) {  // a click said which block and cell (an empty cell shares its offset with the next one)
+        c.focusPos = c.anchorPos = r.click;
+        r.click = TextPos{0, -1, -1};
+    }
     EditResult res;
-    std::wstring typed;
+    std::wstring typed, arg;
     if (op.rfind("type \"", 0) == 0 && op.size() >= 7 && op.back() == '"') {
         typed = Unescape(op.substr(6, op.size() - 7));
         res = OpType(c, r.st, typed);
@@ -694,6 +715,29 @@ bool DoOp(OpRun& r, const std::string& op, const std::string& what) {
         res = OpBackspace(c, r.st, op == "C-BS");
     } else if (op == "Del" || op == "C-Del") {
         res = OpDelete(c, r.st, op == "C-Del");
+    } else if (op == "Enter" || op == "S-Enter" || op == "C-Enter") {
+        res = OpEnter(c, r.st, op[0] == 'S' ? 1 : op[0] == 'C' ? 2 : 0);
+    } else if (op == "Tab" || op == "S-Tab") {
+        res = OpTab(c, r.st, op[0] == 'S');
+    } else if (QuotedArg(op, "Paste", &arg)) {
+        res = OpPaste(c, r.st, arg, false);
+    } else if (op == "Cut") {
+        res = OpDeleteSelection(c, r.st);
+        res.kind = EK_CUT;
+    } else if (op == "Phantom") {  // the caret goes into the phantom row (as ↑ / ↓ into it, §6.7)
+        if (!Check(r.st.phantom.kind != PH_NONE, "%s: Phantom: there is none", what.c_str())) return false;
+        r.st.phantom.in = 1;
+        r.st.focus = r.st.anchor = r.st.phantom.anchorSrc;
+        return true;
+    } else if (op.rfind("click(", 0) == 0) {  // click(t,b[,c]): the caret at a text position
+        int t = 0, b = -1, cl = -1;
+        sscanf_s(op.c_str() + 6, "%d,%d,%d", &t, &b, &cl);
+        r.click = TextPos{(uint32_t)t, b, cl};
+        uint32_t s = SrcOfText(p.d, p.src, r.click, MAP_CARET);
+        if (!Check(s != UINT32_MAX, "%s: %s maps nowhere", what.c_str(), op.c_str())) return false;
+        r.st = EditState{};
+        r.st.focus = r.st.anchor = s;
+        return true;
     } else if (op.rfind("TaskToggle(", 0) == 0) {
         res = OpTaskToggle(c, r.st, atoi(op.c_str() + 11));
     } else {
@@ -737,15 +781,25 @@ bool DoOp(OpRun& r, const std::string& op, const std::string& what) {
     std::wstring inv = s;
     Check(ApplySplices(inv, res.splices, true, &why) && inv == before, "%s %s: the inverse splices do not give the old source back",
           what.c_str(), op.c_str());
+    Parsed n;
+    ParseMap(n, s);
+    // §7.5 step 5: a step that wrote delimiters back must render the old text around the change; else it is taken back
+    if (res.keep.on && !Kept(p.d, n.d, res.keep)) {
+        r.refused = "keep";
+        return true;
+    }
     r.src = s;
     r.st = res.after;
     r.dir = res.kind == EK_DEL_BACK ? -1 : 1;
-    Parsed n;
-    ParseMap(n, r.src);
     SelfCheck(n, what + " after " + op);
     uint16_t trail = 0;
     TextPos t = TextOfSrc(n.d, n.src, r.st.focus, r.dir, &trail);
-    if (r.st.atom < 0 && r.st.anchor == r.st.focus && !n.d.blocks.empty()) {  // (an emptied document has no stop)
+    // a phantom lives while the caret is in it or in the block it stands next to (§6.7)
+    if (r.st.phantom.kind != PH_NONE && !PhantomAlive(n.d, n.src, r.st, t.block)) r.st.phantom = Phantom{};
+    if (InPhantom(r.st)) {
+        Check(r.st.focus == r.st.phantom.anchorSrc, "%s %s: the caret %u is not at the phantom's anchor %u", what.c_str(),
+              op.c_str(), r.st.focus, r.st.phantom.anchorSrc);
+    } else if (r.st.atom < 0 && r.st.anchor == r.st.focus && !n.d.blocks.empty()) {  // (an emptied document has no stop)
         Check(CaretStop(n.d, t), "%s %s: the caret (t%u b%d) is not a stop", what.c_str(), op.c_str(), t.t, t.block);
         if (!trail) {  // normalised as the glue does: to where typed text would go
             uint32_t k = SrcOfText(n.d, n.src, t, MAP_CARET);
@@ -753,6 +807,16 @@ bool DoOp(OpRun& r, const std::string& op, const std::string& what) {
         }
     }
     return true;
+}
+
+// `phantom: none | after <b> | before <b> | break <b> [in] [style <n>] [depth <n>]`
+std::string PhantomText(const Doc& d, const std::wstring& src, const Phantom& ph) {
+    if (ph.kind == PH_NONE) return "none";
+    static const char* kinds[] = {"none", "after", "before", "break"};
+    std::string s = Fmt("%s %d", kinds[ph.kind], PhantomBlock(d, src, ph));
+    if (ph.in) s += " in";
+    if (ph.style) s += Fmt(" style %u", ph.style);
+    return s;
 }
 
 void OpVariant(const Case& c, const std::string& what, const std::wstring& srcMarked, const std::wstring& wantMarked) {
@@ -781,6 +845,11 @@ void OpVariant(const Case& c, const std::string& what, const std::wstring& srcMa
     std::wstring got = Marked(r.src, r.st.anchor, r.st.focus);
     Check(got == wantMarked, "%s: the result differs\n  want: %s\n  got:  %s", what.c_str(), Esc(wantMarked, 200).c_str(),
           Esc(got, 200).c_str());
+    Parsed fin;
+    ParseMap(fin, r.src);
+    const std::string* ph = c.Get("phantom");
+    std::string gotPh = PhantomText(fin.d, fin.src, r.st.phantom), wantPh = ph ? *ph : "none";
+    Check(gotPh == wantPh, "%s: phantom %s, want %s", what.c_str(), gotPh.c_str(), wantPh.c_str());
 }
 void RunOpCase(const Case& c) {
     const std::string* s = c.Get("src");

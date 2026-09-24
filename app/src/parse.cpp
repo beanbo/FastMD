@@ -189,6 +189,14 @@ struct Builder {
     std::vector<int32_t> contStack;   // open containers (Doc::containers indices)
     bool mdCell = false;       // inside a cell of a Markdown table (its text belongs to the table block)
     CellSrc cellExt{0, 0, true};
+    // raw-while-typing (§6.9): a paragraph whose extent meets one of `rawRanges` is shown as its source lines in code
+    // style, md4c's text and spans for it ignored; `masks` hide an HTML block's start from md4c (the source it sees has
+    // U+E000 there, origSrc is the real one), and a masked `<!--` that nothing closes is drawn as a warning
+    const std::vector<std::pair<uint32_t, uint32_t>>* rawRanges = nullptr;
+    const std::vector<uint32_t>* masks = nullptr;
+    const wchar_t* origSrc = nullptr;
+    bool rawLeaf = false, warnLeaf = false;
+    std::vector<std::pair<uint32_t, uint32_t>> rawBrk;  // the raw leaf's line breaks: [line end, next line's content)
     Extent htmlExt;            // the HTML block being read
     uint32_t htmlFirst = 0;
     uint32_t fmBody = 0, fmLast = 0, fmOuter = 0;  // front matter: first body line, end of the last one, closing line end
@@ -229,6 +237,34 @@ struct Builder {
         if (collecting) EndLeaf();  // a paragraph a tight list swallowed ends where the next leaf begins
         ext = Extent{true, type, mdBase + beg, mdBase + end, flags, UINT32_MAX};
         srcCur = ext.beg;
+        if (rawRanges || masks) RawAndMasks(type);
+    }
+    MAPFN void RawAndMasks(MD_BLOCKTYPE type) {
+        rawLeaf = warnLeaf = false;
+        rawBrk.clear();
+        if (rawRanges && type == MD_BLOCK_P)
+            for (const auto& r : *rawRanges) rawLeaf |= r.first <= ext.end && r.second >= ext.beg;
+        if (masks)
+            for (uint32_t m : *masks)
+                warnLeaf |= m >= ext.beg && m < ext.end && m + 4 <= SrcLen() && !wcsncmp(origSrc + m, L"<!--", 4);
+    }
+    // the raw leaf's text: its source lines, container prefixes left out, one code run (§4.4)
+    MAPFN void RawText() {
+        rawLeaf = false;
+        uint32_t t0 = (uint32_t)d.text.size(), p = ext.beg;
+        auto piece = [&](uint32_t a, uint32_t e) {
+            if (e <= a) return;
+            PushSeg((uint32_t)d.text.size(), e - a, a, e - a, SEG_PLAIN);
+            d.text.append(origSrc + a, e - a);
+        };
+        for (const auto& k : rawBrk) {
+            piece(p, k.first);
+            PushSeg((uint32_t)d.text.size(), 1, k.first, std::max(1u, k.second - k.first), SEG_TEXTATOM);
+            d.text.push_back(L'\n');
+            p = k.second;
+        }
+        piece(p, ext.end);
+        if (d.text.size() > t0) d.runs.push_back(Run{t0, (uint32_t)d.text.size() - t0, F_CODE, P_DEFAULT, 0, 0});
     }
     void OnFootnoteExtent(uint32_t defBeg, uint32_t beg, uint32_t end) {
         if (collecting) EndLeaf();
@@ -239,6 +275,7 @@ struct Builder {
         brk = true;
         brkBeg = mdBase + beg;
         brkEnd = mdBase + end;
+        if (rawLeaf) rawBrk.emplace_back(brkBeg, brkEnd);
     }
     void OnCellExtent(uint32_t beg, uint32_t end, int missing) {
         cellExt = CellSrc{mdBase + beg, mdBase + end, missing != 0};
@@ -303,6 +340,7 @@ struct Builder {
     // Span delimiters: the enter hook comes before md4c's enter callback, the leave hook after its leave callback, so
     // the text a span adds itself (a picture's U+FFFC, a footnote's "[n]", a formula's U+FFFC) lies between the two.
     MAPFN void OnSpanExtent(MD_SPANTYPE type, int enter, uint32_t beg, uint32_t end) {
+        if (rawLeaf) return;  // a raw leaf's text is its source (§6.9)
         beg += mdBase;
         end += mdBase;
         if (enter) EnsureLeaf();
@@ -877,6 +915,9 @@ struct Builder {
     void EndLeaf() {
         if (!collecting) return;
         if (htmlSplitAt) FlushSplitTag(nullptr);  // md4c always ends a tag it began; should it not, it is text
+        const bool raw = rawLeaf;
+        if (raw) RawText();
+        warnLeaf = false;
         collecting = false;
         uint32_t tEnd = (uint32_t)d.text.size();
         bool mermaid = leafKind == BK_CODE && codeLang && codeLangLen == 7 && _wcsnicmp(codeLang, L"mermaid", 7) == 0 &&
@@ -942,6 +983,7 @@ struct Builder {
             bool empty = emptyItem || emptyFn;
             LeafSrc();
             BlockSrc& bs = d.blockSrc.back();
+            if (raw) bs.flags |= BS_RAWTEXT;
             if (alertBeg != UINT32_MAX && alertBeg > bs.beg && alertBeg <= bs.end) {  // the content after the tag
                 bs.beg = alertBeg;
                 bs.line = LineStart(alertBeg);
@@ -1030,8 +1072,9 @@ struct Builder {
         uint16_t fl = (bold ? F_BOLD : 0) | (italic ? F_ITALIC : 0) | (code ? F_CODE : 0) | (strike ? F_STRIKE : 0) |
                       (link ? F_LINK : 0) | (kbd ? F_KBD : 0) | (sup ? F_SUP : 0) | (sub ? F_SUB : 0);
         if (leafKind == BK_CODE && collecting) fl = 0;
-        if (!fl) return;
-        uint8_t color = (fl & F_LINK) ? P_LINK : (fl & F_STRIKE) ? P_MUTED : P_DEFAULT;
+        if (!fl && !warnLeaf) return;
+        // (an unclosed `<!--` being typed: its paragraph is drawn as a warning, §6.9)
+        uint8_t color = warnLeaf ? P_ALERT_CAUTION : (fl & F_LINK) ? P_LINK : (fl & F_STRIKE) ? P_MUTED : P_DEFAULT;
         uint32_t lnk = (fl & F_LINK) ? curLink : 0;
         if (!d.runs.empty() && d.runs.size() > rStart) {
             Run& r = d.runs.back();
@@ -1641,7 +1684,13 @@ struct Builder {
         }
         case MD_BLOCK_LI: {
             EndLeaf();
-            if (pendMarker != MK_NONE) {  // empty item: still show its marker
+            if (pendMarker != MK_NONE && inCell) {
+                // A list between the tags of an HTML cell ("<td>", blank line, "- a") is flattened into the cell's
+                // text, and so is its item's marker: a leaf made up here would be a block inside the cell, holding
+                // the source extent of the text the cell took (found by fuzzing the map). Nor may the marker wait for
+                // the first block after the table.
+                pendMarker = MK_NONE;
+            } else if (pendMarker != MK_NONE) {  // empty item: still show its marker
                 StartLeaf(BK_TEXT, 0);
                 leafIsLiImplicit = true;
                 emptyItem = true;
@@ -1824,6 +1873,7 @@ struct Builder {
 
     int SpanEnter(MD_SPANTYPE t, void* det) {
         EnsureLeaf();
+        if (rawLeaf) return 0;  // a raw leaf's text is its source (§6.9)
         switch (t) {
         case MD_SPAN_EM: italic++; break;
         case MD_SPAN_STRONG: bold++; break;
@@ -1880,6 +1930,7 @@ struct Builder {
     }
 
     int SpanLeave(MD_SPANTYPE t, void*) {
+        if (rawLeaf) return 0;
         switch (t) {
         case MD_SPAN_EM: italic--; break;
         case MD_SPAN_STRONG: bold--; break;
@@ -1906,6 +1957,10 @@ struct Builder {
     int OnText(MD_TEXTTYPE t, const MD_CHAR* s, MD_SIZE n) {
         brkNow = brk;  // map mode: a break extent belongs to the static text md4c sends right after it, or to nothing
         brk = false;
+        if (rawLeaf) {  // a raw leaf's text is its source (§6.9): EndLeaf writes it
+            EnsureLeaf();
+            return 0;
+        }
         if (mathDepth > 0) {  // inside a formula: every character belongs to its source, not to the document text
             mathSrc.append(s, n);
             return 0;
@@ -2078,15 +2133,25 @@ bool ParseMarkdown(Doc& d, const wchar_t* src, size_t n, const ParseOptions* opt
     d.runs.reserve(n / 24 + 16);
     d.blocks.reserve(n / 60 + 16);
     Builder b(d);
-    b.srcBase = src;
-    b.srcEnd = src + n;
-    // Edit mode's map (§4.3). Masks and raw-text leaves (§6.9) are accepted here already; they take effect in the
-    // phase that brings raw-while-typing.
+    b.origSrc = src;
+    // Edit mode's map (§4.3), with raw-while-typing's masks and raw-text leaves (§6.9): a masked offset is parsed as
+    // U+E000 in a copy of the source (the offsets stay the same) and gets its own character back in the text below.
+    std::wstring masked;
 #ifndef FASTMD_PREVIEW_DLL
     b.map = opt && opt->wantMap;
+    if (b.map && opt->masks && !opt->masks->empty()) {
+        masked.assign(src, n);
+        for (uint32_t m : *opt->masks)
+            if (m < n) masked[m] = 0xE000;
+        b.masks = opt->masks;
+        src = masked.c_str();
+    }
+    if (b.map && opt->raw && !opt->raw->empty()) b.rawRanges = opt->raw;
 #else
     (void)opt;
 #endif
+    b.srcBase = src;
+    b.srcEnd = src + n;
     if (b.map) {
         d.blockSrc.reserve(n / 60 + 16);
         d.segs.reserve(n / 16 + 16);
@@ -2136,6 +2201,10 @@ bool ParseMarkdown(Doc& d, const wchar_t* src, size_t n, const ParseOptions* opt
         std::stable_sort(d.blockOrder.begin(), d.blockOrder.end(),
                          [&](uint32_t a, uint32_t c) { return d.blockSrc[a].line < d.blockSrc[c].line; });
         d.hasMap = true;
+        if (b.masks)  // the masked characters show as themselves
+            for (uint32_t m : *b.masks)
+                for (const SrcSeg& g : d.segs)
+                    if (g.kind == SEG_PLAIN && m >= g.s && m < g.s + g.sLen) d.text[g.t + (m - g.s)] = b.origSrc[m];
     }
     return rc == 0;
 }

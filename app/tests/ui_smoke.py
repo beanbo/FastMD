@@ -2856,12 +2856,14 @@ def test_edit_guards():
         ok &= check("edit 2a: Ctrl+click on a link to another .md saves the edits and navigates",
                     pt and title_of(hwnd).startswith("other.md") and doc.read_bytes() == s2.encode("utf-8"),
                     f"link at {pt}, title {title_of(hwnd)!r}")
-        # Backspace in edit mode never goes back in history (T20)
+        # Backspace in edit mode never goes back in history (T20); at the heading's start it makes the heading a
+        # paragraph (§7.7, Phase 2b), which Undo takes back
         enter_edit(hwnd, 0, dx=1)
-        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)  # at the block's start Backspace changes nothing in Phase 2a
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
         post(hwnd, WM_KEYDOWN, VK["back"], 0, 0.5)
         ok &= check("edit 2a: a posted Backspace in edit mode does not navigate back",
-                    title_of(hwnd).startswith("other.md") and q(hwnd, "EDITING") == 1 and q(hwnd, "EDIT_DIRTY") == 0)
+                    title_of(hwnd).startswith("other.md") and q(hwnd, "EDITING") == 1)
+        cmd(hwnd, "UNDO", 0.3)
         post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.3)
         cmd(hwnd, "BACK", 1.0)
         # a reading-mode tick, then F2 and typing: no conflict

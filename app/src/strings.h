@@ -60,6 +60,8 @@ enum StrId : uint16_t {
     S_ED_MENU_SAVE, S_ED_MENU_SAVE_AS, S_ED_MENU_EXIT, S_SET_AUTOSAVE, S_ED_SIZE_B, S_ED_SIZE_KB, S_ED_SIZE_MB,
     // the review of 2a: entry waits for the recovery strip's decision (§10.5)
     S_ED_RECOVERY_FIRST,
+    // Phase 2b: a refused emission (§7.5), the empty header cell's placeholder (§7.10), a picture on the clipboard (§7.11)
+    S_ED_CANT_FORMAT, S_ED_COLUMN_FMT, S_ED_PASTE_PICTURE,
     S_COUNT
 };
 

@@ -190,3 +190,12 @@ map:
   c0 FOOTNOTE up=-1 b2..2 mark=11
   c1 FOOTNOTE up=-1 b3..3 mark=21
   order 0 2 3
+
+=== map_list_in_html_cell (§4.4 a tight list between an HTML cell's tags is the cell's text: its empty item makes no block, found by the edit walk)
+src: <table><tr><td>\n\n1. a\n   1. \n\n</td></tr></table>\nafter\n
+map:
+  b0 TABLE RAW|HTML line=30 beg=30 end=54 le=54 outer=54 raw=b0 "a" «⟨</td></tr></table>\nafter⟩»
+  b1 P RAW|HTML line=30 beg=30 end=54 le=54 outer=54 raw=b0 "after" «⟨</td></tr></table>\nafter⟩»
+  c0 ITEM up=-1 empty mark=17+2 1'.' col=3
+  c1 ITEM up=0 empty mark=25+2 1'.' col=6
+  order 0 1

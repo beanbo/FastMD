@@ -276,6 +276,11 @@ const Pair kStr[] = {
     // the review of 2a
     {L"Сначала решите, что делать с прерванным сохранением (полоса сверху)",
      L"First decide what to do with the interrupted save (the strip above)"},
+    // Phase 2b
+    {L"Здесь это форматирование не получится", L"This formatting cannot be applied here"},
+    {L"Столбец %d", L"Column %d"},
+    {L"Вставка картинок из буфера пока не поддерживается — перетащите файл сюда",
+     L"Pasting pictures from the clipboard is not supported yet — drop the file here"},
 };
 static_assert(std::size(kStr) == S_COUNT, "one entry per StrId");
 UiLang g_lang = UL_RU;

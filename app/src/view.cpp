@@ -74,15 +74,26 @@ float EditInset() { return (g.barT > 0 && !g.fitWide) ? 44.f / g.cfg.zoom * g.ba
 float EditRevealTop() { return EditInset() + g.stripH + (g.findOpen ? 52.f : 0.f) + 8.f; }
 float ScrollTrackTop() { return 2.f + EditInset() + g.stripH; }
 
+// Edit mode's phantom row (§6.7) takes its room next to its block: a line and a paragraph's gap before or after it, or
+// a line under it for a pending hard break.
 void RecomputeY() {
     float y = Metrics::kPadTop + EditInset();
     size_t n = g.doc.blocks.size();
+    const int32_t pb = g.phantomBlock;
     for (size_t i = 0; i < n; i++) {
         const Block& b = g.doc.blocks[i];
         if (BlockHidden(b)) { g.Y[i] = y; continue; }
         y += b.gap;
+        if ((int32_t)i == pb && g.phantomBefore) {
+            g.phantomY = y;
+            y += g.phantomH;
+        }
         g.Y[i] = y;
         y += g.H[i];
+        if ((int32_t)i == pb && !g.phantomBefore) {
+            g.phantomY = y + g.phantomH - g.phantomLine;
+            y += g.phantomH;
+        }
     }
     g.docH = y + Metrics::kPadBottom;
 }
@@ -489,6 +500,23 @@ static void DrawTable(uint32_t i, const Block& b, BlockLayout* L, float x, float
                 DrawHighlights(cl, cell.textOff, cell.textLen, tx, ty);
                 g.canvas->Text(cl, tx, ty, b.muted ? P_MUTED : P_TEXT);
                 DrawLinkFocus(cl, cell.textOff, cell.textLen, tx, ty);
+                if (g.editing && r == 0 && !cell.textLen) {  // an empty header cell says what it is, on screen only (UX-24)
+                    // (in the column's own width, cut with "…": the table keeps the width reading mode gave it)
+                    wchar_t ph[64];
+                    swprintf_s(ph, Tr(S_ED_COLUMN_FMT), (int)c + 1);
+                    float room = std::max(1.f, tl->colW[c] - 1 - 2 * Metrics::kCellPadX);
+                    if (IDWriteTextLayout* pl = UiLayout(ph, room, g.typo.fmt[R_BODY])) {
+                        pl->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                        DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+                        IDWriteInlineObject* ellipsis = nullptr;
+                        if (SUCCEEDED(g.dwf->CreateEllipsisTrimmingSign(pl, &ellipsis))) pl->SetTrimming(&trim, ellipsis);
+                        g.canvas->PushClip(xx + 1, yy, xx + tl->colW[c], yy + rh);
+                        g.canvas->Text(pl, tx, ty, P_MUTED);
+                        g.canvas->PopClip();
+                        SafeRelease(ellipsis);
+                        pl->Release();
+                    }
+                }
             }
             xx += tl->colW[c];
         }
@@ -792,14 +820,20 @@ static void DrawAtomOutline(float top, float bottom) {
 static void DrawEditCaret(float top, float bottom) {
     if (g.selAtomBlock >= 0) { DrawAtomOutline(top, bottom); return; }
     int32_t bi = g.caretBlock;
-    if (!g.caretOn || !g.caretVisible || g.fitWide || bi < 0 || (size_t)bi >= g.cache.size() || !g.cache[bi]) return;
+    if (!g.caretOn || !g.caretVisible || g.fitWide) return;
+    UINT sysW = 1;
+    SystemParametersInfoW(SPI_GETCARETWIDTH, 0, &sysW, 0);
+    float w = std::max(2.f, sysW * g.dpi / 96.f) / Scale();
+    if (g.phantomCaret && g.phantomBlock >= 0) {  // in the phantom row: at the content edge of its level (§6.7)
+        float ct = g.phantomY - g.scrollY, cb = ct + g.phantomLine;
+        if (cb > top && ct < bottom) g.canvas->FillRect(g.phantomX, ct, g.phantomX + w, cb, P_TEXT);
+        return;
+    }
+    if (bi < 0 || (size_t)bi >= g.cache.size() || !g.cache[bi]) return;
     float cx, dy, ch;
     if (!CaretGeomAt(g.selFocus, bi, g.caretCell, &cx, &dy, &ch, false)) return;
     float bx, bw;
     BlockBox(bi, &bx, &bw);
-    UINT sysW = 1;
-    SystemParametersInfoW(SPI_GETCARETWIDTH, 0, &sysW, 0);
-    float w = std::max(2.f, sysW * g.dpi / 96.f) / Scale();
     float right = std::min(bx + bw, ViewW() - Metrics::kPadX) - w;
     if (g.caretTrail) cx = std::min(cx + g.caretTrail * SpaceAdvance((uint32_t)bi), std::max(cx, right));
     float ct = dy - g.scrollY, cb = ct + ch;
@@ -942,10 +976,11 @@ struct FrameKey {
     bool editing = false, caretVisible = false, pencilHot = false;
     int barT = 0;
     uint32_t chrome = 0, editSerial = 0;
-    int32_t caretBlock = -1, caretCell = -1, atomBlock = -1, atomImage = -1;
+    int32_t caretBlock = -1, caretCell = -1, atomBlock = -1, atomImage = -1, phantomBlock = -1;
     uint16_t caretTrail = 0;
     int8_t caretAff = 0;
-    float stripH = 0;
+    float stripH = 0, phantomY = 0;
+    bool phantomCaret = false;
     bool operator==(const FrameKey&) const = default;
 };
 FrameKey g_last;
@@ -1003,6 +1038,9 @@ FrameKey CurrentKey() {
     k.atomBlock = g.selAtomBlock;
     k.atomImage = g.selAtomImage;
     k.stripH = g.stripH;
+    k.phantomBlock = g.phantomBlock;
+    k.phantomY = g.phantomY;
+    k.phantomCaret = g.phantomCaret;
     // things drawn over the text: they would have to be repaired pixel by pixel, so those frames are drawn in full
     bool pill = !g.tip.empty() || (g.hoverLink >= 0 && !g.selecting) || g.focusLink >= 0;
     bool toast = !g.toast.empty() && GetTickCount() < g.toastUntil;
@@ -1415,6 +1453,12 @@ static bool CaretGeom(uint32_t pos, float* cx, float* docY, float* h, bool relay
 // knows its block and cell, and stands right of trailing blanks it was typed after
 bool CaretPoint(uint32_t pos, float* x, float* y, float* h) {
     float dy;
+    if (g.editing && g.phantomCaret && g.phantomBlock >= 0 && pos == g.selFocus) {  // in the phantom row (§6.7)
+        *x = g.phantomX;
+        *y = g.phantomY - g.scrollY;
+        *h = g.phantomLine;
+        return true;
+    }
     bool edit = g.editing && pos == g.selFocus && g.caretBlock >= 0;
     if (!CaretGeomAt(pos, edit ? g.caretBlock : -1, edit ? g.caretCell : -1, x, &dy, h, true)) return false;
     if (edit && g.caretTrail) *x += g.caretTrail * SpaceAdvance((uint32_t)g.caretBlock);

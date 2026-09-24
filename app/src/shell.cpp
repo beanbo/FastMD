@@ -6,8 +6,19 @@
 #include <shlobj.h>
 
 // ------------------------------------------------------------------------------------------------ clipboard
+// Right after a program puts something on the clipboard, Windows' clipboard history (and any clipboard manager) opens
+// it to read the new content; an OpenClipboard in that moment fails. Found by the paste tests of edit mode (Phase 2b):
+// a paste right after another program's copy did nothing, and a cut lost its text.
+bool OpenClipboardRetry() {
+    for (int k = 0; k < 10; k++) {
+        if (OpenClipboard(g.hwnd)) return true;
+        Sleep(10);
+    }
+    return false;
+}
+
 void CopyToClipboard(const std::wstring& text) {
-    if (text.empty() || !OpenClipboard(g.hwnd)) return;
+    if (text.empty() || !OpenClipboardRetry()) return;
     EmptyClipboard();
     size_t bytes = (text.size() + 1) * sizeof(wchar_t);
     if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
@@ -72,7 +83,7 @@ bool CopyImageToClipboard(uint32_t bi) {
             CloseHandle(f);
         }
     }
-    if (!OpenClipboard(g.hwnd)) {
+    if (!OpenClipboardRetry()) {
         GlobalFree(dib);
         if (png) GlobalFree(png);
         return false;

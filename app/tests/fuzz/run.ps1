@@ -1,9 +1,11 @@
 # Builds the fuzz harness with AddressSanitizer and runs it (plan 6.5).
-# Usage: pwsh -File app/tests/fuzz/run.ps1 [-Runs 50000] [-Seed 1] [-NoAsan]
+# Usage: pwsh -File app/tests/fuzz/run.ps1 [-Runs 50000] [-Seed 1] [-NoAsan] [-NoEdit]
+#   every input also gets edit mode's random walk (--edit, docs/EDIT-MODE.md §14.2) unless -NoEdit
 param(
     [int]$Runs = 20000,
     [int]$Seed = 0,
-    [switch]$NoAsan
+    [switch]$NoAsan,
+    [switch]$NoEdit
 )
 $ErrorActionPreference = 'Stop'
 $app = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent   # …\app
@@ -32,11 +34,13 @@ Push-Location (Join-Path $app 'tests')
 try {
     # run it directly, not through the MSVC wrapper: that one changes the working directory, and the harness writes
     # the input it is about to parse next to the other test output
-    & $exe --runs $Runs --seed $Seed --corpus (Join-Path $app '..\bench\corpus')
+    $fuzzArgs = @('--runs', $Runs, '--seed', $Seed, '--corpus', (Join-Path $app '..\bench\corpus'))
+    if (-not $NoEdit) { $fuzzArgs += '--edit' }
+    & $exe @fuzzArgs
     $code = $LASTEXITCODE
 } finally {
     Pop-Location
 }
-if ($code -eq 3) { throw "MapSelfCheck failed (edit mode's source map) - the input is app\tests\out\fuzz\map-*.u16, see above" }
+if ($code -eq 3) { throw "MapSelfCheck or the edit walk failed - the input is app\tests\out\fuzz\map-*.u16 / walk-*.u16, see above" }
 if ($code -ne 0) { throw "fuzzing stopped with code $code - the input that did it is app\tests\out\fuzz\last.md" }
-Write-Host "fuzz ok: $Runs runs, seed $Seed, maps checked$(if ($NoAsan) { '' } else { ', with AddressSanitizer' })"
+Write-Host "fuzz ok: $Runs runs, seed $Seed, maps checked$(if ($NoEdit) { '' } else { ', edit walks undone' })$(if ($NoAsan) { '' } else { ', with AddressSanitizer' })"
