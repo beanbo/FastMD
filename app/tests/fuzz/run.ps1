@@ -11,8 +11,10 @@ $env:VSLANG = '1033'
 $msvc = Join-Path $app 'tools\msvc.cmd'
 $build = Join-Path $app 'build\Fuzz'
 $asan = if ($NoAsan) { 'OFF' } else { 'ON' }
-& $msvc cmake -S $app -B $build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFASTMD_FUZZ=ON -DFASTMD_ASAN=$asan `
-    -DFASTMD_RUST=OFF -DFASTMD_SETUP=OFF
+# quoted: PowerShell passes a bare -DNAME=$var to a native command without expanding it, and CMake then read the
+# literal "$asan" as true - so -NoAsan used to build with AddressSanitizer anyway and fail to find its runtime
+& $msvc cmake -S $app -B $build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFASTMD_FUZZ=ON "-DFASTMD_ASAN=$asan" `
+    -DFASTMD_RUST=OFF -DFASTMD_SETUP=OFF -DFASTMD_TESTS=OFF
 if ($LASTEXITCODE -ne 0) { throw 'cmake configure failed' }
 & $msvc cmake --build $build --target fastmd-fuzz
 if ($LASTEXITCODE -ne 0) { throw 'build failed' }
@@ -35,5 +37,6 @@ try {
 } finally {
     Pop-Location
 }
+if ($code -eq 3) { throw "MapSelfCheck failed (edit mode's source map) - the input is app\tests\out\fuzz\map-*.u16, see above" }
 if ($code -ne 0) { throw "fuzzing stopped with code $code - the input that did it is app\tests\out\fuzz\last.md" }
-Write-Host "fuzz ok: $Runs runs, seed $Seed$(if ($NoAsan) { '' } else { ', with AddressSanitizer' })"
+Write-Host "fuzz ok: $Runs runs, seed $Seed, maps checked$(if ($NoAsan) { '' } else { ', with AddressSanitizer' })"

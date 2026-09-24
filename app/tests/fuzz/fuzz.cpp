@@ -8,7 +8,13 @@
 //   fastmd-fuzz.exe --runs 100000 --seed 7            # or drive it directly
 //   fastmd-fuzz.exe --file broken.md                  # parse one file and stop (for a case that already failed)
 //
-// A crash leaves the input in app/tests/out/fuzz/crash-<n>.md, so it can be replayed with --file.
+// The input being parsed is always in app/tests/out/fuzz/last.md, so a crash can be replayed with --file.
+//
+// Every input is also parsed the way edit mode parses (with the text <-> source map) and checked by MapSelfCheck
+// (docs/EDIT-MODE.md §4.5, §14.2). Half the inputs see the formula and diagram libraries as present, half as absent,
+// and a third get CRLF line ends. A map that breaks an invariant stops the run with exit code 3 and leaves the input
+// as out/fuzz/map-<n>-tex<0|1>.u16 (the exact UTF-16, lone surrogates and all) plus a readable .md copy:
+//   fastmd-fuzz.exe --file out\fuzz\map-123-tex1.u16 --tex 1
 // the standard headers come first: windows.h leaves macros behind that upset them
 #include <cstdio>
 #include <cstdlib>
@@ -18,12 +24,14 @@
 #include <vector>
 
 #include "doc.h"
+#include "editcore.h"
 #include "html.h"
 
-// The parser asks whether the formula and diagram libraries are there; for fuzzing they are not, which keeps every
-// formula on the text path instead of the picture path.
-bool TexAvailable() { return false; }
-bool MermaidAvailable() { return false; }
+// The parser asks whether the formula and diagram libraries are there: a formula is then a picture (an object atom in
+// the map) instead of code text. The fuzzer flips this per input so both paths of the map are exercised.
+bool g_texOn = false;
+bool TexAvailable() { return g_texOn; }
+bool MermaidAvailable() { return g_texOn; }
 
 namespace {
 // Inputs are kept to this size: past a couple of hundred kilobytes a mutation finds nothing new, and with
@@ -105,12 +113,59 @@ std::wstring Mutate(std::mt19937& rng, const std::wstring& src) {
 
 bool g_trace = false;  // --file: say which stage is running, so a hang can be placed
 
-// one round: the Markdown model, then the HTML tag reader over the same bytes
-void ParseOnce(const std::wstring& text) {
+std::wstring ToCrlf(const std::wstring& s) {  // every lone \n becomes \r\n
+    std::wstring o;
+    o.reserve(s.size() + s.size() / 16);
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == L'\n' && (i == 0 || s[i - 1] != L'\r')) o += L'\r';
+        o += s[i];
+    }
+    return o;
+}
+
+void WriteRawFile(const std::wstring& path, const std::wstring& text) {
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD wrote = 0;
+    WriteFile(f, text.data(), (DWORD)(text.size() * sizeof(wchar_t)), &wrote, nullptr);
+    CloseHandle(f);
+}
+std::wstring ReadRawFile(const wchar_t* path) {
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return L"";
+    DWORD size = GetFileSize(f, nullptr), got = 0;
+    std::wstring text(size / sizeof(wchar_t), L'\0');
+    if (size >= sizeof(wchar_t)) ReadFile(f, text.data(), (DWORD)(text.size() * sizeof(wchar_t)), &got, nullptr);
+    CloseHandle(f);
+    return text;
+}
+
+// one round: the Markdown model, the model with edit mode's map (checked), then the HTML tag reader over the same
+// bytes. Returns false when the map breaks an invariant; *why says which.
+bool ParseOnce(const std::wstring& text, std::string* why) {
     if (g_trace) { wprintf(L"  markdown...\n"); fflush(stdout); }
     Doc d;
     d.baseDir = L"C:\\fuzz\\";
     ParseMarkdown(d, text.data(), text.size());
+    if (g_trace) { wprintf(L"  markdown with the map...\n"); fflush(stdout); }
+    Doc m;
+    m.baseDir = d.baseDir;
+    ParseOptions opt;
+    opt.wantMap = true;
+    ParseMarkdown(m, text.data(), text.size(), &opt);
+    // the map must not change the document's structure (its text may differ in one place by design: a code block
+    // keeps its empty last lines, F4)
+    bool ok = MapSelfCheck(m, text, why);
+    if (ok && m.blocks.size() != d.blocks.size()) {
+        *why = "the map parse has a different number of blocks than the reading parse";
+        ok = false;
+    }
+    for (size_t k = 0; ok && k < m.blocks.size(); k++) {
+        if (m.blocks[k].kind != d.blocks[k].kind || m.blocks[k].heading != d.blocks[k].heading) {
+            *why = "the map parse has a different block " + std::to_string(k) + " than the reading parse";
+            ok = false;
+        }
+    }
     if (g_trace) { wprintf(L"  tags...\n"); fflush(stdout); }
     // the tag reader is normally fed by md4c; here it is fed the raw text, which is harsher
     for (size_t i = 0; i + 1 < text.size(); i++) {
@@ -122,6 +177,7 @@ void ParseOnce(const std::wstring& text) {
     std::wstring out;
     AppendHtmlText(out, text.data(), text.size());
     if (g_trace) { wprintf(L"  done\n"); fflush(stdout); }
+    return ok;
 }
 }  // namespace
 
@@ -135,14 +191,22 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--seed" && i + 1 < argc) seed = (unsigned)wcstoul(argv[++i], nullptr, 10);
         else if (a == L"--file" && i + 1 < argc) single = argv[++i];
         else if (a == L"--corpus" && i + 1 < argc) corpus = argv[++i];
+        else if (a == L"--tex" && i + 1 < argc) g_texOn = wcstol(argv[++i], nullptr, 10) != 0;
     }
     if (!single.empty()) {
         g_trace = true;
-        char narrow[MAX_PATH * 2];
-        WideCharToMultiByte(CP_UTF8, 0, single.c_str(), -1, narrow, (int)std::size(narrow), nullptr, nullptr);
-        ParseOnce(ReadUtf8File(narrow));
-        wprintf(L"parsed %s\n", single.c_str());
-        return 0;
+        std::wstring text;
+        if (single.size() > 4 && _wcsicmp(single.c_str() + single.size() - 4, L".u16") == 0) {
+            text = ReadRawFile(single.c_str());
+        } else {
+            char narrow[MAX_PATH * 2];
+            WideCharToMultiByte(CP_UTF8, 0, single.c_str(), -1, narrow, (int)std::size(narrow), nullptr, nullptr);
+            text = ReadUtf8File(narrow);
+        }
+        std::string why;
+        bool ok = ParseOnce(text, &why);
+        wprintf(L"parsed %s (tex %d): %hs\n", single.c_str(), g_texOn ? 1 : 0, ok ? "map ok" : why.c_str());
+        return ok ? 0 : 3;
     }
     LoadSeeds(corpus);
     LoadSeeds(corpus + L"\\..\\..\\app\\tests");
@@ -157,11 +221,21 @@ int wmain(int argc, wchar_t** argv) {
     DWORD t0 = GetTickCount();
     for (long i = 0; i < runs; i++) {
         std::wstring text = Mutate(rng, g_seeds[rng() % g_seeds.size()]);
+        g_texOn = (rng() & 1) != 0;
+        if (rng() % 3 == 0) text = ToCrlf(text);
         // the input is written out first: if the parse takes the process down, the file is what reproduces it
         WriteUtf8File(L"out\\fuzz\\last.md", text);
-        ParseOnce(text);
+        std::string why;
+        if (!ParseOnce(text, &why)) {
+            std::wstring name = L"out\\fuzz\\map-" + std::to_wstring(i) + L"-tex" + (g_texOn ? L"1" : L"0");
+            WriteRawFile(name + L".u16", text);
+            WriteUtf8File(name + L".md", text);
+            wprintf(L"MapSelfCheck failed on run %ld: %hs\n  input: app\\tests\\%s.u16 (replay with --file ... --tex %d)\n",
+                    i, why.c_str(), name.c_str(), g_texOn ? 1 : 0);
+            return 3;
+        }
         if ((i & 1023) == 1023) wprintf(L"  %ld runs, %.1f s\n", i + 1, (GetTickCount() - t0) / 1000.0);
     }
-    wprintf(L"done: %ld runs in %.1f s, nothing fell over\n", runs, (GetTickCount() - t0) / 1000.0);
+    wprintf(L"done: %ld runs in %.1f s, nothing fell over, every map checked\n", runs, (GetTickCount() - t0) / 1000.0);
     return 0;
 }

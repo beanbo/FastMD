@@ -39,13 +39,35 @@ CMD = {"COPY": 100, "SELECT_ALL": 101, "OPEN": 102, "RELOAD": 103, "EDIT": 104, 
        "COL_NARROW": 118, "COL_NORMAL": 119, "COL_WIDE": 120, "COL_FULL": 121, "COL_NARROWER": 122, "COL_WIDER": 123,
        "WRAP": 124, "SETTINGS": 125, "LINK_OPEN": 126, "IMG_COPY": 127, "IMG_OPEN": 128, "FIND_CASE": 129,
        "FIND_WORD": 130, "FIND_NEXT": 131, "FIND_PREV": 132, "FIND_CLOSE": 133, "LINK_NEXT": 134, "LINK_PREV": 135,
-       "LOAD_REMOTE": 136, "COPY_MD": 137, "PRINT": 138, "EXPORT_PDF": 139}
+       "LOAD_REMOTE": 136, "COPY_MD": 137, "PRINT": 138, "EXPORT_PDF": 139, "UPDATE": 140}
+# edit mode (docs/EDIT-MODE.md §13.1): the complete v1 list, mirrored from app.h before the features exist
+CMD.update({"EDIT_TOGGLE": 141, "EDIT_HERE": 142, "EDIT_EXIT": 143, "UNDO": 144, "REDO": 145, "CUT": 146,
+            "PASTE": 147, "SAVE": 148, "SAVE_AS": 149, "FMT_BOLD": 150, "FMT_ITALIC": 151, "FMT_STRIKE": 152,
+            "FMT_CODE": 153, "LINK": 154, "LINK_REMOVE": 155, "BLOCK_P": 156, "BLOCK_H1": 157, "BLOCK_H2": 158,
+            "BLOCK_H3": 159, "BLOCK_H4": 160, "BLOCK_H5": 161, "BLOCK_H6": 162, "LIST_BULLET": 163, "LIST_NUMBER": 164,
+            "LIST_TASK": 165, "QUOTE": 166, "CODEBLOCK": 167, "CODE_LANG": 168, "INS_TABLE": 169, "INS_FORMULA": 170,
+            "INS_FORMULA_BLOCK": 171, "INS_DIAGRAM": 172, "INS_IMAGE": 173, "INS_HR": 174, "NEW_PARAGRAPH": 175,
+            "TABLE_ROW_ABOVE": 176, "TABLE_ROW_BELOW": 177, "TABLE_COL_LEFT": 178, "TABLE_COL_RIGHT": 179,
+            "TABLE_DEL_ROW": 180, "TABLE_DEL_COL": 181, "TABLE_ALIGN_L": 182, "TABLE_ALIGN_C": 183,
+            "TABLE_ALIGN_R": 184, "TABLE_DEL": 185, "BLOCK_MENU": 186, "TABLE_MENU": 187, "FORMULA_MENU": 188,
+            "DIAGRAM_MENU": 189, "EDIT_MORE": 190, "ATOM_EDIT": 191, "POPUP_DONE": 192, "POPUP_CANCEL": 193,
+            "CONFLICT_LOAD": 194, "CONFLICT_KEEP": 195, "SAVE_RETRY": 196, "DISCARD_EDITS": 197, "ENC_UTF8": 198,
+            "ENC_REMOVE_CHAR": 199, "RECOVERY_OPEN": 200, "RECOVERY_RESTORE": 201, "RECOVERY_DELETE": 202,
+            "OTHER_WINDOW": 203, "STRIP_CLOSE": 204})
 Q = {"SCROLLY": 1, "DOCH": 2, "TOC_OPEN": 3, "TOC_DOCKED": 4, "TOC_COUNT": 5, "TOC_CURRENT": 6, "TOC_ITEM_Y": 7,
      "HSCROLL_BLOCK": 8, "HSCROLL_X": 9, "FOCUS_LINK": 10, "MATCHES": 11, "CUR_MATCH": 12, "TEXT_LEFT": 13,
      "TEXT_W": 14, "RECENT_COUNT": 15, "FIND_EDIT": 16, "SETTINGS_HWND": 17, "FIND_OPEN": 18, "COLUMN": 19,
      "FONT_SIZE": 20, "WRAP": 21, "LANG": 22, "FIND_PART_X": 23, "BLOCK_Y": 24, "RESTORED": 25, "THEME_DARK": 26,
      "TARGETY": 27, "SETTINGS_HIT": 28, "SITKA": 29, "SETTINGS_BTN": 30, "IMG_SCALED": 31, "FULL_REDRAW": 32, "SEL_ANCHOR": 33, "SEL_FOCUS": 34, "CARET": 35, "DRAG": 36, "MATH": 37, "UPDATE": 38,
      "TASK": 39, "TASK_BOX": 40, "DOC_SERIAL": 41}
+# edit mode (§13.2): a query whose feature is not built yet answers -1
+Q.update({"EDITING": 42, "EDIT_DIRTY": 43, "EDIT_CARET_SRC": 44, "EDIT_ANCHOR_SRC": 45, "EDIT_TOOL": 46,
+          "EDIT_BAR": 47, "UNDO_DEPTH": 48, "RELOADS": 49, "SAVES": 50, "EDIT_POPUP": 51, "MAP_SELFCHECK": 52,
+          "SRC_HASH": 53, "SRC_LEN": 54, "EDIT_BUSY": 55, "EDIT_PHANTOM": 56, "BLOCK_COUNT": 57, "EDIT_SAVE_STATE": 58,
+          "EDIT_CONFLICT": 59, "EDIT_ENC": 60, "EDIT_EOL": 61, "EDIT_ACTIVE": 62, "LAST_PROMPT": 63,
+          "RELAYOUT_ALL": 64, "FRAME_STATS": 65, "RENDERS": 66, "EDIT_STATS": 67, "EDIT_CARET_VISIBLE": 68,
+          "EDIT_CARET_PHASE": 69, "EDIT_POPUP_STATE": 70, "EDIT_ATOM": 71, "EDIT_STRIP": 72, "EDIT_RAW": 73,
+          "EDIT_BUBBLE": 74, "EDIT_COLLAPSE": 75})
 FP_NEXT, FP_CASE = 7, 3  # FindPart
 US_CHECKING, US_LATEST, US_AVAILABLE, US_CHECK_FAILED = 1, 2, 3, 7  # UpdateStatus
 ACCENT = (0x09, 0x69, 0xDA)  # P_ACCENT, light theme
@@ -224,7 +246,8 @@ def drag(hwnd, x0, y0, x1, y1):
     post(hwnd, WM_LBUTTONUP, 0, lp(x1, y1), 0.15)
 
 
-VK = {"left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28, "home": 0x24, "end": 0x23, "esc": 0x1B}
+VK = {"left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28, "home": 0x24, "end": 0x23, "esc": 0x1B,
+      "back": 0x08, "delete": 0x2E, "return": 0x0D, "tab": 0x09, "f2": 0x71, "oem_3": 0xC0}
 
 
 def keys(hwnd, vks, shift=False, ctrl=False, wait=0.12):
@@ -1634,6 +1657,108 @@ def test_placement(doc):
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ edit mode, phase 1a
+def dbl_click(hwnd, x, y, wait=0.3):
+    """the app counts clicks itself (no CS_DBLCLKS): two quick press/release pairs at the same point"""
+    post(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp(x, y), 0.01)
+    post(hwnd, WM_LBUTTONUP, 0, lp(x, y), 0.01)
+    post(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp(x, y), 0.01)
+    post(hwnd, WM_LBUTTONUP, 0, lp(x, y), wait)
+
+
+def wait_for(pred, timeout=5.0, step=0.1):
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(step)
+    return bool(pred())
+
+
+def test_map_selfcheck():
+    """edit mode's text <-> source map holds on real documents: the app parses the whole source with the map and
+    checks every invariant of EDIT-MODE.md §4.5 (Q_MAP_SELFCHECK); reading mode itself is untouched"""
+    ok = True
+    (OUT / "map-math.md").write_text(MATH_DOC, encoding="utf-8")
+    for name in ("features.md", "footnotes.md", "html.md"):
+        shutil.copy(HERE / name, OUT / f"map-{name}")
+    docs = [OUT / "map-features.md", REPO / "bench" / "corpus" / "medium.md", OUT / "map-footnotes.md",
+            OUT / "map-html.md", OUT / "map-math.md", REPO / "bench" / "corpus" / "large.md"]
+    for doc in docs:
+        proc, hwnd = launch(doc)
+        try:
+            if doc.name == "large.md":  # the first screen comes from a prefix; the full parse follows on a thread
+                counts = []
+                wait_for(lambda: counts.append(q(hwnd, "BLOCK_COUNT")) or (len(counts) > 3 and counts[-1] == counts[-4]
+                                                                            and counts[-1] > 2000), 8.0, 0.25)
+            ok &= check(f"edit 1a: the map of {doc.name} passes its self-check", q(hwnd, "MAP_SELFCHECK", 0) == 1,
+                        f'{q(hwnd, "MAP_SELFCHECK", 0)} (blocks {q(hwnd, "BLOCK_COUNT")})')
+            ok &= check(f"edit 1a: {doc.name} is read, not edited; no self-check failures counted",
+                        q(hwnd, "EDITING") == 0 and q(hwnd, "EDIT_CARET_SRC") == -1 and q(hwnd, "MAP_SELFCHECK", 1) == 0)
+        finally:
+            close_and_wait(proc, hwnd)
+    return ok
+
+
+COPY_MD_DOC = ("# Заголовок первой строки\n\nСущность &copy; и слово после неё.\n\nФлаг :england: и слово\n\n"
+               "[ref]: http://example.com\n")
+FRONT_DOC = "---\ntitle: Привет\nauthor: Кто-то\n---\n\n# Заголовок\n\nТекст.\n"
+
+
+def test_copy_md_exact():
+    """copy as Markdown gives back exactly the source lines: the file's first line whole, the text after an emoji
+    whose picture is longer than its :shortcode: and after an entity where it really is; a selection inside the
+    front-matter table gives its own line instead of the whole file"""
+    ok = True
+    doc = OUT / "copy-md.md"
+    doc.write_text(COPY_MD_DOC, encoding="utf-8")
+    proc, hwnd = launch(doc)
+    try:
+        cmd(hwnd, "SELECT_ALL", 0.3)
+        cmd(hwnd, "COPY_MD", 0.5)
+        want = "# Заголовок первой строки\n\nСущность &copy; и слово после неё.\n\nФлаг :england: и слово"
+        md = clipboard().replace("\r\n", "\n")
+        ok &= check("edit 1a: copy as Markdown of everything is the source, first line whole, nothing after the emoji",
+                    md == want, repr(md[-40:] if md.startswith("# ") else md[:40]))
+        # (no Esc between the steps: with nothing selected it would close the window; a double click replaces the
+        # selection anyway)
+        dbl_click(hwnd, q(hwnd, "TEXT_LEFT") + 12, q(hwnd, "BLOCK_Y", 0) + 20)
+        has = q(hwnd, "SEL_ANCHOR") != q(hwnd, "SEL_FOCUS")
+        cmd(hwnd, "COPY_MD", 0.5)
+        md = clipboard().replace("\r\n", "\n")
+        ok &= check("edit 1a: a word on the first line copies that line whole", has and md == "# Заголовок первой строки",
+                    repr(md[:40]))
+        time.sleep(0.6)  # not a third click
+        dbl_click(hwnd, q(hwnd, "TEXT_LEFT") + 12, q(hwnd, "BLOCK_Y", 1) + 10)
+        has = q(hwnd, "SEL_ANCHOR") != q(hwnd, "SEL_FOCUS")
+        cmd(hwnd, "COPY_MD", 0.5)
+        md = clipboard().replace("\r\n", "\n")
+        ok &= check("edit 1a: a word before an entity copies its own line", has and md == "Сущность &copy; и слово после неё.",
+                    repr(md[:60]))
+    finally:
+        close_and_wait(proc, hwnd)
+    doc = OUT / "copy-md-front.md"
+    doc.write_text(FRONT_DOC, encoding="utf-8")
+    proc, hwnd = launch(doc)
+    try:
+        # a word in the first cell of the property table (its header row: "title | Привет")
+        x, y = q(hwnd, "TEXT_LEFT"), q(hwnd, "BLOCK_Y", 0)
+        has = False
+        for dx, dy in ((18, 20), (26, 22), (14, 16)):
+            dbl_click(hwnd, x + dx, y + dy)
+            if q(hwnd, "SEL_ANCHOR") != q(hwnd, "SEL_FOCUS"):
+                has = True
+                break
+            time.sleep(0.6)
+        cmd(hwnd, "COPY_MD", 0.5)
+        md = clipboard().replace("\r\n", "\n")
+        ok &= check("edit 1a: a word in the front-matter table copies its property line, not the whole file",
+                    has and md == "title: Привет", repr(md[:60]))
+    finally:
+        close_and_wait(proc, hwnd)
+    return ok
+
+
 def main():
     OUT.mkdir(exist_ok=True)
     reset_profile()
@@ -1652,7 +1777,8 @@ def main():
              ("update", test_update), ("broken_html", test_broken_html), ("tasks", test_tasks),
              ("scroll_frames", test_scroll_frames), ("image_scaling", lambda: test_image_scaling(doc)),
              ("columns", lambda: test_columns(doc)), ("settings", lambda: test_settings(doc)),
-             ("placement", lambda: test_placement(doc))]
+             ("placement", lambda: test_placement(doc)), ("map_selfcheck", test_map_selfcheck),
+             ("copy_md_exact", test_copy_md_exact)]
     only = [n for n in os.environ.get("FASTMD_ONLY", "").split(",") if n]  # e.g. FASTMD_ONLY=update,settings
     for name, t in tests:
         if not only or name in only:

@@ -32,6 +32,7 @@ add_executable(FastMD WIN32
     src/highlight.cpp src/theme.cpp src/util.cpp
     src/find.cpp src/toc.cpp src/home.cpp src/store.cpp src/shell.cpp src/settings_ui.cpp src/strings.cpp
     src/copy.cpp src/drag.cpp src/crash.cpp src/update.cpp src/uia.cpp src/tasks.cpp
+    src/editcore.cpp
     third_party/md4c/md4c.c
     res/fastmd.rc)
 
@@ -155,8 +156,9 @@ endif()
 option(FASTMD_FUZZ "Build the fuzz harness" OFF)
 option(FASTMD_ASAN "Build it with AddressSanitizer" OFF)
 if(FASTMD_FUZZ)
+    # editcore.cpp: every input is also parsed with edit mode's map and checked by MapSelfCheck
     add_executable(fastmd-fuzz tests/fuzz/fuzz.cpp src/parse.cpp src/html.cpp src/highlight.cpp src/util.cpp
-        src/theme.cpp third_party/md4c/md4c.c)
+        src/theme.cpp src/editcore.cpp third_party/md4c/md4c.c)
     target_include_directories(fastmd-fuzz PRIVATE ${CMAKE_BINARY_DIR}/generated src)
     target_compile_definitions(fastmd-fuzz PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
         _CRT_SECURE_NO_WARNINGS MD4C_USE_UTF16 FASTMD_NO_APP)
@@ -164,6 +166,23 @@ if(FASTMD_FUZZ)
         $<$<BOOL:${FASTMD_ASAN}>:/fsanitize=address>)
     target_link_options(fastmd-fuzz PRIVATE /DEBUG /INCREMENTAL:NO)
     target_link_libraries(fastmd-fuzz PRIVATE user32 advapi32 shlwapi)
+endif()
+
+# --------------------------------------------------------------------------------------------- fastmd-edit-tests
+# Edit mode's window-free core (docs/EDIT-MODE.md §14.1): golden cases from tests/edit/cases and property sweeps over
+# the corpus, on the same parser the app uses but with no window and no `g`. The exit code is the number of failures.
+#   pwsh -File tests/edit/run.ps1
+option(FASTMD_TESTS "Build the edit-mode unit tests" ON)
+if(FASTMD_TESTS)
+    add_executable(fastmd-edit-tests tests/edit/edit_tests.cpp src/editcore.cpp src/parse.cpp src/html.cpp
+        src/highlight.cpp src/util.cpp src/theme.cpp third_party/md4c/md4c.c)
+    target_include_directories(fastmd-edit-tests PRIVATE ${CMAKE_BINARY_DIR}/generated src)
+    target_compile_definitions(fastmd-edit-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        _CRT_SECURE_NO_WARNINGS MD4C_USE_UTF16 FASTMD_NO_APP FASTMD_APP_DIR="${CMAKE_SOURCE_DIR}")
+    target_compile_options(fastmd-edit-tests PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus /EHsc
+        $<$<CONFIG:Release>:/O2 /Oi /DNDEBUG>)
+    target_link_options(fastmd-edit-tests PRIVATE /INCREMENTAL:NO)
+    target_link_libraries(fastmd-edit-tests PRIVATE user32 advapi32 shlwapi)
 endif()
 
 # ------------------------------------------------------------------------------------------- fastmd-preview.dll

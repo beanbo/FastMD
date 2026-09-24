@@ -1,6 +1,7 @@
 // Win32 window: input routing, keyboard shortcuts, commands, context menu, settings application, window placement,
 // automation queries, entry point.
 #include "app.h"
+#include "editcore.h"
 #include <dwmapi.h>
 #include <imm.h>
 #include <shellapi.h>
@@ -264,7 +265,8 @@ static int FirstVisibleImage() {  // automation: the image commands without a co
     return -1;
 }
 
-void Command(UINT id) {
+void Command(UINT id, UINT arg) {
+    (void)arg;  // the edit commands that take one (a table's size, a diagram template) arrive with their phases
     int li = g.ctxLink >= 0 ? g.ctxLink : g.focusLink;
     switch (id) {
     case CMD_COPY: CopySelection(); break;
@@ -957,7 +959,24 @@ static LRESULT Query(WPARAM q, LPARAM lp) {
         return MAKELONG(std::lround((l + r) * 0.5f * s), std::lround((t + b) * 0.5f * s));
     }
     case Q_DOC_SERIAL: return g.docSerial;
+    case Q_EDITING: return 0;
+    case Q_BLOCK_COUNT: return (LRESULT)n;
+    case Q_MAP_SELFCHECK: {  // edit mode's map (EDIT-MODE.md §4.5), on a map parse of the whole source made just for this
+        if (lp == 1) return 0;  // failures counted after edit swaps under FASTMD_EDIT_SELFCHECK: there are none yet
+        if (g.path.empty() || g.loadFailed) return -1;
+        Doc m;
+        m.baseDir = g.doc.baseDir;
+        ParseOptions opt;
+        opt.wantMap = true;
+        ParseMarkdown(m, g.src.data(), g.src.size(), &opt);  // g.src is only read here, as the full parse does
+        std::string why;
+        if (MapSelfCheck(m, g.src, &why)) return 1;
+        DebugLog("map self-check failed: %s", why.c_str());
+        return 0;
     }
+    }
+    // the rest of edit mode's queries answer once their features exist (§13: ids first, behaviour later)
+    if (q >= Q_EDIT_DIRTY && q <= Q_EDIT_COLLAPSE) return -1;
     return 0;
 }
 
@@ -1106,7 +1125,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         ApplyTheme();
         return 0;
     case WM_COMMAND:  // menu ids; also lets tests and automation drive the viewer (tests/ui_smoke.py)
-        if (g.ready && !g.firstFrame) Command(LOWORD(wp));
+        if (g.ready && !g.firstFrame) Command(LOWORD(wp), HIWORD(wp));
         return 0;
     case WM_APP_QUERY: return (g.ready && !g.firstFrame) ? Query(wp, lp) : 0;
     case WM_APP_MEASURED: OnMeasured((MeasureJob*)lp); return 0;

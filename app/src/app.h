@@ -26,9 +26,18 @@ enum : UINT {
     WM_APP_FINDINPUT,              // find input box → UI thread: wParam = FI_*, lParam = event data
     WM_APP_SCALED,                 // images re-scaled to display size (wParam = docGen, lParam = std::vector<ScaledImage>*)
     WM_APP_UPDATE,                 // updater (update.cpp): wParam = what happened, lParam = its data
+    // edit mode (docs/EDIT-MODE.md §13.4; the ids are frozen now, the handlers arrive with their phases)
+    WM_APP_PREVIEW = WM_APP + 9,   // preview worker → UI: lParam = PreviewResult*
+    WM_APP_EDITINPUT = WM_APP + 10,  // popup EDITs → UI: wParam EI_TEXT (lParam = seq), EI_KEY (vk | mods << 16), EI_FOCUS
+    WM_APP_SAVED = WM_APP + 11,    // save worker → UI: lParam = SaveResult*
+    WM_APP_TESTKEY = WM_APP + 12,  // FASTMD_TEST_HOOKS only: wParam vk, lParam KM_CTRL | KM_SHIFT | KM_ALT
+    WM_APP_REPLAY = WM_APP + 13,   // the modal queue
     WM_APP_QUERY = WM_APP + 64,    // automation / UI tests: wParam = Query → LRESULT (read-only state)
 };
-enum : UINT_PTR { TIMER_TOAST = 1, TIMER_RELOAD = 2, TIMER_AUTOSCROLL = 3, TIMER_HBAR = 4, TIMER_UPDATE = 5 };
+enum : UINT_PTR { TIMER_TOAST = 1, TIMER_RELOAD = 2, TIMER_AUTOSCROLL = 3, TIMER_HBAR = 4, TIMER_UPDATE = 5,
+                  // edit mode (§13.3); the bar slide runs in the message loop's animation branch, not on a timer
+                  TIMER_CARET = 6, TIMER_EDIT_SAVE = 7, TIMER_EDIT_RETRY = 8, TIMER_EDIT_IDLE = 9, TIMER_EDIT_REPARSE = 10,
+                  TIMER_EDIT_JOURNAL = 11, TIMER_EDIT_POPUP = 12, TIMER_EDIT_UI = 13 };
 
 // WM_COMMAND ids (menus; tests and automation drive the viewer with them too — keep the numbers stable)
 enum Cmd : UINT {
@@ -39,6 +48,20 @@ enum Cmd : UINT {
     CMD_WRAP, CMD_SETTINGS, CMD_LINK_OPEN, CMD_IMG_COPY, CMD_IMG_OPEN,
     CMD_FIND_CASE, CMD_FIND_WORD, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_FIND_CLOSE, CMD_LINK_NEXT, CMD_LINK_PREV,
     CMD_LOAD_REMOTE, CMD_COPY_MD, CMD_PRINT, CMD_EXPORT_PDF, CMD_UPDATE,
+    // edit mode (docs/EDIT-MODE.md §13.1): the complete list for v1, declared before the features exist - an id whose
+    // feature is not built yet does nothing. WM_COMMAND passes HIWORD(wParam) as the argument (0 = the default).
+    CMD_EDIT_TOGGLE = 141, CMD_EDIT_HERE, CMD_EDIT_EXIT, CMD_UNDO, CMD_REDO, CMD_CUT, CMD_PASTE, CMD_SAVE, CMD_SAVE_AS,
+    CMD_FMT_BOLD = 150, CMD_FMT_ITALIC, CMD_FMT_STRIKE, CMD_FMT_CODE, CMD_LINK, CMD_LINK_REMOVE,
+    CMD_BLOCK_P = 156, CMD_BLOCK_H1, CMD_BLOCK_H2, CMD_BLOCK_H3, CMD_BLOCK_H4, CMD_BLOCK_H5, CMD_BLOCK_H6,
+    CMD_LIST_BULLET = 163, CMD_LIST_NUMBER, CMD_LIST_TASK, CMD_QUOTE, CMD_CODEBLOCK, CMD_CODE_LANG,
+    CMD_INS_TABLE = 169 /* arg = rows << 4 | cols, 0 = 3 x 3 */, CMD_INS_FORMULA, CMD_INS_FORMULA_BLOCK,
+    CMD_INS_DIAGRAM /* arg = template 0-8 */, CMD_INS_IMAGE, CMD_INS_HR, CMD_NEW_PARAGRAPH,
+    CMD_TABLE_ROW_ABOVE = 176, CMD_TABLE_ROW_BELOW, CMD_TABLE_COL_LEFT, CMD_TABLE_COL_RIGHT, CMD_TABLE_DEL_ROW,
+    CMD_TABLE_DEL_COL, CMD_TABLE_ALIGN_L, CMD_TABLE_ALIGN_C, CMD_TABLE_ALIGN_R, CMD_TABLE_DEL,
+    CMD_BLOCK_MENU = 186, CMD_TABLE_MENU, CMD_FORMULA_MENU, CMD_DIAGRAM_MENU, CMD_EDIT_MORE, CMD_ATOM_EDIT,
+    CMD_POPUP_DONE = 192, CMD_POPUP_CANCEL, CMD_CONFLICT_LOAD, CMD_CONFLICT_KEEP, CMD_SAVE_RETRY, CMD_DISCARD_EDITS,
+    CMD_ENC_UTF8 = 198, CMD_ENC_REMOVE_CHAR, CMD_RECOVERY_OPEN, CMD_RECOVERY_RESTORE, CMD_RECOVERY_DELETE,
+    CMD_OTHER_WINDOW = 203, CMD_STRIP_CLOSE = 204,
 };
 
 // WM_APP_QUERY ids (tests): pixel values are client pixels
@@ -60,6 +83,15 @@ enum Query : UINT {
     Q_TASK /* lp = task → 1 ticked, 0 not, -1 no such task */,
     Q_TASK_BOX /* lp = task → centre of its box x | y << 16 in client px, -1 = not on screen */,
     Q_DOC_SERIAL /* changes with every load of a document: a reload shows up here */,
+    // edit mode (docs/EDIT-MODE.md §13.2): declared now, answered as their features arrive; until then -1
+    Q_EDITING = 42 /* 1 editing, 0 not */, Q_EDIT_DIRTY, Q_EDIT_CARET_SRC /* -1 when not editing */, Q_EDIT_ANCHOR_SRC,
+    Q_EDIT_TOOL /* lp = id | row << 16 → centre MAKELONG(x, y), -1 hidden */, Q_EDIT_BAR /* slide 0-100 */,
+    Q_UNDO_DEPTH /* lp 0 undo, 1 redo */, Q_RELOADS, Q_SAVES, Q_EDIT_POPUP /* lp = field → hwnd */,
+    Q_MAP_SELFCHECK /* lp 0: MapSelfCheck now → 1 ok, 0 broken; lp 1: failures under FASTMD_EDIT_SELFCHECK */,
+    Q_SRC_HASH /* FNV-1a-32, lp 0 g.src, 1 disk text */, Q_SRC_LEN, Q_EDIT_BUSY, Q_EDIT_PHANTOM, Q_BLOCK_COUNT,
+    Q_EDIT_SAVE_STATE, Q_EDIT_CONFLICT, Q_EDIT_ENC, Q_EDIT_EOL, Q_EDIT_ACTIVE, Q_LAST_PROMPT, Q_RELAYOUT_ALL,
+    Q_FRAME_STATS, Q_RENDERS, Q_EDIT_STATS, Q_EDIT_CARET_VISIBLE, Q_EDIT_CARET_PHASE, Q_EDIT_POPUP_STATE,
+    Q_EDIT_ATOM, Q_EDIT_STRIP, Q_EDIT_RAW, Q_EDIT_BUBBLE, Q_EDIT_COLLAPSE = 75,
 };
 
 // what can be dragged out of the window, and the formats it is offered in (drag.cpp)
@@ -485,4 +517,4 @@ void ScrollTo(float y, bool animate);
 void UserScrollTo(float y, bool animate);  // reader-initiated: cancels a pending position restore
 void ApplyTheme();                   // re-evaluate system / forced theme, repaint
 void ApplySettings(uint32_t changed, bool persist);  // g.cfg changed → re-layout / repaint (+ save, notify other windows)
-void Command(UINT id);
+void Command(UINT id, UINT arg = 0);  // arg: HIWORD(wParam) of WM_COMMAND (0 from menus), e.g. a table's size

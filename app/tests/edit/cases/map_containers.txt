@@ -1,0 +1,136 @@
+Map goldens, containers and prefixes (docs/EDIT-MODE.md §4.4 "Containers", §7.2 ContPrefix / BlankPrefix). The
+format is described in map_blocks.txt; a block's pre="…" is its ContPrefix, blank="…" its BlankPrefix when that
+differs.
+
+=== map_prefix_table (§7.2 the ContPrefix / BlankPrefix table)
+src: top\n\n> quote\n\n- a\n\n12. a\n\n> - a\n\n- a\n  - b\n
+flags: noquote nolist
+map:
+  b0 P - line=0 beg=0 end=3 le=3 outer=3 "top" «⟨top⟩»
+    s 0+3 P 0..3 «top»
+  b1 P - line=5 beg=7 end=12 le=12 outer=12 in=c0 pre="> " blank=">" "quote" «> ⟨quote⟩»
+    s 3+5 P 7..12 «quote»
+  b2 P - line=14 beg=16 end=17 le=17 outer=17 in=c1 pre="  " "a" «- ⟨a⟩»
+    s 8+1 P 16..17 «a»
+  b3 P - line=19 beg=23 end=24 le=24 outer=24 in=c2 pre="    " "a" «12. ⟨a⟩»
+    s 9+1 P 23..24 «a»
+  b4 P - line=26 beg=30 end=31 le=31 outer=31 in=c4 pre=">   " blank=">" "a" «> - ⟨a⟩»
+    s 10+1 P 30..31 «a»
+  b5 P - line=33 beg=35 end=36 le=36 outer=36 in=c5 pre="  " "a" «- ⟨a⟩»
+    s 11+1 P 35..36 «a»
+  b6 P - line=37 beg=41 end=42 le=42 outer=42 in=c6 pre="    " "b" «  - ⟨b⟩»
+    s 12+1 P 41..42 «b»
+  c0 QUOTE up=-1 b1..1
+  c1 ITEM up=-1 b2..2 mark=14+1 '-' col=2
+  c2 ITEM up=-1 b3..3 mark=19+3 12'.' col=4
+  c3 QUOTE up=-1 b4..4
+  c4 ITEM up=3 b4..4 mark=28+1 '-' col=4
+  c5 ITEM up=-1 b5..6 mark=33+1 '-' col=2
+  c6 ITEM up=5 b6..6 mark=39+1 '-' col=4
+  order 0 1 2 3 4 5 6
+
+=== map_quote_no_blank (§7.2 a quote whose line has no blank after '>')
+src: >tight\n>> nested\n
+map:
+  b0 P - line=0 beg=1 end=6 le=6 outer=6 in=c0 pre=">" "tight" «>⟨tight⟩»
+    s 0+5 P 1..6 «tight»
+  b1 P - line=7 beg=10 end=16 le=16 outer=16 in=c1 pre=">> " blank=">>" "nested" «>> ⟨nested⟩»
+    s 5+6 P 10..16 «nested»
+  c0 QUOTE up=-1 b0..1
+  c1 QUOTE up=0 b1..1
+  order 0 1
+
+=== map_lists_tight_loose (§4.4 tight and loose lists, the implicit leaf of a tight item, F14)
+src: - one\n- two\n\n1) first\n\n2) second\n
+map:
+  b0 P - line=0 beg=2 end=5 le=5 outer=5 in=c0 pre="  " "one" «- ⟨one⟩»
+    s 0+3 P 2..5 «one»
+  b1 P - line=6 beg=8 end=11 le=11 outer=11 in=c1 pre="  " "two" «- ⟨two⟩»
+    s 3+3 P 8..11 «two»
+  b2 P - line=13 beg=16 end=21 le=21 outer=21 in=c2 pre="   " "first" «1) ⟨first⟩»
+    s 6+5 P 16..21 «first»
+  b3 P - line=23 beg=26 end=32 le=32 outer=32 in=c3 pre="   " "second" «2) ⟨second⟩»
+    s 11+6 P 26..32 «second»
+  c0 ITEM up=-1 b0..0 mark=0+1 '-' col=2
+  c1 ITEM up=-1 b1..1 mark=6+1 '-' col=2
+  c2 ITEM up=-1 b2..2 mark=13+2 1')' col=3 loose
+  c3 ITEM up=-1 b3..3 mark=23+2 2')' col=3 loose
+  order 0 1 2 3
+
+=== map_content_col (§4.4 CT_ITEM.contentCol: 1-4 blanks count, five or more count as one, F16)
+src: -  two blanks\n-    four\n-      six\n1.\tTab\n
+map:
+  b0 P - line=0 beg=3 end=13 le=13 outer=13 in=c0 pre="   " "two blanks" «-  ⟨two blanks⟩»
+    s 0+10 P 3..13 «two blanks»
+  b1 P - line=14 beg=19 end=23 le=23 outer=23 in=c1 pre="     " "four" «-    ⟨four⟩»
+    s 10+4 P 19..23 «four»
+  b2 CODE - line=24 beg=30 end=34 le=34 outer=34 in=c2 pre="  " " six" «-     ⟨ six⟩»
+    s 14+1 P 30..31 « »
+    s 15+3 P 31..34 «six»
+  b3 P - line=35 beg=38 end=41 le=41 outer=41 in=c3 pre="    " "Tab" «1.\t⟨Tab⟩»
+    s 18+3 P 38..41 «Tab»
+  c0 ITEM up=-1 b0..0 mark=0+1 '-' col=3
+  c1 ITEM up=-1 b1..1 mark=14+1 '-' col=5
+  c2 ITEM up=-1 b2..2 mark=24+1 '-' col=2
+  c3 ITEM up=-1 b3..3 mark=35+2 1'.' col=4
+  order 0 1 2 3
+
+=== map_tasks (§4.4 task items: taskOff, the marker found back from '[', F14a)
+src: - [ ] open\n- [x] done\n3. [X] ordered\n  - [ ] nested\n
+map:
+  b0 P - line=0 beg=6 end=10 le=10 outer=10 in=c0 pre="  " "open" «- [ ] ⟨open⟩»
+    s 0+4 P 6..10 «open»
+  b1 P - line=11 beg=17 end=21 le=21 outer=21 in=c1 pre="  " "done" «- [x] ⟨done⟩»
+    s 4+4 P 17..21 «done»
+  b2 P - line=22 beg=29 end=36 le=36 outer=36 in=c2 pre="   " "ordered" «3. [X] ⟨ordered⟩»
+    s 8+7 P 29..36 «ordered»
+  b3 P - line=37 beg=45 end=51 le=51 outer=51 in=c3 pre="    " "nested" «  - [ ] ⟨nested⟩»
+    s 15+6 P 45..51 «nested»
+  c0 ITEM up=-1 b0..0 mark=0+1 '-' col=2 task=3
+  c1 ITEM up=-1 b1..1 mark=11+1 '-' col=2 task=14
+  c2 ITEM up=-1 b2..2 mark=22+2 3'.' col=3 task=26
+  c3 ITEM up=-1 b3..3 mark=39+1 '-' col=4 task=42
+  order 0 1 2 3
+
+=== map_nested_quote_list (§4.4 containers nest: a list in a quote in a list)
+src: - item\n  > quoted\n  > - inner\n  >   more\n
+flags: noquote nolist
+map:
+  b0 P - line=0 beg=2 end=6 le=6 outer=6 in=c0 pre="  " "item" «- ⟨item⟩»
+    s 0+4 P 2..6 «item»
+  b1 P - line=7 beg=11 end=17 le=17 outer=17 in=c1 pre="  > " blank="  >" "quoted" «  > ⟨quoted⟩»
+    s 4+6 P 11..17 «quoted»
+  b2 P - line=18 beg=24 end=40 le=40 outer=40 in=c2 pre="  >   " blank="  >" "inner more" «  > - ⟨inner\n  >   more⟩»
+    s 10+5 P 24..29 «inner»
+    s 15+1 TEXT 29..36 «\n  >   » " "
+    s 16+4 P 36..40 «more»
+  c0 ITEM up=-1 b0..2 mark=0+1 '-' col=2
+  c1 QUOTE up=0 b1..2
+  c2 ITEM up=1 b2..2 mark=22+1 '-' col=6
+  order 0 1 2
+
+=== map_lazy (§4.4 a lazy continuation line keeps its paragraph in the quote)
+src: > quoted\nlazy line\n\nout\n
+map:
+  b0 P - line=0 beg=2 end=18 le=18 outer=18 in=c0 pre="> " blank=">" "quoted lazy line" «> ⟨quoted\nlazy line⟩»
+    s 0+6 P 2..8 «quoted»
+    s 6+1 TEXT 8..9 «\n» " "
+    s 7+9 P 9..18 «lazy line»
+  b1 P - line=20 beg=20 end=23 le=23 outer=23 "out" «⟨out⟩»
+    s 16+3 P 20..23 «out»
+  c0 QUOTE up=-1 b0..0
+  order 0 1
+
+=== map_item_code (§4.4 fenced code inside a list item: the prefix is not code text)
+src: - item\n\n  ```\n  code\n    more\n  ```\n
+flags: nolist
+map:
+  b0 P - line=0 beg=2 end=6 le=6 outer=6 in=c0 pre="  " "item" «- ⟨item⟩»
+    s 0+4 P 2..6 «item»
+  b1 CODE FENCED line=8 beg=16 end=29 le=29 outer=35 aux=13 in=c0 pre="  " "code\n  more" «  ```\n  ⟨code\n    more⟩|\n  ```»
+    s 4+4 P 16..20 «code»
+    s 8+1 TEXT 20..23 «\n  » "\n"
+    s 9+2 P 23..25 «  »
+    s 11+4 P 25..29 «more»
+  c0 ITEM up=-1 b0..1 mark=0+1 '-' col=2 loose
+  order 0 1

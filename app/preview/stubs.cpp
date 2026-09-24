@@ -15,7 +15,7 @@ void Relayout() {
     RecomputeY();
 }
 
-void Command(UINT) {}
+void Command(UINT, UINT) {}
 void ApplySettings(uint32_t, bool) {}
 void ApplyTheme() {}
 

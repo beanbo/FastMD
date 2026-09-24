@@ -1,0 +1,52 @@
+DiffBlocks (docs/EDIT-MODE.md §5.5 step 5): the common prefix p and suffix q of two parses under layout equality.
+Each case: src is the document before an edit, new after it, diff the expected p and q.
+
+=== diff_typing (§5.5 typing in a paragraph: only that block changes)
+src: # A\n\npara one\n\npara two\n
+new: # A\n\npara oxne\n\npara two\n
+diff: p=1 q=1
+
+=== diff_same (§5.5 no change at all: everything is prefix)
+src: # A\n\ntext\n
+new: # A\n\ntext\n
+diff: p=2 q=0
+
+=== diff_new_heading (§5.5 a paragraph becomes a heading)
+src: a\n\nb\n\nc\n
+new: a\n\n# b\n\nc\n
+diff: p=1 q=1
+
+=== diff_new_block (§5.5 a block is inserted: the suffix shifts by one)
+src: a\n\nc\n\nd\n
+new: a\n\nb\n\nc\n\nd\n
+diff: p=1 q=2
+
+=== diff_picture_index_shift (§5.5 an inline picture inserted before a badge: later picture indices shift, keys match)
+src: intro\n\nbadge ![b](b.svg) text\n\nend\n
+new: intro ![p](p.png)\n\nbadge ![b](b.svg) text\n\nend\n
+diff: p=0 q=2
+
+=== diff_list_renumber (§5.5 the number of an ordered item may differ, its gap too)
+src: 1. a\n2. b\n3. c\n
+new: 1. a\n3. c\n
+diff: p=1 q=1
+
+=== diff_link_target (§5.5 the same text with another link target is a different block)
+src: [x](http://a) y\n\nz\n
+new: [x](http://b) y\n\nz\n
+diff: p=0 q=1
+
+=== diff_table_cell (§5.5 typing in a table cell changes the table block only)
+src: t\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nu\n
+new: t\n\n| a | b |\n|---|---|\n| 1 | 23 |\n\nu\n
+diff: p=1 q=1
+
+=== diff_formula (§5.5 a formula's source is its key: editing it changes that block)
+src: A $x$ b\n\nc\n
+new: A $xy$ b\n\nc\n
+diff: p=0 q=1
+
+=== diff_code_lang (§5.5 a code block's language name counts)
+src: ```js\nx\n```\n
+new: ```ts\nx\n```\n
+diff: p=0 q=0

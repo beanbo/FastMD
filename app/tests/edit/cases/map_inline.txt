@@ -1,0 +1,243 @@
+Map goldens, inline text (docs/EDIT-MODE.md §4.4, segment table and spans). The format is described in
+map_blocks.txt.
+
+=== map_emoji (§4.4 an emoji shortcode splits a chunk: PLAIN / TEXTATOM / PLAIN)
+src: Go :rocket: now, :notanemoji: stays and `:code:` too.\n
+map:
+  b0 P - line=0 beg=0 end=53 le=53 outer=53 "Go 🚀 now, :notanemo…tays and :code: too." «⟨Go :rocket: now, :notane… stays and `:code:` too.⟩» nostop=4
+    s 0+3 P 0..3 «Go »
+    s 3+2 TEXT 3..11 «:rocket:» "🚀"
+    s 5+29 P 11..40 « now, :notanemoji: stays and »
+    s 34+6 P 41..47 «:code:»
+    s 40+5 P 48..53 « too.»
+    span CODE t34..40 o40..41 c47..48 «`»«`»
+  order 0
+
+=== map_escape (§4.4 a backslash escape is one atom with its backslash)
+src: \\*not em\\* and \\\\ backslash, a\\\\\\*b\n
+map:
+  b0 P - line=0 beg=0 end=35 le=35 outer=35 "*not em* and \ backslash, a\*b" «⟨\*not em\* and \\ backslash, a\\\*b⟩»
+    s 0+1 TEXT 0..2 «\*» "*"
+    s 1+6 P 2..8 «not em»
+    s 7+1 TEXT 8..10 «\*» "*"
+    s 8+5 P 10..15 « and »
+    s 13+1 TEXT 15..17 «\\» "\"
+    s 14+13 P 17..30 « backslash, a»
+    s 27+1 TEXT 30..32 «\\» "\"
+    s 28+1 TEXT 32..34 «\*» "*"
+    s 29+1 P 34..35 «b»
+  order 0
+
+=== map_entity (§4.4 entities are atoms: named, decimal, hex, unknown)
+src: &amp; &copy;&#169;&#x41; &bogus; end\n
+map:
+  b0 P - line=0 beg=0 end=36 le=36 outer=36 "& ©©A &bogus; end" «⟨&amp; &copy;&#169;&#x41; &bogus; end⟩»
+    s 0+1 TEXT 0..5 «&amp;» "&"
+    s 1+1 P 5..6 « »
+    s 2+1 TEXT 6..12 «&copy;» "©"
+    s 3+1 TEXT 12..18 «&#169;» "©"
+    s 4+1 TEXT 18..24 «&#x41;» "A"
+    s 5+1 P 24..25 « »
+    s 6+7 P 25..32 «&bogus;»
+    s 13+4 P 32..36 « end»
+  order 0
+
+=== map_breaks (§4.4 soft break, two-space and backslash hard breaks, <br>)
+src: soft\nbreak  \nhard\\\nslash<br>tag\n
+map:
+  b0 P - line=0 beg=0 end=31 le=31 outer=31 "soft break\nhard\nslash\ntag" «⟨soft\nbreak  \nhard\\nslash<br>tag⟩»
+    s 0+4 P 0..4 «soft»
+    s 4+1 TEXT 4..5 «\n» " "
+    s 5+5 P 5..10 «break»
+    s 10+1 TEXT 10..13 «  \n» "\n"
+    s 11+4 P 13..17 «hard»
+    s 15+1 TEXT 17..19 «\\n» "\n"
+    s 16+5 P 19..24 «slash»
+    s 21+1 TEXT 24..28 «<br>» "\n"
+    s 22+3 P 28..31 «tag»
+  order 0
+
+=== map_code_span (§4.4 code spans: the stripped space is in the opener, a line join is an atom)
+src: A `` `tick` `` and `multi\nline` code.\n
+map:
+  b0 P - line=0 beg=0 end=37 le=37 outer=37 "A `tick` and multi line code." «⟨A `` `tick` `` and `multi\nline` code.⟩»
+    s 0+2 P 0..2 «A »
+    s 2+6 P 5..11 «`tick`»
+    s 8+5 P 14..19 « and »
+    s 13+5 P 20..25 «multi»
+    s 18+1 TEXT 25..26 «\n» " "
+    s 19+4 P 26..30 «line»
+    s 23+6 P 31..37 « code.»
+    span CODE t2..8 o2..5 c11..14 «`` »« ``»
+    span CODE t13..23 o19..20 c30..31 «`»«`»
+  order 0
+
+=== map_nul (§4.4 a NUL becomes U+FFFD, an atom over the NUL)
+src: a\0b\n
+map:
+  b0 P - line=0 beg=0 end=3 le=3 outer=3 "a�b" «⟨a\0b⟩»
+    s 0+1 P 0..1 «a»
+    s 1+1 TEXT 1..2 «\0» "�"
+    s 2+1 P 2..3 «b»
+  order 0
+
+=== map_emphasis (§4.4 EM/STRONG spans with * and _, a run of three)
+src: *em* **strong** _u_ __uu__ ***both*** mid**dle**word\n
+map:
+  b0 P - line=0 beg=0 end=52 le=52 outer=52 "em strong u uu both middleword" «⟨*em* **strong** _u_ __uu…**both*** mid**dle**word⟩»
+    s 0+2 P 1..3 «em»
+    s 2+1 P 4..5 « »
+    s 3+6 P 7..13 «strong»
+    s 9+1 P 15..16 « »
+    s 10+1 P 17..18 «u»
+    s 11+1 P 19..20 « »
+    s 12+2 P 22..24 «uu»
+    s 14+1 P 26..27 « »
+    s 15+4 P 30..34 «both»
+    s 19+4 P 37..41 « mid»
+    s 23+3 P 43..46 «dle»
+    s 26+4 P 48..52 «word»
+    span EM t0..2 o0..1 c3..4 ENTER «*»«*»
+    span STRONG t3..9 o5..7 c13..15 ENTER «**»«**»
+    span EM t10..11 o16..17 c18..19 ENTER _ «_»«_»
+    span STRONG t12..14 o20..22 c24..26 ENTER _ «__»«__»
+    span EM t15..19 o27..28 c36..37 ENTER «*»«*»
+    span STRONG t15..19 o28..30 c34..36 ENTER «**»«**»
+    span STRONG t23..26 o41..43 c46..48 ENTER «**»«**»
+  order 0
+
+=== map_links (§4.4 inline, reference, collapsed and shortcut links; images)
+src: [inline](http://a.com "t") [full][r] [coll][] [r] ![pic](p.png) ![ref][r]\n\n[r]: http://r.com\n
+map:
+  b0 P - line=0 beg=0 end=73 le=73 outer=73 "inline full [coll][] r ￼ ￼" «⟨[inline](http://a.com "t… ![pic](p.png) ![ref][r]⟩»
+    s 0+6 P 1..7 «inline»
+    s 6+1 P 26..27 « »
+    s 7+4 P 28..32 «full»
+    s 11+10 P 36..46 « [coll][] »
+    s 21+1 P 47..48 «r»
+    s 22+1 P 49..50 « »
+    s 23+1 OBJ 50..63 «![pic](p.png)» "￼"
+    s 24+1 P 63..64 « »
+    s 25+1 OBJ 64..73 «![ref][r]» "￼"
+    span A t0..6 o0..1 c7..26 «[»«](http://a.com "t")»
+    span A t7..11 o27..28 c32..36 REF «[»«][r]»
+    span A t21..22 o46..47 c48..49 REF «[»«]»
+    span IMG t23..24 o50..52 c55..63 «![»«](p.png)»
+    span IMG t25..26 o64..66 c69..73 REF «![»«][r]»
+  img0 m0 outer=50..63 src=57..62 alt=52..55 «p.png»
+  img1 m0 outer=64..73 src=-..- alt=66..69
+  order 0
+
+=== map_autolinks (§4.4 autolinks: <…> and the permissive ones with zero-width delimiters, F23)
+src: <http://x.com> www.example.com https://y.org/p?q=1 mail@example.com\n
+map:
+  b0 P - line=0 beg=0 end=67 le=67 outer=67 "http://x.com www.exa…q=1 mail@example.com" «⟨<http://x.com> www.examp…g/p?q=1 mail@example.com⟩»
+    s 0+12 P 1..13 «http://x.com»
+    s 12+1 P 14..15 « »
+    s 13+15 P 15..30 «www.example.com»
+    s 28+1 P 30..31 « »
+    s 29+19 P 31..50 «https://y.org/p?q=1»
+    s 48+1 P 50..51 « »
+    s 49+16 P 51..67 «mail@example.com»
+    span A t0..12 o0..1 c13..14 AUTO «<»«>»
+    span A t13..28 o15..15 c30..30 AUTO «»«»
+    span A t29..48 o31..31 c50..50 AUTO «»«»
+    span A t49..65 o51..51 c67..67 AUTO «»«»
+  order 0
+
+=== map_strike_badge (§4.4 strikethrough, and a picture inside a link)
+src: ~~gone~~ [![b](b.svg)](http://l.com) end\n
+map:
+  b0 P - line=0 beg=0 end=40 le=40 outer=40 "gone ￼ end" «⟨~~gone~~ [![b](b.svg)](http://l.com) end⟩»
+    s 0+4 P 2..6 «gone»
+    s 4+1 P 8..9 « »
+    s 5+1 OBJ 10..21 «![b](b.svg)» "￼"
+    s 6+4 P 36..40 « end»
+    span DEL t0..4 o0..2 c6..8 ENTER «~~»«~~»
+    span A t5..6 o9..10 c21..36 «[»«](http://l.com)»
+    span IMG t5..6 o10..12 c13..21 «![»«](b.svg)»
+  img0 m0 outer=10..21 src=15..20 alt=12..13 «b.svg»
+  order 0
+
+=== map_formula_inline (§4.4 an inline formula: an object atom with TeX)
+src: The $E=mc^2$ law.\n
+tex: on
+map:
+  b0 P - line=0 beg=0 end=17 le=17 outer=17 "The ￼ law." «⟨The $E=mc^2$ law.⟩»
+    s 0+4 P 0..4 «The »
+    s 4+1 OBJ 4..12 «$E=mc^2$» "￼"
+    s 5+5 P 12..17 « law.»
+    span MATH t4..5 o4..5 c11..12 «$»«$»
+  img0 m1 outer=4..12 src=5..11 alt=-..- «E=mc^2»
+  order 0
+
+=== map_formula_inline_notex (§4.4 the same without TeX: code text between its delimiters)
+src: The $E=mc^2$ law.\n
+tex: off
+map:
+  b0 P - line=0 beg=0 end=17 le=17 outer=17 "The E=mc^2 law." «⟨The $E=mc^2$ law.⟩»
+    s 0+4 P 0..4 «The »
+    s 4+6 P 5..11 «E=mc^2»
+    s 10+5 P 12..17 « law.»
+    span MATH t4..10 o4..5 c11..12 «$»«$»
+  order 0
+
+=== map_formula_multiline (§4.4 a formula across two lines: the line join inside it)
+src: A $a +\nb$ c\n
+tex: off
+map:
+  b0 P - line=0 beg=0 end=11 le=11 outer=11 "A a + b c" «⟨A $a +\nb$ c⟩»
+    s 0+2 P 0..2 «A »
+    s 2+3 P 3..6 «a +»
+    s 5+1 TEXT 6..7 «\n» " "
+    s 6+1 P 7..8 «b»
+    s 7+2 P 9..11 « c»
+    span MATH t2..7 o2..3 c8..9 «$»«$»
+  order 0
+
+=== map_html_inline (§4.4 inline HTML: <br> and <img> are atoms, formatting tags pseudo-spans, F25)
+src: a<br>b <img src="i.png" width="10"> <b>bold <i>it</i></b> <kbd>K</kbd> <a href="u">l</a>\n
+map:
+  b0 P - line=0 beg=0 end=88 le=88 outer=88 "a\nb ￼ bold it K l" «⟨a<br>b <img src="i.png" …</kbd> <a href="u">l</a>⟩»
+    s 0+1 P 0..1 «a»
+    s 1+1 TEXT 1..5 «<br>» "\n"
+    s 2+2 P 5..7 «b »
+    s 4+1 OBJ 7..35 «<img src="i.png" width="10">» "￼"
+    s 5+1 P 35..36 « »
+    s 6+5 P 39..44 «bold »
+    s 11+2 P 47..49 «it»
+    s 13+1 P 57..58 « »
+    s 14+1 P 63..64 «K»
+    s 15+1 P 70..71 « »
+    s 16+1 P 83..84 «l»
+    span <b> t6..13 o36..39 c53..57 ENTER «<b>»«</b>»
+    span <i> t11..13 o44..47 c49..53 ENTER «<i>»«</i>»
+    span <kbd> t14..15 o58..63 c64..70 «<kbd>»«</kbd>»
+    span <a> t16..17 o71..83 c84..88 «<a href="u">»«</a>»
+  img0 m0 outer=7..35 src=17..22 alt=-..- «i.png»
+  order 0
+
+=== map_html_unclosed (§4.4 an HTML tag pair still open at the end of its leaf, or cut by a Markdown span)
+src: <b>never closed\n\n*em <i>cut* by em</i>\n
+map:
+  b0 P - line=0 beg=0 end=15 le=15 outer=15 "never closed" «⟨<b>never closed⟩»
+    s 0+12 P 3..15 «never closed»
+    span <b> t0..12 o0..3 c15..15 UNCLOSED ENTER «<b>»«»
+  b1 P - line=17 beg=17 end=38 le=38 outer=38 "em cut by em" «⟨*em <i>cut* by em</i>⟩»
+    s 12+3 P 18..21 «em »
+    s 15+3 P 24..27 «cut»
+    s 18+6 P 28..34 « by em»
+    span EM t12..18 o17..18 c27..28 ENTER «*»«*»
+    span <i> t15..18 o21..24 c27..27 UNCLOSED ENTER «<i>»«»
+  order 0 1
+
+=== map_html_split_tag (§4.4 an inline HTML tag across two lines makes no pseudo-span)
+src: a <span\nclass="x">b</span> c\n
+map:
+  b0 P - line=0 beg=0 end=28 le=28 outer=28 "a \nclass="x">b c" «⟨a <span\nclass="x">b</span> c⟩»
+    s 0+2 P 0..2 «a »
+    s 2+1 TEXT 7..8 «\n» "\n"
+    s 3+10 P 8..18 «class="x">»
+    s 13+1 P 18..19 «b»
+    s 14+2 P 26..28 « c»
+  order 0

@@ -23,6 +23,15 @@
  * IN THE SOFTWARE.
  */
 
+/*
+ * FastMD local patch (the only change to md4c, see app/src/parse.cpp and docs/EDIT-MODE.md §4.1):
+ * MD_PARSER gains one pointer after `syntax`, `fastmd`, to a table of hooks that report where things are in the
+ * source: leaf extents, verbatim lines, line breaks, span delimiters, table cells and footnote definitions. The editor
+ * builds its text <-> source map from them. With `fastmd == NULL` (a zero-initialised parser) md4c behaves exactly as
+ * upstream. Two side changes ride along: MD_BLOCK_LI_DETAIL::task_mark_offset also carries the offset of the list
+ * marker of a non-task item, and an HR injected after reference definitions keeps its source line.
+ */
+
 #ifndef MD4C_H
 #define MD4C_H
 
@@ -309,7 +318,8 @@ typedef struct MD_BLOCK_OL_DETAIL {
 typedef struct MD_BLOCK_LI_DETAIL {
     int is_task;                /* Can be non-zero only with MD_FLAG_TASKLISTS */
     MD_CHAR task_mark;          /* If is_task, then one of 'x', 'X' or ' '. Undefined otherwise. */
-    MD_OFFSET task_mark_offset; /* If is_task, then offset in the input of the char between '[' and ']'. */
+    MD_OFFSET task_mark_offset; /* If is_task, then offset in the input of the char between '[' and ']'.
+                                 * (FastMD patch) Otherwise the offset of the list marker's first character. */
 } MD_BLOCK_LI_DETAIL;
 
 /* Detailed info for MD_BLOCK_H. */
@@ -422,6 +432,32 @@ typedef struct MD_BLOCK_BLANK_DETAIL {
 #define MD_DIALECT_COMMONMARK               0
 #define MD_DIALECT_GITHUB                   (MD_FLAG_PERMISSIVEAUTOLINKS | MD_FLAG_TABLES | MD_FLAG_STRIKETHROUGH | MD_FLAG_TASKLISTS | MD_FLAG_ADMONITIONS | MD_FLAG_FOOTNOTES)
 
+/* ---- FastMD patch 1: source extents for the editor (all offsets relative to the text passed to md_parse()) ----
+ *
+ * leaf_extent:     every leaf block with at least one line (P, H, CODE, HTML, TABLE, HR), fired just before the
+ *                  block is entered - also for a paragraph a tight list swallows. beg = first line's beg, end = last
+ *                  line's end. Fenced code: the first line is the opening fence. Setext: the underline is not
+ *                  included. flags: MD_FASTMD_SETEXT, MD_FASTMD_FENCED, MD_FASTMD_CLOSED.
+ * verbatim_line:   every content line of a code block and every line of an HTML block, before its text: beg is after
+ *                  all leading whitespace, indent is the columns md4c re-emits as spaces. Empty lines too.
+ * break_extent:    before a soft or hard break "\n", or the " " joining two lines of a code span or formula (and the
+ *                  "\n" of raw inline HTML across lines): the source that stands for it, up to the next line's start.
+ * span_extent:     the delimiters of a span, before it is entered (enter = 1) and after it is left (enter = 0).
+ * cell_extent:     a table cell after trimming; missing = 1 for a cell a short row is padded with (beg = end = 0).
+ * footnote_extent: a referenced footnote definition before it is entered: the '[' of "[^label]:" and its content.
+ */
+typedef struct MD_FASTMD_HOOKS {
+    void (*leaf_extent)(MD_BLOCKTYPE type, MD_OFFSET beg, MD_OFFSET end, unsigned flags, void* userdata);
+    void (*verbatim_line)(MD_OFFSET beg, MD_OFFSET end, unsigned indent, void* userdata);
+    void (*break_extent)(MD_TEXTTYPE type, MD_OFFSET beg, MD_OFFSET end, void* userdata);
+    void (*span_extent)(MD_SPANTYPE type, int enter, MD_OFFSET beg, MD_OFFSET end, void* userdata);
+    void (*cell_extent)(MD_OFFSET beg, MD_OFFSET end, int missing, void* userdata);
+    void (*footnote_extent)(MD_OFFSET def_beg, MD_OFFSET content_beg, MD_OFFSET content_end, void* userdata);
+} MD_FASTMD_HOOKS;
+#define MD_FASTMD_SETEXT  0x0008   /* leaf_extent flags: = MD_BLOCK_SETEXT_HEADER */
+#define MD_FASTMD_FENCED  0x0100   /* leaf_extent flags: fenced (not indented) code block */
+#define MD_FASTMD_CLOSED  0x0200   /* leaf_extent flags: the fenced code block has a closing fence (the next line) */
+
 /* Parser structure.
  */
 typedef struct MD_PARSER {
@@ -468,6 +504,10 @@ typedef struct MD_PARSER {
     /* Reserved. Set to NULL.
      */
     void (*syntax)(void);
+
+    /* FastMD patch: source extents for the editor (see MD_FASTMD_HOOKS). NULL = off.
+     */
+    const MD_FASTMD_HOOKS* fastmd;
 } MD_PARSER;
 
 

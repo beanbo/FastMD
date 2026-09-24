@@ -1,0 +1,134 @@
+Where typed text goes: SrcOfText(MAP_CARET) at a text boundary (docs/EDIT-MODE.md §6.3, the "Typing x gives" table,
+and §6.3.1). Each case: src holds the caret ‸ at a source offset; TextOfSrc turns it into a text position (the drawn
+caret), and SrcOfText(MAP_CARET) must give want's ‸ - where an x typed there would be written. The typing itself is
+Phase 2a; this pins the mapping it will stand on.
+
+=== caret_bold_end (§6.3 **bold‸** tail: typing continues the bold)
+src: **bold‸** tail\n
+do: caret
+want: **bold‸** tail\n
+
+=== caret_before_bold (§6.3 plain ‸**bold**: outside the bold)
+src: plain ‸**bold**\n
+do: caret
+want: plain ‸**bold**\n
+
+=== caret_block_start_bold (§6.3 ‸**Bold** at the block start: inside the enterable opener)
+src: ‸**Bold** text\n
+do: caret
+want: **‸Bold** text\n
+
+=== caret_before_link (§6.3 see ‸[Docs](u))
+src: see ‸[Docs](u)\n
+do: caret
+want: see ‸[Docs](u)\n
+
+=== caret_link_end (§6.3 [Docs‸](u) more: never inside a link from its right edge)
+src: [Docs‸](u) more\n
+do: caret
+want: [Docs](u)‸ more\n
+
+=== caret_block_start_link (§6.3 ‸[Docs](u) at the block start: outside the link)
+src: ‸[Docs](u) are\n
+do: caret
+want: ‸[Docs](u) are\n
+
+=== caret_before_code (§6.3 run ‸`make`)
+src: run ‸`make`\n
+do: caret
+want: run ‸`make`\n
+
+=== caret_code_end (§6.3 `make‸` now: past the code closer)
+src: `make‸` now\n
+do: caret
+want: `make`‸ now\n
+
+=== caret_link_in_bold (§6.3 **[x‸](u)** y: past the link, still inside the bold)
+src: **[x‸](u)** y\n
+do: caret
+want: **[x](u)‸** y\n
+
+=== caret_bold_in_link (§6.3 [**x‸**](u) at the block end: past the link and the bold in it)
+src: [**x‸**](u)\n
+do: caret
+want: [**x**](u)‸\n
+
+=== caret_formula_end (§6.3 the $E$‸ is: after the formula's closer)
+src: the $E$‸ is\n
+do: caret
+want: the $E$‸ is\n
+
+=== caret_formula_end_notex (§6.3 the same, formula as code text: past the closer too)
+src: the $E‸$ is\n
+tex: off
+do: caret
+want: the $E$‸ is\n
+
+=== caret_block_start_link_in_bold (§6.3 ‸**[x](u)**: inside the bold, outside the link)
+src: ‸**[x](u)** y\n
+do: caret
+want: **‸[x](u)** y\n
+
+=== caret_after_escape (§6.3 after an escape atom)
+src: a\\*‸b\n
+do: caret
+want: a\\*‸b\n
+
+=== caret_after_emoji (§6.3 after an emoji atom)
+src: go :rocket:‸ now\n
+do: caret
+want: go :rocket:‸ now\n
+
+=== caret_soft_break (§6.3 at the left edge of a soft break: before it; §6.6)
+src: one‸\ntwo\n
+do: caret
+want: one‸\ntwo\n
+
+=== caret_after_soft_break (§6.3 at the right edge of a soft break: the next line's content)
+src: one\n‸two\n
+do: caret
+want: one\n‸two\n
+
+=== caret_heading_start (§6.3 a heading's start: after its marker)
+src: ‸## Title\n
+do: caret
+want: ## ‸Title\n
+
+=== caret_empty_atx (§6.3.1 an empty ATX heading: after the #s)
+src: ##‸\n
+do: caret
+want: ##‸\n
+
+=== caret_empty_item (§6.3.1 an empty list item: after the marker and its blank)
+src: - ‸\n- b\n
+do: caret
+want: - ‸\n- b\n
+flags: nolist
+
+=== caret_empty_task (§6.3.1 an empty task item: after "[ ]" and one blank)
+src: - [ ]‸\n
+do: caret
+want: - [ ]‸\n
+flags: nolist
+
+=== caret_empty_fence_line (§6.3.1 an empty fenced block with an empty content line)
+src: ```\n‸\n```\n
+do: caret
+want: ```\n‸\n```\n
+
+=== caret_nocontent_fence (§6.3.1 a fenced block with no content line: the fence line's end)
+src: ```‸\n```\n
+do: caret
+want: ```‸\n```\n
+
+=== caret_empty_cell (§6.3.1 an empty table cell: after its opening pipe and one blank)
+src: | a | b |\n|---|---|\n| x |‸   |\n
+do: caret
+want: | a | b |\n|---|---|\n| x | ‸  |\n
+flags: nolist
+
+=== caret_empty_cell_no_blank (§6.3.1 an empty cell with no blank: right after the pipe)
+src: | a | b |\n|---|---|\n| x |‸|\n
+do: caret
+want: | a | b |\n|---|---|\n| x |‸|\n
+flags: nolist
