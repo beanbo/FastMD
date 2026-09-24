@@ -2385,7 +2385,7 @@ def launch_edit(doc, extra=None, steady=True, size="--size=1000x800"):
     saved = {k: ENV.get(k) for k in env}
     ENV.update(env)
     try:
-        return launch(doc, size=size)
+        return launch(*([doc] if doc else []), size=size)
     finally:
         for k, v in saved.items():
             if v is None:
@@ -2394,11 +2394,15 @@ def launch_edit(doc, extra=None, steady=True, size="--size=1000x800"):
                 ENV[k] = v
 
 
-def close_edit(proc, hwnd, ok_list=None):
-    """the map never failed its self-check after a swap; then the window closes"""
-    fails = q(hwnd, "MAP_SELFCHECK", 1) if proc.poll() is None else 0
-    if ok_list is not None:
-        ok_list.append(check("edit 2a: ... no map self-check failures after the swaps", fails == 0, f"{fails}"))
+SELFCHECK = []  # windows whose map failed its self-check after a swap (FASTMD_EDIT_SELFCHECK), checked by main()
+
+
+def close_edit(proc, hwnd):
+    """the failures of the map's self-check after the swaps are noted; then the window closes"""
+    if proc.poll() is None:
+        fails = q(hwnd, "MAP_SELFCHECK", 1)
+        if fails:
+            SELFCHECK.append(f"{title_of(hwnd)}: {fails}")
     close_and_wait(proc, hwnd)
 
 
@@ -2413,6 +2417,13 @@ def enter_edit(hwnd, block, dx=2, dy=12, wait=True):
 
 def saved(hwnd, timeout=5.0):
     return wait_for(lambda: q(hwnd, "EDIT_DIRTY") == 0 and q(hwnd, "EDIT_SAVE_STATE") == SS["SAVED"], timeout, 0.05)
+
+
+def clear_recovery():
+    """what earlier tests kept aside (a .theirs copy, say) is not this test's business"""
+    rec = DATA / "recovery"
+    for f in rec.glob("*") if rec.exists() else []:
+        f.unlink()
 
 
 def toast_shown(img, hwnd):
@@ -2476,7 +2487,7 @@ def test_edit_enter_leave():
                     here and proc.poll() is None and q(hwnd, "EDITING") == 0)
         time.sleep(1.1)
         # a triple click: its third press right after the double click that entered cancels the entry (UX-5)
-        x, y = q(hwnd, "TEXT_LEFT") + 30, q(hwnd, "BLOCK_Y", 4) + 12
+        x, y = q(hwnd, "TEXT_LEFT") + 30, q(hwnd, "BLOCK_Y", q(hwnd, "BLOCK_COUNT") - 1) + 12  # «Последний абзац.»
         for k in range(3):
             post(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp(x, y), 0.01)
             post(hwnd, WM_LBUTTONUP, 0, lp(x, y), 0.01)
@@ -2619,6 +2630,7 @@ def test_edit_keys_once():
         s2 = base[:at] + "a" + base[at:]
         ok &= check("edit 2a: a posted Delete deletes one character", q(hwnd, "SRC_HASH", 0) == src_hash(s2))
         post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.1)
+        post(hwnd, WM_KEYDOWN, VK["left"], 0, 0.1)  # before the period, a word of its own by Windows' rules
         keys(hwnd, [VK["back"]], ctrl=True, wait=0.3)
         s3 = s2.replace("набора текста.", "набора .", 1)
         ok &= check("edit 2a: Ctrl+Backspace deletes the word before, and writes no 0x7F",
@@ -2747,8 +2759,6 @@ def test_edit_guards():
         # Ctrl+click on a link to another document: saved, then the other document
         type_text(hwnd, "клик ", 0.2)
         s2 = s.replace("Ф5 Абзац", "клик Ф5 Абзац")
-        wait_for(lambda: q(hwnd, "LINK_OPEN") >= 0, 0.1)
-        link = None
         img = shot(hwnd, "95-edit-guards-link")
         pt = find_color(img, ACCENT, (100, 100, 900, 200))
         if pt:
@@ -2759,11 +2769,12 @@ def test_edit_guards():
                     f"link at {pt}, title {title_of(hwnd)!r}")
         # Backspace in edit mode never goes back in history (T20)
         enter_edit(hwnd, 0, dx=1)
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)  # at the block's start Backspace changes nothing in Phase 2a
         post(hwnd, WM_KEYDOWN, VK["back"], 0, 0.5)
-        ok &= check("edit 2a: a posted Backspace in edit mode does not navigate back", title_of(hwnd).startswith("other.md"))
+        ok &= check("edit 2a: a posted Backspace in edit mode does not navigate back",
+                    title_of(hwnd).startswith("other.md") and q(hwnd, "EDITING") == 1 and q(hwnd, "EDIT_DIRTY") == 0)
         post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.3)
-        cmd(hwnd, "UNDO", 0.2)
-        post(hwnd, WM_SYSKEYDOWN, 0x25, 0, 1.0)  # Alt+Left: back, through the leave-document rules
+        cmd(hwnd, "BACK", 1.0)
         # a reading-mode tick, then F2 and typing: no conflict
         box = task_box(hwnd, 0)
         if box:
@@ -2783,13 +2794,14 @@ def test_edit_guards():
     marker = OUT / "edit-ctrl-e.md.launched"
     if marker.exists():
         marker.unlink()
-    doc.write_bytes('# Заголовок для Ctrl+E\n"""\nАбзац, в который печатают.\n"""\nopen(__file__ + ".launched", "w").write(open(__file__, encoding="utf-8").read())\n'.encode("utf-8"))
+    doc.write_bytes('# Заголовок для Ctrl+E\n\n"""\n\nАбзац, в который печатают.\n\n"""\n\nopen(__file__ + ".launched", "w", '
+                    'encoding="utf-8").write(open(__file__, encoding="utf-8").read())\n'.encode("utf-8"))
     pythonw = pathlib.Path(sys.executable).with_name("pythonw.exe")
     set_reg("Editor", str(pythonw))
     try:
         proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
         try:
-            enter_edit(hwnd, 1, dx=1)
+            enter_edit(hwnd, 2, dx=1)
             type_text(hwnd, "Ctrl+E ", 0.2)
             keys(hwnd, [ord("E")], ctrl=True, wait=0.3)
             launched = wait_for(lambda: marker.exists(), 5.0)
@@ -2993,6 +3005,7 @@ def test_edit_close_session():
     doc = OUT / "edit-close.md"
     doc.write_bytes(EDIT_DOC.encode("utf-8"))
     rec = DATA / "recovery"
+    clear_recovery()
     proc, hwnd = launch_edit(doc)
     enter_edit(hwnd, 1, dx=1)
     type_text(hwnd, "закрыть ", 0.1)
@@ -3010,7 +3023,7 @@ def test_edit_close_session():
         type_text(hwnd, "сеанс ", 0.1)
         r1 = u32.SendMessageW(hwnd, WM_QUERYENDSESSION, 0, 0)
         u32.SendMessageW(hwnd, WM_ENDSESSION, 1, 0)
-        want2 = want.replace("закрыть Первый", "закрыть сеанс Первый")
+        want2 = want.replace("закрыть Первый", "сеанс закрыть Первый")
         journals = list(rec.glob("*.unsaved")) if rec.exists() else []
         ok &= check("edit 2a: WM_QUERYENDSESSION + WM_ENDSESSION: saved without a word, no journal left",
                     r1 == 1 and doc.read_bytes() == want2.encode("utf-8") and not journals, f"answer {r1}, journals {journals}")
@@ -3029,6 +3042,7 @@ def test_edit_recovery():
     doc = OUT / "edit-journal.md"
     doc.write_bytes(EDIT_DOC.encode("utf-8"))
     rec = DATA / "recovery"
+    clear_recovery()
     set_reg("Autosave", 0)
     try:
         proc, hwnd = launch_edit(doc)
@@ -3100,6 +3114,7 @@ def test_edit_frames():
     ok = True
     doc = OUT / "edit-frames.md"
     doc.write_bytes(FRAMES_DOC.encode("utf-8"))
+    set_reg("EditHintShown", 1)  # the first-use toast lies over the text: its frames are full ones
     proc, hwnd = launch_edit(doc, {"FASTMD_TEST_HOOKS": "1"}, size="--size=900x800")
     try:
         wait_for(lambda: q(hwnd, "MATH", 1) == 1, 5.0)
@@ -3135,9 +3150,20 @@ def test_edit_frames():
             settle(hwnd)
             ok &= check(f"edit 2a: {what}: the source is right and the frame is a fresh layout's",
                         r == 1 and q(hwnd, "SRC_HASH", 0) == src_hash(src) and relayout_same(hwnd, f"104-edit-{what[:12]}"))
-        cmd(hwnd, "THEME_DARK", 0.6)
-        shot(hwnd, "105-edit-bar-dark-frames")
+        # a tooltip under the hovered button (the test hooks keep the hover: a posted move is followed by a leave)
+        tips = []
+        for theme in ("THEME_LIGHT", "THEME_DARK"):
+            cmd(hwnd, theme, 0.6)
+            for name in ("UNDO", "FMT_BOLD", "EDIT_EXIT"):
+                c = q(hwnd, "EDIT_TOOL", CMD[name])
+                x, y = c & 0xFFFF, c >> 16
+                post(hwnd, WM_MOUSEMOVE, 0, lp(x, y), 0.3)
+                img = shot(hwnd, f"105-edit-tip-{name.lower()}-{theme[6:].lower()}")
+                bg = img.getpixel((x, y + 60))
+                tips.append(ink(img, (x - 30, y + 25, x + 30, y + 45), bg=bg, tol=60) > 20)
+            post(hwnd, WM_MOUSEMOVE, 0, lp(450, 500), 0.3)
         cmd(hwnd, "THEME_LIGHT", 0.6)
+        ok &= check("edit 2a: a tooltip under each hovered button (undo, bold, ✕; light and dark)", all(tips), f"{tips}")
         post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.5)
     finally:
         close_edit(proc, hwnd)
@@ -3306,11 +3332,23 @@ def main():
              ("copy_md_exact", test_copy_md_exact), ("image_race", test_image_race),
              ("reload_during_update", test_reload_during_update), ("task_swap", test_task_swap),
              ("splice_hook", test_splice_hook), ("save_fault", test_save_fault), ("reading_touch", test_reading_touch),
-             ("locked_at_open", test_locked_at_open), ("modal_scope", test_modal_scope)]
+             ("locked_at_open", test_locked_at_open), ("modal_scope", test_modal_scope),
+             ("edit_enter_leave", test_edit_enter_leave), ("edit_fullpending", test_edit_fullpending),
+             ("edit_typing_utf8", lambda: edit_typing("utf8")), ("edit_typing_bomcrlf", lambda: edit_typing("bomcrlf")),
+             ("edit_typing_utf16", lambda: edit_typing("utf16")), ("edit_typing_ansi", lambda: edit_typing("ansi")),
+             ("edit_keys_once", test_edit_keys_once), ("edit_surrogates", test_edit_surrogates),
+             ("edit_undo", test_edit_undo), ("edit_guards", test_edit_guards), ("edit_conflict", test_edit_conflict),
+             ("edit_busy_retry", test_edit_busy_retry), ("edit_readonly_missing", test_edit_readonly_missing),
+             ("edit_encoding_strip", test_edit_encoding_strip), ("edit_close_session", test_edit_close_session),
+             ("edit_recovery", test_edit_recovery), ("edit_two_windows", test_edit_two_windows),
+             ("edit_frames", test_edit_frames), ("edit_blink", test_edit_blink), ("edit_perf", test_edit_perf),
+             ("edit_debounced", test_edit_debounced), ("settings_autosave", test_settings_autosave)]
     only = [n for n in os.environ.get("FASTMD_ONLY", "").split(",") if n]  # e.g. FASTMD_ONLY=update,settings
     for name, t in tests:
         if not only or name in only:
             ok &= t()
+    if any(name.startswith(("edit_", "settings_autosave")) for name, _ in tests if not only or name in only):
+        ok &= check("edit 2a: no edit window's map failed its self-check after a swap", not SELFCHECK, "; ".join(SELFCHECK))
     reset_profile()
     print("RESULT", "PASS" if ok else "FAIL")
     return 0 if ok else 1

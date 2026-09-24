@@ -1162,6 +1162,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         OnMouseMove(GET_X(lp), GET_Y(lp));
         return 0;
     case WM_MOUSELEAVE:
+        // A posted WM_MOUSEMOVE is followed at once by a leave (the real cursor is elsewhere): under the test hooks
+        // the hover stays until the next move, so a test can look at a hovered button and its tooltip.
+        if (EditTestHooks()) return 0;
         BarMouseLeave();  // edit mode's bar, strip buttons and the pencil
         if (g.hotScroll || g.hoverLink >= 0 || g.hoverCode >= 0 || g.hoverHBlock >= 0 || g.findHot != -1 ||
             g.tocHover != -1 || g.tocBtnHot || g.settingsBtnHot || g.recentHover >= 0 || g.hoverHeading >= 0 ||

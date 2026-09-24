@@ -274,8 +274,12 @@ std::wstring SizeText(uint64_t n) {
 
 std::wstring CodePageName(UINT cp) {
     CPINFOEXW info{};
-    if (GetCPInfoExW(cp, 0, &info)) return info.CodePageName;
-    return std::to_wstring(cp);
+    if (!GetCPInfoExW(cp, 0, &info)) return std::to_wstring(cp);
+    // Windows pads the number with two blanks ("1251  (ANSI - кириллица)"): one reads better in a sentence
+    std::wstring name;
+    for (const wchar_t* p = info.CodePageName; *p; p++)
+        if (*p != L' ' || name.empty() || name.back() != L' ') name += *p;
+    return name;
 }
 
 // why a save failed, in the words of the strips and the questions (§2.5, §10.8)
