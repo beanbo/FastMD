@@ -18,7 +18,7 @@ Add-Type -Namespace FastMDCheck -Name User32 -MemberDefinition @'
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 '@
 $U32 = [FastMDCheck.User32]
-$Q = @{ EDITING = 42; EDIT_BAR = 47; UNDO_DEPTH = 48 }
+$Q = @{ EDITING = 42; EDIT_BAR = 47; UNDO_DEPTH = 48; EDIT_ACTIVE = 62 }
 $CMD = @{ SELECT_ALL = 101; UNDO = 144 }
 
 $ok = $true
@@ -207,6 +207,19 @@ try {
     } else {
         Write-Host '[SKIP] 2c the element under a button: the window is not in front'
     }
+    # 3a: a popover's rows are buttons too - the style popover's «Heading 2» found by its name, pressed through Invoke
+    $style = Button 'Стиль абзаца' 'Paragraph style'
+    if ($style) { $style.GetCurrentPattern($IP::Pattern).Invoke() }
+    $h2 = $null
+    for ($k = 0; $k -lt 30 -and $null -eq $h2; $k++) { Start-Sleep -Milliseconds 100; $h2 = Button 'Заголовок 2' 'Heading 2' }
+    Check '3a the style popover''s rows are buttons of the document, with their names and shortcuts' `
+        ($null -ne $style -and $null -ne $h2 -and $h2.Current.AcceleratorKey -eq 'Ctrl+2' -and $h2.Current.IsEnabled) `
+        ("style {0}, row {1}" -f ($null -ne $style), $(if ($h2) { $h2.Current.AcceleratorKey } else { 'none' }))
+    if ($h2) { $h2.GetCurrentPattern($IP::Pattern).Invoke() }
+    $made = WaitFor { ((Query EDIT_ACTIVE) -shr 24) -eq 2 }
+    Check '3a Invoke on a row runs it - a heading 2 - and the popover and its rows are gone' `
+        ($made -and $null -eq (Button 'Заголовок 2' 'Heading 2')) ("style {0}" -f ((Query EDIT_ACTIVE) -shr 24))
+    Command UNDO
     $close = Button 'Закончить редактирование' 'Finish editing'
     $esc = if ($close) { $close.Current.AcceleratorKey } else { '' }
     if ($close) { $close.GetCurrentPattern($IP::Pattern).Invoke() }

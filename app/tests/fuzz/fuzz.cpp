@@ -277,8 +277,20 @@ bool EditWalk(std::mt19937& rng, const std::wstring& input, std::string* why) {
             if (st.focus == UINT32_MAX || st.anchor == UINT32_MAX) continue;
         }
         EditResult r;
-        const unsigned op = rng() % 16;
+        const unsigned op = rng() % 27;
         switch (op) {
+        // the commands of §8 (Phase 3a); a toggle with no selection leaves a pending format the typing ops take
+        case 16: r = OpToggleInline(c, st, (uint16_t)(1u << (rng() % 4))); break;
+        case 17: r = OpBlockStyle(c, st, (int)(rng() % 7)); break;
+        case 18: r = OpList(c, st, 7 + (int)(rng() % 3)); break;
+        case 19: r = OpQuote(c, st); break;
+        case 20: r = OpCodeBlock(c, st); break;
+        case 21: r = OpInsertTable(c, st, 1 + (int)(rng() % 4), 1 + (int)(rng() % 4)); break;
+        case 22: r = OpInsertFormula(c, st, rng() % 2 != 0); break;
+        case 23: r = OpInsertDiagram(c, st, (int)(rng() % 9)); break;
+        case 24: r = OpInsertHr(c, st); break;
+        case 25: r = OpTable(c, st, (int)(rng() % 10)); break;
+        case 26: r = OpCodeLang(c, st, rng() % 2 ? L"js" : L""); break;
         case 0: case 1: case 2: r = OpType(c, st, RandomText(rng, false)); break;
         case 3: r = OpBackspace(c, st, false); break;
         case 4: r = OpBackspace(c, st, true); break;

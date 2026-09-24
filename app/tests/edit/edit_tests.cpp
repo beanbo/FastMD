@@ -16,9 +16,14 @@
 //   do:    caret - the ‸ of src is a source offset; TextOfSrc then SrcOfText(MAP_CARET) must land on want's ‸
 //          or the operations, `;`-separated: type "x", BS, C-BS, Del, C-Del, Enter, S-Enter, C-Enter, Tab, S-Tab,
 //          Paste("…"), Cut, Phantom (the caret into the phantom row), click(t,b[,c]) (the caret at a text position),
-//          TaskToggle(n); src may hold a selection ⟦ … ⟧ (anchor first) instead of the ‸
+//          TaskToggle(n); the commands of §8: Bold, Italic, Strike, Code, P, H1…H6, Bullet, Number, Task, Quote,
+//          Fence, Lang("…"), Table(r,c), Table.<RowAbove|RowBelow|ColLeft|ColRight|DelRow|DelCol|AlignL|AlignC|AlignR|
+//          Del>, Formula, FormulaBlock, Diagram(n), Image("dest","alt"), Hr; src may hold a selection ⟦ … ⟧ (anchor
+//          first) instead of the ‸. A step that wrote delimiters is checked as the glue checks it (Verified), and typed
+//          text with a pending format goes in plain, the format still pending, when that check fails.
 //   want:  the expected source with its ‸ (or ⟦ … ⟧)
-//   state: (operation cases) refused=<why> and atom=<none|blkN|N>: what the last operation left besides the source
+//   state: (operation cases) refused=<why>, atom=<none|blkN|N> and pending=<on>[/<off>] (B I S C, ! sticky; none),
+//          `;`-separated: what the last operation left besides the source
 //   phantom: (operation cases) none | after <b> | before <b> | break <b> [in] [style <n>] [depth <n>]: the phantom row
 //          afterwards (default none)
 //   new:   (diff cases) the source after an edit; with
