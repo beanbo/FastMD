@@ -394,10 +394,10 @@ src: a **bold‸**\n
 do: type " "
 want: a **bold** ‸\n
 
-=== type_blank_bold_end_then_word (§7.3: the word after it is plain; the sticky end is 3a's)
+=== type_blank_bold_end_then_word (§7.3's sticky end: the next non-blank extends the span over the blank)
 src: a **bold‸**\n
 do: type " "; type "x"
-want: a **bold** x‸\n
+want: a **bold x‸**\n
 
 === type_blank_bold_end_mid (§7.3: the same in the middle of a paragraph)
 src: a **bold‸** tail\n

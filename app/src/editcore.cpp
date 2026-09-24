@@ -4,13 +4,13 @@
 //
 // Everything here is a pure function of a Doc parsed with ParseOptions::wantMap and the source it was parsed from:
 // no `g`, no window, no Win32 object. The unit tests (tests/edit) and the fuzzer call it directly.
-#include "editcore.h"
+#include "editcore_i.h"
 #include "../third_party/md4c/md4c.h"  // the span types SpanSrc::type holds
 
 #include <cstdarg>
 #include <cstdio>
 
-namespace {
+namespace ec {
 bool Blank(wchar_t c) { return c == L' ' || c == L'\t'; }
 bool EolChar(wchar_t c) { return c == L'\n' || c == L'\r'; }
 bool HighSur(wchar_t c) { return c >= 0xD800 && c <= 0xDBFF; }
@@ -54,8 +54,6 @@ bool ValidBlock(const Doc& d, int32_t b) {
     return d.hasMap && b >= 0 && (size_t)b < d.blocks.size() && d.blockSrc.size() == d.blocks.size();
 }
 
-// A text range a position lives in: its block's text, or in a table the text of its cell.
-struct TRange { uint32_t beg, end; };
 const Table* TableOf(const Doc& d, int32_t block) {
     const Block& b = d.blocks[block];
     if (b.kind != BK_TABLE || b.aux >= d.tables.size()) return nullptr;
@@ -75,8 +73,6 @@ bool RangeOf(const Doc& d, const TextPos& p, TRange* r) {
     return true;
 }
 
-// the segments of a block that lie in [r.beg, r.end): its whole slice, or the part a cell owns
-struct SegSpan { const SrcSeg* b; const SrcSeg* e; };
 SegSpan SegsIn(const Doc& d, int32_t block, TRange r) {
     const BlockSrc& bs = d.blockSrc[block];
     if (bs.segOff + bs.segCount > d.segs.size() || !bs.segCount) return SegSpan{nullptr, nullptr};
@@ -85,19 +81,6 @@ SegSpan SegsIn(const Doc& d, int32_t block, TRange r) {
     b = std::lower_bound(b, e, r.beg, [](const SrcSeg& s, uint32_t t) { return s.t < t; });
     e = std::lower_bound(b, e, r.end, [](const SrcSeg& s, uint32_t t) { return s.t < t; });
     return SegSpan{b, e};
-}
-// the spans of a position's block inside [r.beg, r.end] (all of them outside tables). In a table the text range is not
-// enough: a cell whose text is empty (`| <kbd> | c |`) shares its offset with the next cell's start, so a span must
-// also open inside the position's own cell.
-template <class F> void ForSpans(const Doc& d, const TextPos& p, TRange r, F f) {
-    const BlockSrc& bs = d.blockSrc[p.block];
-    const CellSrc* cs = nullptr;
-    if (const Table* tb = TableOf(d, p.block); tb && p.cell >= 0 && tb->cellOff + (uint32_t)p.cell < d.cellSrc.size())
-        cs = &d.cellSrc[tb->cellOff + p.cell];
-    for (uint32_t k = bs.spanOff; k < bs.spanOff + bs.spanCount && k < d.spans.size(); k++) {
-        const SpanSrc& sp = d.spans[k];
-        if (sp.tBeg >= r.beg && sp.tEnd <= r.end && (!cs || (sp.openBeg >= cs->beg && sp.openBeg <= cs->end))) f(sp);
-    }
 }
 
 // Where text typed into an empty block or cell goes (§6.3.1). The op that uses it adds the blank a marker or a pipe
@@ -363,7 +346,8 @@ std::vector<const ContainerSrc*> Chain(const Doc& d, int block) {
     std::reverse(chain.begin(), chain.end());
     return chain;
 }
-}  // namespace
+}  // namespace ec
+using namespace ec;
 
 // ------------------------------------------------------------------------------------------------ caret stops (§6.2)
 bool CaretStop(const Doc& d, const TextPos& p) {
@@ -449,6 +433,8 @@ uint32_t SrcOfText(const Doc& d, const std::wstring& src, const TextPos& p, MapM
         });
         return s;
     }
+    case MAP_INNER_END:  // before every closer at t
+        return L ? lEnd : R ? R->s : InsertionPoint(d, src, TextPos{t, p.block, p.cell});
     }
     return UINT32_MAX;
 }
@@ -742,7 +728,7 @@ BlockDiff DiffBlocks(const Doc& oldD, const Doc& newD) {
 // container outer -> inner, a quote's ">" (and the blank after it when b's own first line has one there), a list item's
 // indentation up to its content column; a footnote adds nothing. *at: where those containers' markers end on b's first
 // line (a phantom before b stands there, §6.7).
-static std::wstring PrefixN(const Doc& d, const std::wstring& src, int block, int n, uint32_t* at) {
+std::wstring ec::PrefixN(const Doc& d, const std::wstring& src, int block, int n, uint32_t* at) {
     std::wstring out;
     if (at) *at = 0;
     if (!ValidBlock(d, block)) return out;
@@ -1046,12 +1032,7 @@ int32_t AtomBlockOf(const Doc& d, int32_t atom) {
 // build their splices out of many small string operations. Inlining those costs about 30 KB of the exe together with the
 // glue's (§1 principle 3), so nothing is inlined here; the map queries above keep their inlining, they are measured (§5.8).
 #pragma inline_depth(0)
-namespace {
-// a few elements put in order: an insertion sort (std::sort's code is kilobytes for every place it is used)
-template <class T, class Less> void Order(std::vector<T>& v, Less less) {
-    for (size_t i = 1; i < v.size(); i++)
-        for (size_t k = i; k > 0 && less(v[k], v[k - 1]); k--) std::swap(v[k], v[k - 1]);
-}
+namespace ec {
 EditResult Nothing(const EditState& st, EditKind k) {
     EditResult r;
     r.after = st;
@@ -1418,8 +1399,6 @@ uint32_t LineContent(const Doc& d, const std::wstring& src, int32_t b, uint32_t 
 }
 
 // ---- §7.5 / §7.6 / §7.9: the delimiters an operation writes back where it cuts spans
-struct Delim { uint32_t at; uint8_t type; std::wstring text; };
-struct Bal { std::vector<Delim> close, open; bool torn = false; };
 // The spans of p's block (or cell) that removing source [sA, sB) cuts: one whose opener stays before the cut and whose
 // closer goes (with `reopen`: or stays after it) is closed at the cut - innermost first; one whose opener goes (or,
 // reopen, stays before it) and whose closer stays after it is opened again after the cut - outermost first. A link
@@ -1625,6 +1604,16 @@ EditResult Deletion(const EditCtx& c, const EditState& st, const TextPos& p, TRa
             caret = a + (uint32_t)ins.size();
         }
     }
+    // F9-2: a `_` span the deletion brings right beside a word would stand inside it, and be none: it is written with
+    // `*` (`foo ‸_bar_` Backspace → `foo*bar*`); the same length, so these go first and no offset moves
+    if (ins.empty())
+        ForSpans(d, p, rg, [&](const SpanSrc& sp) {
+            if (!(sp.flags & SF_UNDERSCORE) || (sp.flags & SF_UNCLOSED)) return;
+            if (!(sp.openBeg == b && a > 0 && WordChar(src[a - 1])) && !(sp.closeEnd == a && b < src.size() && WordChar(src[b])))
+                return;
+            for (auto [x, y] : {std::pair{sp.openBeg, sp.openEnd}, std::pair{sp.closeBeg, sp.closeEnd}})
+                r.splices.push_back(Splice{x, Sub(src, x, y), std::wstring(y - x, L'*')});
+        });
     r.splices.push_back(Splice{a, src.substr(a, b - a), ins});
     r.after.focus = r.after.anchor = caret != UINT32_MAX ? caret : a;
     // §7.4: the paragraph line the deletion changed must not turn into block syntax
@@ -1695,7 +1684,7 @@ SelCut CutSelection(const EditCtx& c, const EditState& st) {
     cut.ok = true;
     return cut;
 }
-}  // namespace
+}  // namespace ec
 
 bool NeedsTypeCheck(std::wstring_view text) {
     for (wchar_t ch : text)
@@ -1741,10 +1730,19 @@ std::vector<TypeCandidate> TypeFallbacks(const EditCtx& c, const EditState& st, 
     // beside a formula's dollar: a separating blank (`the $E$‸ is` + `x` → `the $E$ x is`, F9-4)
     if (s > 0 && c.src[s - 1] == L'$') out.push_back(TypeCandidate{s, L" " + t, s + 1 + n, L" " + t});
     if (s < c.src.size() && c.src[s] == L'$') out.push_back(TypeCandidate{s, t + L" ", s + n, t + L" "});
+    // a `_` span the text now touches from outside would stand inside a word, and be none: it is written with `*`
+    // (F9-2: `x‸_ab_` + `y` → `xy*ab*`)
+    ForSpans(c.doc, p, rg, [&](const SpanSrc& sp) {
+        if (!(sp.flags & SF_UNDERSCORE) || (sp.flags & SF_UNCLOSED) || (sp.openBeg != s && sp.closeEnd != s)) return;
+        TypeCandidate k{s, t, s + n, t};
+        for (auto [a, b] : {std::pair{sp.openBeg, sp.openEnd}, std::pair{sp.closeBeg, sp.closeEnd}})
+            k.also.push_back(Splice{a + (a >= s ? n : 0), Sub(c.src, a, b), std::wstring(b - a, L'*')});
+        out.push_back(std::move(k));
+    });
     return out;
 }
 
-namespace {
+namespace ec {
 EditResult CutRange(const EditCtx& c, const EditState& st, std::wstring ins, EditKind kind);
 
 // A phantom the caret is not in stays next to its block through an operation's splices, as the caret does (§6.7): one
@@ -1764,28 +1762,39 @@ EditResult Materialise(const EditCtx& c, const EditState& st, std::wstring_view 
     int32_t ab = PhantomBlock(c.doc, src, ph);
     if (ab < 0) return Refuse(st, "nowhere");
     uint32_t at = std::min<uint32_t>(ph.anchorSrc, (uint32_t)src.size()), caret;
-    const std::wstring E = Eol(c, at), t = StylePrefix(ph.style) + std::wstring(text);
+    // a pending format wraps the text, the caret before its closers (`**x‸**`, §8.2)
+    std::wstring open, close;
+    if (typing)
+        for (uint16_t f : {FMT_BOLD, FMT_ITALIC, FMT_STRIKE, FMT_CODE})
+            if (st.pendOn & f) {
+                const wchar_t* m = f == FMT_BOLD ? L"**" : f == FMT_ITALIC ? L"*" : f == FMT_STRIKE ? L"~~" : L"`";
+                open += m;
+                close.insert(0, m);
+            }
+    const std::wstring E = Eol(c, at), t = StylePrefix(ph.style) + open + std::wstring(text) + close;
     std::wstring ins;
     if (ph.kind == PH_AFTER) {
         ins = E + ph.blankPrefix + E + ph.prefix + t;
-        caret = at + (uint32_t)ins.size();
+        caret = at + (uint32_t)(ins.size() - close.size());
         uint32_t nx = SkipEol(src, at);  // blank lines on both sides of the new block
         if (nx > at && nx < src.size() && !BlankLine(src, nx, LineEndOf(src, nx))) ins += E + ph.blankPrefix;
     } else if (ph.kind == PH_BEFORE) {
         ins = t;
-        caret = at + (uint32_t)ins.size();
+        caret = at + (uint32_t)(ins.size() - close.size());
         ins += E + ph.blankPrefix + E + ph.prefix;
     } else {  // a pending hard break at the block's end (an ATX heading can only hold a <br>)
         ins = (c.doc.blockSrc[ab].flags & BS_ATX) ? std::wstring(L"<br>") : L"\\" + E + ph.prefix;
-        ins += text;
-        caret = at + (uint32_t)ins.size();
+        ins += open + std::wstring(text) + close;
+        caret = at + (uint32_t)(ins.size() - close.size());
     }
     r.splices.push_back(Splice{at, L"", ins});
     r.after.focus = r.after.anchor = caret;
     r.after.phantom = Phantom{};
+    r.after.pendOn = r.after.pendOff = 0;
     // the line a hard break starts goes on the paragraph: what is typed there is checked as on any such line (§7.4)
     if (ph.kind == PH_BREAK && typing && Para(c.doc, ab) && !(c.doc.blockSrc[ab].flags & BS_ATX))
-        Escape(r, std::wstring(text) + Sub(src, at, LineEndOf(src, at)), caret - (uint32_t)text.size(), false);
+        Escape(r, open + std::wstring(text) + close + Sub(src, at, LineEndOf(src, at)),
+               caret - (uint32_t)(text.size() + open.size()), false);
     return r;
 }
 
@@ -1800,6 +1809,10 @@ EditResult Insert(const EditCtx& c, const EditState& st, std::wstring_view text,
     const Doc& d = c.doc;
     const std::wstring& src = c.src;
     const bool blank = typing && std::all_of(text.begin(), text.end(), Blank);
+    if (typing && !blank && (st.pendOn || st.pendOff)) {  // a pending format: the first non-blank character takes it (§8.2)
+        EditResult r = TypePending(c, st, text);
+        if (r.refused != "plain") return r;
+    }
     uint16_t trail = 0;
     TextPos p = FocusOf(c, st, &trail);
     if (!ValidBlock(d, p.block)) {
@@ -1832,9 +1845,10 @@ EditResult Insert(const EditCtx& c, const EditState& st, std::wstring_view text,
             // a soft break the break already shows as that blank: at its left edge the caret goes over it (§6.6).
             if (p.t == rg.beg) return r;
             if (SoftBreak(d, src, SegEndingAt(ss, p.t))) return r;
-            // At the end of a span the blank goes after its closers: `**bold **` is no bold at all, and the next word
-            // after the blank is plain in Markdown anyway (§7.3's sticky end; the merge that makes it bold is 3a's).
+            // At the end of a span the blank goes after its closers - `**bold **` is no bold at all - and the span is
+            // sticky: the next non-blank character extends it over the blank (§7.3, `**bold x‸**`)
             s = SrcOfText(d, src, p, MAP_OUTER_END);
+            if (uint16_t sticky = StickyAt(d, p)) r.after.pendOn = sticky | FMT_STICKY;
         }
         // A caret in the blanks a soft break starts with (§6.5): one more there would make two blanks before the line
         // end, a hard break. It goes over the break instead, as from its left edge (§6.6).
@@ -1888,14 +1902,14 @@ EditResult Insert(const EditCtx& c, const EditState& st, std::wstring_view text,
     }
     return r;
 }
-}  // namespace
+}  // namespace ec
 
 EditResult OpType(const EditCtx& c, const EditState& st, std::wstring_view text) {
     return Carry(Insert(c, st, text, true, EK_TYPE));
 }
 
 // ------------------------------------------------------------------------------------------------ deleting (§7.7)
-namespace {
+namespace ec {
 // where a picture in a line stands in the text: its block, its cell, its offset
 bool ImagePos(const Doc& d, int32_t image, TextPos* p) {
     int32_t b = AtomBlockOf(d, image);
@@ -2761,7 +2775,7 @@ EditResult CutRange(const EditCtx& c, const EditState& st, std::wstring ins, Edi
     }
     return CutBlocks(c, st, A, B, ins, kind);
 }
-}  // namespace
+}  // namespace ec
 
 static EditResult BackspaceOp(const EditCtx& c, const EditState& st, bool word) {
     if (InPh(st)) return PhBack(c, st);

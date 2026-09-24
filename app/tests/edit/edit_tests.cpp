@@ -740,6 +740,40 @@ bool DoOp(OpRun& r, const std::string& op, const std::string& what) {
         return true;
     } else if (op.rfind("TaskToggle(", 0) == 0) {
         res = OpTaskToggle(c, r.st, atoi(op.c_str() + 11));
+    } else if (op == "Bold" || op == "Italic" || op == "Strike" || op == "Code") {  // §8.2
+        res = OpToggleInline(c, r.st, op == "Bold" ? FMT_BOLD : op == "Italic" ? FMT_ITALIC : op == "Strike" ? FMT_STRIKE : FMT_CODE);
+    } else if (op == "P" || (op.size() == 2 && op[0] == 'H' && op[1] >= '1' && op[1] <= '6')) {  // §8.4
+        res = OpBlockStyle(c, r.st, op == "P" ? 0 : op[1] - '0');
+    } else if (op == "Bullet" || op == "Number" || op == "Task") {  // §8.5
+        res = OpList(c, r.st, op == "Bullet" ? 7 : op == "Number" ? 8 : 9);
+    } else if (op == "Quote") {  // §8.6
+        res = OpQuote(c, r.st);
+    } else if (op == "Fence") {  // §8.7
+        res = OpCodeBlock(c, r.st);
+    } else if (QuotedArg(op, "Lang", &arg)) {
+        res = OpCodeLang(c, r.st, arg);
+    } else if (op.rfind("Table(", 0) == 0) {  // §8.8: Table(rows,cols)
+        int rows = 3, cols = 3;
+        sscanf_s(op.c_str() + 6, "%d,%d", &rows, &cols);
+        res = OpInsertTable(c, r.st, rows, cols);
+    } else if (op.rfind("Table.", 0) == 0) {  // §8.9
+        static const char* kOps[] = {"RowAbove", "RowBelow", "ColLeft", "ColRight", "DelRow", "DelCol", "AlignL", "AlignC",
+                                     "AlignR", "Del"};
+        int k = 0;
+        while (k < 10 && op.substr(6) != kOps[k]) k++;
+        if (!Check(k < 10, "%s: unknown table op %s", what.c_str(), op.c_str())) return false;
+        res = OpTable(c, r.st, k);
+    } else if (op == "Formula" || op == "FormulaBlock") {
+        res = OpInsertFormula(c, r.st, op == "FormulaBlock");
+    } else if (op.rfind("Diagram(", 0) == 0) {
+        res = OpInsertDiagram(c, r.st, atoi(op.c_str() + 8));
+    } else if (op == "Hr") {
+        res = OpInsertHr(c, r.st);
+    } else if (op.rfind("Image(", 0) == 0) {  // Image("dest","alt")
+        size_t q = op.find("\",\"");
+        if (!Check(q != std::string::npos && op.size() > q + 5, "%s: %s: want Image(\"dest\",\"alt\")", what.c_str(), op.c_str()))
+            return false;
+        res = OpInsertImage(c, r.st, Unescape(op.substr(7, q - 7)), Unescape(op.substr(q + 3, op.size() - q - 5)));
     } else {
         Fail("%s: unknown op \"%s\"", what.c_str(), op.c_str());
         return false;
@@ -759,39 +793,57 @@ bool DoOp(OpRun& r, const std::string& op, const std::string& what) {
     uint16_t tr = 0;
     uint32_t t0 = TextOfSrc(p.d, p.src, r.st.focus, 1, &tr).t;
     bool blanks = std::all_of(typed.begin(), typed.end(), [](wchar_t ch) { return ch == L' ' || ch == L'\t'; });
-    if (!typed.empty() && !blanks && !tr && NeedsTypeCheck(typed) && res.splices.size() == 1 && res.splices[0].removed.empty() &&
-        r.st.anchor == r.st.focus) {
+    const bool pending = r.st.pendOn || r.st.pendOff;
+    if (!typed.empty() && !blanks && !tr && !pending && NeedsTypeCheck(typed) && res.splices.size() == 1 &&
+        res.splices[0].removed.empty() && r.st.anchor == r.st.focus) {
         Parsed q;
         ParseMap(q, s);
         if (!TypedOk(p.d, t0, q.d, typed)) {
             for (const TypeCandidate& cand : TypeFallbacks(c, r.st, res.splices[0].at, typed)) {
+                std::vector<Splice> alt{Splice{cand.at, L"", cand.text}};
+                alt.insert(alt.end(), cand.also.begin(), cand.also.end());
                 std::wstring s2 = r.src;
-                s2.insert(cand.at, cand.text);
+                if (!ApplySplices(s2, alt, false, &why)) continue;
                 Parsed q2;
                 ParseMap(q2, s2);
                 if (TypedOk(p.d, t0, q2.d, cand.rendered)) {
                     s = s2;
-                    res.splices = {Splice{cand.at, L"", cand.text}};
+                    res.splices = alt;
                     res.after.focus = res.after.anchor = cand.caret;
                     break;
                 }
             }
         }
     }
+    Parsed n;
+    ParseMap(n, s);
+    // §7.5 step 5: a step that wrote delimiters must render the old text around the change and put the formatting where
+    // it asked; else it is taken back - typed text with a pending format goes in plain then, the format still pending
+    if (!Verified(p.d, n.d, res)) {
+        if (typed.empty() || !pending) {
+            r.refused = "keep";
+            return true;
+        }
+        res = OpTypePlain(c, r.st, typed);
+        s = r.src;
+        if (!Check(ApplySplices(s, res.splices, false, &why), "%s %s: %s", what.c_str(), op.c_str(), why.c_str())) return false;
+        ParseMap(n, s);
+    }
     std::wstring inv = s;
     Check(ApplySplices(inv, res.splices, true, &why) && inv == before, "%s %s: the inverse splices do not give the old source back",
           what.c_str(), op.c_str());
-    Parsed n;
-    ParseMap(n, s);
-    // §7.5 step 5: a step that wrote delimiters back must render the old text around the change; else it is taken back
-    if (res.keep.on && !Kept(p.d, n.d, res.keep)) {
-        r.refused = "keep";
-        return true;
-    }
     r.src = s;
     r.st = res.after;
     r.dir = res.kind == EK_DEL_BACK ? -1 : 1;
     SelfCheck(n, what + " after " + op);
+    if (res.selA.block >= 0 && res.selB.block >= 0) {  // a formatting command's selection, found again by its text
+        uint32_t lo = SrcOfText(n.d, n.src, res.selA, MAP_INNER_START), hi = SrcOfText(n.d, n.src, res.selB, MAP_INNER_END);
+        if (Check(lo != UINT32_MAX && hi != UINT32_MAX && lo <= hi, "%s %s: the selection is not found again", what.c_str(), op.c_str())) {
+            bool fwd = r.st.anchor <= r.st.focus;
+            r.st.anchor = fwd ? lo : hi;
+            r.st.focus = fwd ? hi : lo;
+        }
+    }
     uint16_t trail = 0;
     TextPos t = TextOfSrc(n.d, n.src, r.st.focus, r.dir, &trail);
     // a phantom lives while the caret is in it or in the block it stands next to (§6.7)
@@ -801,7 +853,7 @@ bool DoOp(OpRun& r, const std::string& op, const std::string& what) {
               op.c_str(), r.st.focus, r.st.phantom.anchorSrc);
     } else if (r.st.atom < 0 && r.st.anchor == r.st.focus && !n.d.blocks.empty()) {  // (an emptied document has no stop)
         Check(CaretStop(n.d, t), "%s %s: the caret (t%u b%d) is not a stop", what.c_str(), op.c_str(), t.t, t.block);
-        if (!trail) {  // normalised as the glue does: to where typed text would go
+        if (!trail && !r.st.pendOn && !r.st.pendOff) {  // normalised as the glue does: to where typed text would go
             uint32_t k = SrcOfText(n.d, n.src, t, MAP_CARET);
             if (k != UINT32_MAX) r.st.focus = r.st.anchor = k;
         }
@@ -833,7 +885,20 @@ void OpVariant(const Case& c, const std::string& what, const std::wstring& srcMa
         for (const std::string& kv : SplitOps(*state)) {
             if (kv.rfind("refused=", 0) == 0) Check(r.refused == kv.substr(8), "%s: refused \"%s\", want \"%s\"", what.c_str(),
                                                    r.refused.c_str(), kv.substr(8).c_str());
-            else if (kv.rfind("atom=", 0) == 0) {
+            else if (kv.rfind("pending=", 0) == 0) {  // pending=<on>[/<off>]: B I S C, ! sticky; none
+                auto letters = [](uint16_t f) {
+                    std::string s;
+                    if (f & FMT_BOLD) s += 'B';
+                    if (f & FMT_ITALIC) s += 'I';
+                    if (f & FMT_STRIKE) s += 'S';
+                    if (f & FMT_CODE) s += 'C';
+                    if (f & FMT_STICKY) s += '!';
+                    return s;
+                };
+                std::string got = letters(r.st.pendOn) + (r.st.pendOff ? "/" + letters(r.st.pendOff) : "");
+                if (got.empty()) got = "none";
+                Check(got == kv.substr(8), "%s: pending %s, want %s", what.c_str(), got.c_str(), kv.substr(8).c_str());
+            } else if (kv.rfind("atom=", 0) == 0) {
                 std::string v = kv.substr(5);
                 int32_t want = v == "none" ? -1 : v.rfind("blk", 0) == 0 ? (kAtomBlock | atoi(v.c_str() + 3)) : atoi(v.c_str() + 3);
                 Check(r.st.atom == want, "%s: atom %d, want %d (%s)", what.c_str(), r.st.atom, want, v.c_str());

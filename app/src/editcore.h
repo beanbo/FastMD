@@ -34,6 +34,9 @@ struct Phantom {
     uint8_t in = 0;
 };
 enum Fmt : uint16_t { FMT_BOLD = 1, FMT_ITALIC = 2, FMT_STRIKE = 4, FMT_CODE = 8, FMT_LINK = 16 };
+// EditState::pendOn: the formats came from a blank typed at the end of their spans (§7.3's sticky end) - the next
+// non-blank character extends those spans over the blanks instead of starting new ones
+constexpr uint16_t FMT_STICKY = 0x100;
 struct EditState {
     uint32_t focus = 0, anchor = 0;    // source offsets; anchor == focus → collapsed (THE caret: survives re-parses)
     int8_t lineAff = 0;                // visual affinity at a soft-wrap boundary: -1 end of the upper line, +1 lower start
@@ -63,21 +66,31 @@ struct EditResult {
     std::vector<Splice> splices;       // applied in order
     EditState after;
     EditKind kind = EK_OTHER;
-    struct Expect { uint32_t sBeg, sEnd; uint16_t fmt; bool present; };
-    std::vector<Expect> verify;        // post-reparse checks of emitted delimiters (§7.5); empty = none
+    // post-reparse checks of emitted delimiters (§7.5 step 5): every character of the new text [tBeg, tEnd) but blanks
+    // has (present) or lacks the format fmt (FMT_*); empty = none
+    struct Expect { uint32_t tBeg, tEnd; uint16_t fmt; bool present; };
+    std::vector<Expect> verify;
     // The check the glue runs after the re-parse when an operation wrote delimiters back (a split's closers and openers,
     // a cut's rebalancing, §7.5 step 5): the rendered text must be the old one with [t0, t1) replaced by `text`, and the
     // characters beside the change must keep their formatting. When it fails the step is taken back and refused.
     struct Keep { bool on = false; uint32_t t0 = 0, t1 = 0; std::wstring text; } keep;
+    // a formatting command keeps the text: its selection is found again by text position on the new document, from
+    // inside the delimiters at its start (MAP_INNER_START) to before those at its end (MAP_INNER_END); block -1 = none
+    TextPos selA{0, -1, -1}, selB{0, -1, -1};
     std::string refused;               // non-empty: nothing applied, the glue shows the toast named here
 };
 bool Kept(const Doc& oldD, const Doc& newD, const EditResult::Keep&);
+// Kept, and every one of the result's format expectations: what the glue (and the golden runner) checks after the
+// re-parse of a step that wrote delimiters; false = take it back
+bool Verified(const Doc& oldD, const Doc& newD, const EditResult&);
+// the character at text offset t has the format (FMT_*) as the markup gives it: inside a span of it (§8.2)
+bool HasFormat(const Doc&, uint32_t t, uint16_t fmt);
 
 // ---- mapping (§6)
 // Is pos a place the caret may stand? Not inside an atom or a synthesized piece, not in a hidden or synthesized block;
 // a table position must name its cell. Clusters are the caller's business (ClusterFn).
 bool     CaretStop(const Doc&, const TextPos&);
-enum MapMode { MAP_CARET, MAP_OUTER_START, MAP_OUTER_END, MAP_INNER_START };
+enum MapMode { MAP_CARET, MAP_OUTER_START, MAP_OUTER_END, MAP_INNER_START, MAP_INNER_END };
 // UINT32_MAX when there is nothing to map: no map, no such block or cell, a synthesized block. An object atom (a
 // picture block, an HTML block, front matter) maps to its first line (MAP_OUTER_END: the end of its last line).
 uint32_t SrcOfText(const Doc&, const std::wstring& src, const TextPos&, MapMode);
@@ -103,6 +116,7 @@ EditResult OpReplaceSelection(const EditCtx&, const EditState&, std::wstring_vie
 EditResult OpPaste(const EditCtx&, const EditState&, std::wstring_view text, bool privateFormat);
 std::wstring BalancedSlice(const EditCtx&, const EditState&);             // §7.11
 EditResult OpToggleInline(const EditCtx&, const EditState&, uint16_t fmt);
+EditResult OpTypePlain(const EditCtx&, const EditState&, std::wstring_view text);  // at the caret, pending formats kept
 EditResult OpLink(const EditCtx&, const EditState&, std::wstring_view url, bool confirmRefDef);
 EditResult OpLinkRemove(const EditCtx&, const EditState&);
 EditResult OpBlockStyle(const EditCtx&, const EditState&, int level /* 0 paragraph, 1..6 */);
@@ -124,7 +138,8 @@ EditResult OpAtomSource(const EditCtx&, const EditState&, int atom, int field, s
 // TypeFallbacks names, in order; if none renders right, the first splice stays (typing is never blocked).
 bool NeedsTypeCheck(std::wstring_view text);
 bool TypedOk(const Doc& oldD, uint32_t t, const Doc& newD, std::wstring_view rendered);
-struct TypeCandidate { uint32_t at; std::wstring text; uint32_t caret; std::wstring rendered; };
+// text put in at `at`; `also`: splices after that one, on the source it left (F9-2's `_` → `*`)
+struct TypeCandidate { uint32_t at; std::wstring text; uint32_t caret; std::wstring rendered; std::vector<Splice> also; };
 std::vector<TypeCandidate> TypeFallbacks(const EditCtx&, const EditState&, uint32_t s, std::wstring_view text);
 // object atoms (§6.2): ids are the image index for one in a line, 0x40000000 | block for a block of its own
 constexpr int32_t kAtomBlock = 0x40000000;

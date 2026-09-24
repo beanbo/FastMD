@@ -49,7 +49,7 @@ set_source_files_properties(third_party/md4c/md4c.c PROPERTIES COMPILE_OPTIONS "
 # queries, which are measured, and the exe pays ~1.5 ms per MB on every launch whether edit mode is used or not. They
 # are compiled on their own with /O1 (the rest of the program keeps /O2) and linked into the exe with everything else.
 # The screen-reader provider joins them: it runs only while a screen reader asks, one call at a time.
-add_library(fastmd_edit OBJECT src/editcore.cpp src/editfile.cpp src/edit.cpp src/editbar.cpp src/uia.cpp)
+add_library(fastmd_edit OBJECT src/editcore.cpp src/editops.cpp src/editfile.cpp src/edit.cpp src/editbar.cpp src/uia.cpp)
 # The cold half of reading mode goes the same way (Phase 3a): the updater, the settings window, the shell's dialogs,
 # links and clipboard, printing and its canvas, the crash handler, dragging out and copying run on a click or after the
 # first frame - never on the way to it, never while scrolling (the gear is one icon a frame). The parser, layout, view,
@@ -180,7 +180,7 @@ option(FASTMD_ASAN "Build it with AddressSanitizer" OFF)
 if(FASTMD_FUZZ)
     # editcore.cpp: every input is also parsed with edit mode's map and checked by MapSelfCheck
     add_executable(fastmd-fuzz tests/fuzz/fuzz.cpp src/parse.cpp src/html.cpp src/highlight.cpp src/util.cpp
-        src/theme.cpp src/editcore.cpp third_party/md4c/md4c.c)
+        src/theme.cpp src/editcore.cpp src/editops.cpp third_party/md4c/md4c.c)
     target_include_directories(fastmd-fuzz PRIVATE ${CMAKE_BINARY_DIR}/generated src)
     target_compile_definitions(fastmd-fuzz PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
         _CRT_SECURE_NO_WARNINGS MD4C_USE_UTF16 FASTMD_NO_APP)
@@ -196,7 +196,7 @@ endif()
 #   pwsh -File tests/edit/run.ps1
 option(FASTMD_TESTS "Build the edit-mode unit tests" ON)
 if(FASTMD_TESTS)
-    add_executable(fastmd-edit-tests tests/edit/edit_tests.cpp src/editcore.cpp src/editfile.cpp src/parse.cpp src/html.cpp
+    add_executable(fastmd-edit-tests tests/edit/edit_tests.cpp src/editcore.cpp src/editops.cpp src/editfile.cpp src/parse.cpp src/html.cpp
         src/highlight.cpp src/util.cpp src/theme.cpp third_party/md4c/md4c.c)
     target_include_directories(fastmd-edit-tests PRIVATE ${CMAKE_BINARY_DIR}/generated src)
     target_compile_definitions(fastmd-edit-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
