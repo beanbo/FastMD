@@ -4767,6 +4767,332 @@ def test_edit_outline():
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ edit mode, phase 3a
+def cmd_arg(hwnd, name, arg, wait=0.35):
+    """WM_COMMAND with its argument in the high word (a table's size, a diagram's template)"""
+    post(hwnd, WM_COMMAND, CMD[name] | (arg << 16), 0, wait)
+
+
+def tool_xy(hwnd, name, row=0):
+    """the centre of a bar button, or of a row (from 1) of its open popover - the size grid's cell: rows << 4 | cols"""
+    c = q(hwnd, "EDIT_TOOL", CMD[name] | (row << 16))
+    return (c & 0xFFFF, (c >> 16) & 0xFFFF) if c > 0 else None
+
+
+def saved_text(hwnd, doc):
+    cmd(hwnd, "SAVE", 0.4)
+    return doc.read_bytes().decode("utf-8")
+
+
+def popover_shots(hwnd, name, menu, row=0):
+    """a popover in light and dark: a theme switch closes it (§2.4), so it is opened in each theme; row: the hot one"""
+    for theme, suffix in (("THEME_LIGHT", ""), ("THEME_DARK", "-dark")):
+        if suffix:
+            cmd(hwnd, theme, 0.6)
+        cmd(hwnd, menu, 0.4)
+        xy = tool_xy(hwnd, menu, row) if row else None
+        if xy:
+            post(hwnd, WM_MOUSEMOVE, 0, lp(*xy), 0.3)
+        shot(hwnd, name + suffix)
+        if suffix:
+            cmd(hwnd, menu, 0.3)  # (closed again)
+            cmd(hwnd, "THEME_LIGHT", 0.6)
+    cmd(hwnd, menu, 0.4)  # open, in the light theme, as it was before the pictures
+
+
+CMD_DOC = ("# Команды\n\nПервый абзац с текстом.\n\nВторой абзац.\n\n| a | b |\n| --- | --- |\n| c | d |\n\n"
+           "```\ncode\n```\n")
+
+
+def select_word(hwnd, words_before):
+    """the caret to the paragraph's start, over `words_before` words, then a word selected (Ctrl+Shift+→)"""
+    post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+    for _ in range(words_before):
+        testkey(hwnd, VK["right"], KM_CTRL, 0.1)
+    testkey(hwnd, VK["right"], KM_CTRL | KM_SHIFT, 0.3)
+
+
+def test_edit_commands():
+    """§8.1-§8.7 (3a): every format, block style, list, quote and code-block command - Q_EDIT_ACTIVE shows it on, the
+    file gets its Markdown -, a second press takes it off (Ctrl+2 twice returns to text), a pending format for the next
+    typed character, the style popover's rows, the commands the context matrix greys change nothing in a cell or code;
+    the bar's active states and the style popover in light and dark"""
+    ok = True
+    doc = OUT / "edit-commands.md"
+    doc.write_bytes(CMD_DOC.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_TEST_HOOKS": "1"})
+    try:
+        text = CMD_DOC
+        enter_edit(hwnd, 1, dx=1)
+        # the inline formats on a selected word: on (active, the bytes), then off again by the undo
+        marks = {"FMT_BOLD": ("**", 0), "FMT_ITALIC": ("*", 1), "FMT_STRIKE": ("~~", 2), "FMT_CODE": ("`", 3)}
+        for name, (m, bit) in marks.items():
+            select_word(hwnd, 1)  # «абзац »
+            cmd(hwnd, name, 0.4)
+            want = text.replace("Первый абзац с", f"Первый {m}абзац{m} с", 1)
+            on = active(hwnd, bit) and q(hwnd, "SRC_HASH", 0) == src_hash(want)
+            if name == "FMT_BOLD":
+                shot(hwnd, "119-edit-active-bold")
+                shot_dark(hwnd, "119-edit-active-bold-dark")
+            cmd(hwnd, name, 0.4)  # (the selection kept: every character has it now, so it goes)
+            off = not active(hwnd, bit) and q(hwnd, "SRC_HASH", 0) == src_hash(text)
+            ok &= check(f"edit 3a: {name} on a selected word writes {m}…{m}, shows it active, and a second press takes "
+                        f"it off", on and off, f"on {on}, off {off}, active {q(hwnd, 'EDIT_ACTIVE'):#x}")
+        # a pending format: nothing written until the next character, which it wraps
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.1)
+        type_text(hwnd, " ", 0.2)
+        cmd(hwnd, "FMT_BOLD", 0.3)
+        pend = active(hwnd, 0) and q(hwnd, "SRC_HASH", 0) == src_hash(text.replace("текстом.", "текстом. ", 1))
+        type_text(hwnd, "жирно", 0.4)
+        text = text.replace("текстом.", "текстом. **жирно**", 1)
+        ok &= check("edit 3a: a toggle with no selection is pending (active, nothing written) and wraps what is typed next",
+                    pend and q(hwnd, "SRC_HASH", 0) == src_hash(text) and active(hwnd, 0),
+                    f"pending {pend}, len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
+        # block styles: Ctrl+2 twice returns to text; the style id is in Q_EDIT_ACTIVE's high byte
+        cmd(hwnd, "BLOCK_H2", 0.4)
+        h2 = q(hwnd, "EDIT_ACTIVE") >> 24 == 2 and q(hwnd, "SRC_HASH", 0) == src_hash(text.replace("Первый", "## Первый", 1))
+        shot(hwnd, "120-edit-heading2")
+        cmd(hwnd, "BLOCK_H2", 0.4)
+        ok &= check("edit 3a: heading 2 and back (the same level again returns to text)",
+                    h2 and q(hwnd, "EDIT_ACTIVE") >> 24 == 0 and q(hwnd, "SRC_HASH", 0) == src_hash(text),
+                    f"h2 {h2}, style {q(hwnd, 'EDIT_ACTIVE') >> 24}")
+        # lists and the quote: on with their bit, off again with a second press
+        for name, prefix, bit in (("LIST_BULLET", "- ", 8), ("LIST_NUMBER", "1. ", 9), ("LIST_TASK", "- [ ] ", 10),
+                                  ("QUOTE", "> ", 11)):
+            cmd(hwnd, name, 0.4)
+            on = active(hwnd, bit) and q(hwnd, "SRC_HASH", 0) == src_hash(text.replace("Первый", prefix + "Первый", 1))
+            if name == "LIST_TASK":
+                shot(hwnd, "121-edit-active-task")
+            cmd(hwnd, name, 0.4)
+            ok &= check(f"edit 3a: {name} writes «{prefix.strip()}», shows it active, and off again",
+                        on and not active(hwnd, bit) and q(hwnd, "SRC_HASH", 0) == src_hash(text),
+                        f"on {on}, active {q(hwnd, 'EDIT_ACTIVE'):#x}")
+        # the style popover: its rows are buttons (Q_EDIT_TOOL row 3 = Heading 2), the current one marked
+        popover_shots(hwnd, "122-edit-style-popover", "BLOCK_MENU", 3)
+        row = tool_xy(hwnd, "BLOCK_MENU", 3)
+        if row:
+            click(hwnd, *row, 0.4)
+        ok &= check("edit 3a: the style popover's «Heading 2» row makes a heading 2 (and the popover closes)",
+                    row is not None and q(hwnd, "SRC_HASH", 0) == src_hash(text.replace("Первый", "## Первый", 1)) and
+                    tool_xy(hwnd, "BLOCK_MENU", 3) is None, f"row {row}")
+        cmd(hwnd, "UNDO", 0.3)
+        # the popover's keys: ↓ moves the hot row, Enter runs it, Esc closes
+        cmd(hwnd, "BLOCK_MENU", 0.3)
+        post(hwnd, WM_KEYDOWN, VK["down"], 0, 0.1)  # (from the current «Normal text» to «Heading 1»)
+        post(hwnd, WM_KEYDOWN, VK["return"], 0, 0.4)
+        keyed = q(hwnd, "SRC_HASH", 0) == src_hash(text.replace("Первый", "# Первый", 1))
+        cmd(hwnd, "UNDO", 0.3)
+        cmd(hwnd, "BLOCK_MENU", 0.3)
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.3)
+        ok &= check("edit 3a: the popover's keys: ↓ and Enter run a row, Esc closes it and stays in edit mode",
+                    keyed and tool_xy(hwnd, "BLOCK_MENU", 1) is None and q(hwnd, "EDITING") == 1 and
+                    q(hwnd, "SRC_HASH", 0) == src_hash(text), f"keyed {keyed}")
+        # the code block: the paragraph wrapped in a fence, and unwrapped again
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 4, q(hwnd, "BLOCK_Y", 2) + 10, 0.3)
+        cmd(hwnd, "CODEBLOCK", 0.4)
+        fenced = active(hwnd, 13) and q(hwnd, "SRC_HASH", 0) == src_hash(text.replace("Второй абзац.", "```\nВторой абзац.\n```", 1))
+        cmd(hwnd, "CODEBLOCK", 0.4)
+        ok &= check("edit 3a: the code block command wraps the paragraph in a fence, and unwraps it again",
+                    fenced and q(hwnd, "SRC_HASH", 0) == src_hash(text), f"fenced {fenced}")
+        # in a cell: style, lists and quote are greyed (and do nothing); bold works
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 12, q(hwnd, "BLOCK_Y", 3) + 44, 0.3)
+        in_cell = active(hwnd, 12)
+        for name in ("BLOCK_H1", "LIST_BULLET", "LIST_NUMBER", "QUOTE", "BLOCK_MENU"):
+            cmd(hwnd, name, 0.3)
+        bullet = tool_xy(hwnd, "LIST_BULLET")
+        if bullet:  # a greyed button's tooltip says why (the test hooks keep a posted hover)
+            post(hwnd, WM_MOUSEMOVE, 0, lp(*bullet), 0.3)
+        shot(hwnd, "123-edit-cell-disabled")
+        shot_dark(hwnd, "123-edit-cell-disabled-dark")
+        post(hwnd, WM_MOUSEMOVE, 0, lp(500, 600), 0.2)
+        ok &= check("edit 3a: in a table cell the block commands are disabled: nothing changes",
+                    in_cell and q(hwnd, "SRC_HASH", 0) == src_hash(text) and tool_xy(hwnd, "BLOCK_MENU", 1) is None,
+                    f"in a cell {in_cell}")
+        # in code: the inline formats are disabled
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 30, q(hwnd, "BLOCK_Y", 4) + 20, 0.3)
+        in_code = active(hwnd, 13)
+        for name in ("FMT_BOLD", "FMT_ITALIC", "LIST_TASK"):
+            cmd(hwnd, name, 0.3)
+        ok &= check("edit 3a: in a code block the inline formats and lists are disabled: nothing changes",
+                    in_code and q(hwnd, "SRC_HASH", 0) == src_hash(text), f"in code {in_code}")
+        ok &= check("edit 3a: saved as it reads", saved_text(hwnd, doc) == text)
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+    return ok
+
+
+TABLE_DOC = "# Таблицы\n\nАбзац перед таблицей.\n\nАбзац после.\n"
+
+
+def test_edit_table():
+    """§8.8, §8.9 (3a): CMD_INS_TABLE with a size in its argument; the size grid's cells as buttons (Q_EDIT_TOOL); in a
+    table the actions popover, and every CMD_TABLE_* on the bytes; the popovers in light and dark"""
+    ok = True
+    doc = OUT / "edit-table.md"
+    doc.write_bytes(TABLE_DOC.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_TEST_HOOKS": "1"})
+    try:
+        text = TABLE_DOC
+        enter_edit(hwnd, 1, dx=1)
+        cmd_arg(hwnd, "INS_TABLE", 2 << 4 | 3)  # 2 rows (the header's included), 3 columns
+        t23 = "|  |  |  |\n| --- | --- | --- |\n|  |  |  |\n"
+        want = text.replace("таблицей.\n", "таблицей.\n\n" + t23, 1)
+        ok &= check("edit 3a: CMD_INS_TABLE 2×3 after the paragraph, the caret in its first header cell",
+                    q(hwnd, "SRC_HASH", 0) == src_hash(want) and active(hwnd, 12) and
+                    q(hwnd, "EDIT_CARET_SRC") == want.index(t23) + 2, f"caret {q(hwnd, 'EDIT_CARET_SRC')}")
+        cmd(hwnd, "UNDO", 0.4)
+        # the size grid: its cell 3 rows × 4 columns is a button
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 4, q(hwnd, "BLOCK_Y", 1) + 10, 0.3)
+        popover_shots(hwnd, "124-edit-table-grid", "TABLE_MENU", 3 << 4 | 4)
+        cell = tool_xy(hwnd, "TABLE_MENU", 3 << 4 | 4)
+        if cell:
+            click(hwnd, *cell, 0.5)
+        t34 = "|  |  |  |  |\n| --- | --- | --- | --- |\n|  |  |  |  |\n|  |  |  |  |\n"
+        text = text.replace("таблицей.\n", "таблицей.\n\n" + t34, 1)
+        ok &= check("edit 3a: the size grid's cell 3 × 4 inserts a table of 3 rows and 4 columns", cell is not None and
+                    q(hwnd, "SRC_HASH", 0) == src_hash(text), f"cell {cell}, len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
+        # a little text in it: the header's first cell
+        type_text(hwnd, "A", 0.3)
+        text = text.replace("|  |  |  |  |\n| ---", "| A |  |  |  |\n| ---", 1)
+        # in the table: the actions popover, a row of it clicked (insert a row below the header)
+        popover_shots(hwnd, "125-edit-table-actions", "TABLE_MENU", 2)
+        row = tool_xy(hwnd, "TABLE_MENU", 2)
+        listed = tool_xy(hwnd, "TABLE_MENU", 10) is not None and tool_xy(hwnd, "TABLE_MENU", 11) is None
+        if row:
+            click(hwnd, *row, 0.5)
+        header, delim = "| A |  |  |  |\n", "| --- | --- | --- | --- |\n"
+        body = "|  |  |  |  |\n"
+        text = text.replace(header + delim, header + delim + body, 1)
+        ok &= check("edit 3a: the actions popover lists its ten rows; «Insert row below» on the header row: a row after "
+                    "the delimiter row", row is not None and listed and q(hwnd, "SRC_HASH", 0) == src_hash(text),
+                    f"row {row}, listed {listed}, len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
+        # every table operation on the bytes, the caret in the first body row's first cell
+        def table_now():
+            s = saved_text(hwnd, doc)
+            a = s.index("таблицей.\n\n") + len("таблицей.\n\n")
+            return s[a:s.index("\n\nАбзац после")]
+        post(hwnd, WM_KEYDOWN, VK["down"], 0, 0.3)  # (into the first body row)
+        by = {}
+        for name in ("TABLE_ROW_ABOVE", "TABLE_DEL_ROW", "TABLE_COL_RIGHT", "TABLE_COL_LEFT", "TABLE_ALIGN_C",
+                     "TABLE_ALIGN_R", "TABLE_ALIGN_L", "TABLE_DEL_COL", "TABLE_ROW_BELOW"):
+            before = table_now()
+            cmd(hwnd, name, 0.4)
+            by[name] = (before, table_now())
+        rows_of = lambda t: t.split("\n")
+        ok &= check("edit 3a: row above adds a row before the caret's, delete row takes one away",
+                    len(rows_of(by["TABLE_ROW_ABOVE"][1])) == len(rows_of(by["TABLE_ROW_ABOVE"][0])) + 1 and
+                    by["TABLE_DEL_ROW"][1] == by["TABLE_ROW_ABOVE"][0], f"{by['TABLE_ROW_ABOVE']!r}")
+        cols = lambda t: [r.count("|") - 1 for r in rows_of(t)]
+        ok &= check("edit 3a: column right / left add a column in every row, delete column takes one away",
+                    all(c == 5 for c in cols(by["TABLE_COL_RIGHT"][1])) and all(c == 6 for c in cols(by["TABLE_COL_LEFT"][1]))
+                    and all(c == 5 for c in cols(by["TABLE_DEL_COL"][1])), f"{cols(by['TABLE_COL_LEFT'][1])}")
+        d_cell = lambda t: rows_of(t)[1].split("|")[2].strip()  # (the caret's column: the second, after column left)
+        ok &= check("edit 3a: centre / right / left alignment rewrite the caret's column in the delimiter row, its width kept",
+                    d_cell(by["TABLE_ALIGN_C"][1]) == ":---:" and d_cell(by["TABLE_ALIGN_R"][1]) == "----:" and
+                    d_cell(by["TABLE_ALIGN_L"][1]) == ":----", f"{d_cell(by['TABLE_ALIGN_C'][1])!r} "
+                    f"{d_cell(by['TABLE_ALIGN_R'][1])!r} {d_cell(by['TABLE_ALIGN_L'][1])!r}")
+        ok &= check("edit 3a: row below adds a row after the caret's",
+                    len(rows_of(by["TABLE_ROW_BELOW"][1])) == len(rows_of(by["TABLE_ROW_BELOW"][0])) + 1)
+        cmd(hwnd, "TABLE_DEL", 0.5)
+        s1 = saved_text(hwnd, doc)
+        ok &= check("edit 3a: delete table takes all its lines, the paragraphs around stay apart",
+                    s1 == TABLE_DOC and not active(hwnd, 12), f"{s1!r}")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+    return ok
+
+
+HR_DOC = "# Вставки\n\nАбзац.\n\nПоследний абзац.\n"
+
+
+def test_edit_hr():
+    """§8.8 (3a, UX-3): CMD_INS_HR puts a rule after the block and a phantom row after the rule with the caret in it;
+    typing there writes a paragraph after the rule. The formula and diagram inserts write their source (their popups are
+    3b's); every diagram template renders; the formula and diagram popovers and the "…" popover in light and dark"""
+    ok = True
+    doc = OUT / "edit-hr.md"
+    doc.write_bytes(HR_DOC.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_TEST_HOOKS": "1"})
+    try:
+        text = HR_DOC
+        enter_edit(hwnd, 1, dx=1)
+        blocks = q(hwnd, "BLOCK_COUNT")
+        cmd(hwnd, "INS_HR", 0.5)
+        want = text.replace("Абзац.\n", "Абзац.\n\n---\n", 1)
+        ok &= check("edit 3a: CMD_INS_HR: a rule after the block, a phantom row after it with the caret in it",
+                    q(hwnd, "SRC_HASH", 0) == src_hash(want) and q(hwnd, "EDIT_PHANTOM", 0) == 2 and active(hwnd, 15) and
+                    q(hwnd, "BLOCK_COUNT") == blocks + 1, f"phantom {q(hwnd, 'EDIT_PHANTOM', 0)}, blocks "
+                    f"{q(hwnd, 'BLOCK_COUNT')}")
+        shot(hwnd, "126-edit-hr-phantom")
+        type_text(hwnd, "После линии", 0.4)
+        text = text.replace("Абзац.\n", "Абзац.\n\n---\n\nПосле линии\n", 1)
+        ok &= check("edit 3a: typing in the phantom after the rule writes a paragraph after it",
+                    q(hwnd, "SRC_HASH", 0) == src_hash(text), f"len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
+        # a styled phantom: Enter at a paragraph's end, heading 2 - the placeholder in the row
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.1)
+        post(hwnd, WM_KEYDOWN, VK["return"], 0, 0.3)
+        cmd(hwnd, "BLOCK_H2", 0.4)
+        styled = q(hwnd, "EDIT_PHANTOM", 2) == 2 and q(hwnd, "EDIT_ACTIVE") >> 24 == 2
+        shot(hwnd, "127-edit-phantom-heading")
+        shot_dark(hwnd, "127-edit-phantom-heading-dark")
+        cmd(hwnd, "LIST_TASK", 0.4)
+        shot(hwnd, "127-edit-phantom-task")
+        type_text(hwnd, "дело", 0.4)
+        text = text.replace("После линии\n", "После линии\n\n- [ ] дело\n", 1)
+        ok &= check("edit 3a: a phantom takes a style (heading 2, then a task) and typing writes it",
+                    styled and q(hwnd, "SRC_HASH", 0) == src_hash(text), f"styled {styled}")
+        # the formula popover; an inline formula at the caret
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 4, q(hwnd, "BLOCK_Y", 1) + 10, 0.3)
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.1)
+        type_text(hwnd, " x", 0.3)
+        popover_shots(hwnd, "128-edit-formula-popover", "FORMULA_MENU", 1)
+        row = tool_xy(hwnd, "FORMULA_MENU", 1)
+        if row:
+            click(hwnd, *row, 0.5)
+        text = text.replace("Абзац.\n", "Абзац. x $x$\n", 1)  # (a blank apart from the letter before it, F9-4)
+        ok &= check("edit 3a: the formula popover's «Inline» writes $x$ at the caret", row is not None and
+                    q(hwnd, "SRC_HASH", 0) == src_hash(text), f"len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
+        cmd(hwnd, "INS_FORMULA_BLOCK", 0.5)
+        text = text.replace("Абзац. x $x$\n", "Абзац. x $x$\n\n$$\nx\n$$\n", 1)
+        ok &= check("edit 3a: CMD_INS_FORMULA_BLOCK writes $$ x $$ after the block, the new formula selected",
+                    q(hwnd, "SRC_HASH", 0) == src_hash(text) and q(hwnd, "EDIT_ATOM") >= 0, f"atom {q(hwnd, 'EDIT_ATOM')}")
+        # the diagram popover, then every template
+        popover_shots(hwnd, "129-edit-diagram-popover", "DIAGRAM_MENU", 4)
+        cmd(hwnd, "DIAGRAM_MENU", 0.3)  # (a second press closes it)
+        closed = tool_xy(hwnd, "DIAGRAM_MENU", 1) is None
+        for k in range(9):
+            cmd_arg(hwnd, "INS_DIAGRAM", k, 0.4)
+        s = saved_text(hwnd, doc)
+        n = s.count("```mermaid\n")
+        ok &= check("edit 3a: the diagram popover closes on a second press; CMD_INS_DIAGRAM writes the nine templates",
+                    closed and n == 9 and "flowchart TD\n    A[Start] --> B{Choice}" in s and "timeline\n    title History" in s,
+                    f"closed {closed}, {n} mermaid blocks")
+        rendered = wait_for(lambda: q(hwnd, "MATH", 1) + q(hwnd, "MATH", 2) >= q(hwnd, "MATH", 0) > 0, 20.0, 0.2)
+        ok &= check("edit 3a: every diagram template renders (none failed)", rendered and q(hwnd, "MATH", 2) == 0,
+                    f"math {q(hwnd, 'MATH', 0)}, drawn {q(hwnd, 'MATH', 1)}, failed {q(hwnd, 'MATH', 2)}")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+    # a narrow window: the "…" popover holds what the bar has no room for
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_TEST_HOOKS": "1"}, size="--size=430x600")
+    try:
+        enter_edit(hwnd, 1, dx=1)
+        popover_shots(hwnd, "130-edit-more-popover", "EDIT_MORE", 1)
+        row = tool_xy(hwnd, "EDIT_MORE", 1)
+        ok &= check("edit 3a: in a narrow window the «…» popover lists the collapsed buttons", q(hwnd, "EDIT_COLLAPSE") >= 3
+                    and row is not None and tool_xy(hwnd, "EDIT_MORE", 6) is not None, f"collapse {q(hwnd, 'EDIT_COLLAPSE')}")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.3)
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+    return ok
+
+
 def main():
     OUT.mkdir(exist_ok=True)
     reset_profile()
@@ -4805,7 +5131,8 @@ def main():
              ("edit_recovery_guards", test_edit_recovery_guards), ("edit_structure", test_edit_structure),
              ("edit_selection", test_edit_selection), ("edit_paste_plain", test_edit_paste_plain),
              ("edit_table_typing", test_edit_table_typing), ("edit_raw_typing", test_edit_raw_typing),
-             ("edit_find", test_edit_find), ("edit_outline", test_edit_outline)]
+             ("edit_find", test_edit_find), ("edit_outline", test_edit_outline),
+             ("edit_commands", test_edit_commands), ("edit_table", test_edit_table), ("edit_hr", test_edit_hr)]
     only = [n for n in os.environ.get("FASTMD_ONLY", "").split(",") if n]  # e.g. FASTMD_ONLY=update,settings
     for name, t in tests:
         if not only or name in only:

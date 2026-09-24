@@ -1607,13 +1607,13 @@ EditResult Deletion(const EditCtx& c, const EditState& st, const TextPos& p, TRa
     // F9-2: a `_` span the deletion brings right beside a word would stand inside it, and be none: it is written with
     // `*` (`foo ‸_bar_` Backspace → `foo*bar*`); the same length, so these go first and no offset moves
     if (ins.empty())
-        ForSpans(d, p, rg, [&](const SpanSrc& sp) {
-            if (!(sp.flags & SF_UNDERSCORE) || (sp.flags & SF_UNCLOSED)) return;
-            if (!(sp.openBeg == b && a > 0 && WordChar(src[a - 1])) && !(sp.closeEnd == a && b < src.size() && WordChar(src[b])))
-                return;
-            for (auto [x, y] : {std::pair{sp.openBeg, sp.openEnd}, std::pair{sp.closeBeg, sp.closeEnd}})
+        for (const SpanSrc* sp : SpansIn(d, p, rg)) {
+            if (!(sp->flags & SF_UNDERSCORE) || (sp->flags & SF_UNCLOSED)) continue;
+            if (!(sp->openBeg == b && a > 0 && WordChar(src[a - 1])) && !(sp->closeEnd == a && b < src.size() && WordChar(src[b])))
+                continue;
+            for (auto [x, y] : {std::pair{sp->openBeg, sp->openEnd}, std::pair{sp->closeBeg, sp->closeEnd}})
                 r.splices.push_back(Splice{x, Sub(src, x, y), std::wstring(y - x, L'*')});
-        });
+        }
     r.splices.push_back(Splice{a, src.substr(a, b - a), ins});
     r.after.focus = r.after.anchor = caret != UINT32_MAX ? caret : a;
     // §7.4: the paragraph line the deletion changed must not turn into block syntax
@@ -1732,13 +1732,13 @@ std::vector<TypeCandidate> TypeFallbacks(const EditCtx& c, const EditState& st, 
     if (s < c.src.size() && c.src[s] == L'$') out.push_back(TypeCandidate{s, t + L" ", s + n, t + L" "});
     // a `_` span the text now touches from outside would stand inside a word, and be none: it is written with `*`
     // (F9-2: `x‸_ab_` + `y` → `xy*ab*`)
-    ForSpans(c.doc, p, rg, [&](const SpanSrc& sp) {
-        if (!(sp.flags & SF_UNDERSCORE) || (sp.flags & SF_UNCLOSED) || (sp.openBeg != s && sp.closeEnd != s)) return;
+    for (const SpanSrc* sp : SpansIn(c.doc, p, rg)) {
+        if (!(sp->flags & SF_UNDERSCORE) || (sp->flags & SF_UNCLOSED) || (sp->openBeg != s && sp->closeEnd != s)) continue;
         TypeCandidate k{s, t, s + n, t};
-        for (auto [a, b] : {std::pair{sp.openBeg, sp.openEnd}, std::pair{sp.closeBeg, sp.closeEnd}})
+        for (auto [a, b] : {std::pair{sp->openBeg, sp->openEnd}, std::pair{sp->closeBeg, sp->closeEnd}})
             k.also.push_back(Splice{a + (a >= s ? n : 0), Sub(c.src, a, b), std::wstring(b - a, L'*')});
         out.push_back(std::move(k));
-    });
+    }
     return out;
 }
 

@@ -181,16 +181,23 @@ int Level() {
 bool BarShown() { return g.barT > 0 && !g.firstFrame && !g.path.empty(); }
 float BarTop() { return (g.barT - 1.f) * kBarH * U(); }  // slides down from above the window
 
-bool Enabled(int k) {
+UINT g_pop = 0;  // the command whose popover is open (§2.4), 0 = none
+bool Enabled(int k, int* why = nullptr) {
+    if (why) *why = 0;
     switch (kDefs[k].cmd) {
     case CMD_TOC: return TocAvailable();
     case CMD_UNDO: return EditCanUndo();
     case CMD_REDO: return EditCanRedo();
     case CMD_SAVE: case CMD_EDIT_EXIT: return true;
-    default: return false;  // the formatting and insert commands arrive with Phase 3a
+    default: return EditCmdEnabled(kDefs[k].cmd, why);  // the context matrix (§8.1)
     }
 }
-bool Active(int k) { return kDefs[k].cmd == CMD_TOC && g.tocOpen; }
+// the format or block at the caret is on (§2.3's "active" look) - and a button whose popover is open
+bool Active(int k) {
+    UINT cmd = kDefs[k].cmd;
+    if (cmd == CMD_TOC) return g.tocOpen;
+    return (g_pop && g_pop == cmd) || EditCmdActive(cmd);
+}
 
 // "Ctrl+Shift+O"; an OEM key by its name on the current layout (Ctrl+Ё on the Russian one, UX-12)
 std::wstring KeyLabel(const Def& d) {
@@ -211,6 +218,13 @@ std::wstring KeyLabel(const Def& d) {
 std::wstring TipOf(int k) {
     const Def& d = kDefs[k];
     std::wstring name = k == kStatus ? EditStatusTip() : std::wstring(Tr(d.tip));
+    int why = 0;
+    if (!Enabled(k, &why) && why) {  // greyed: why (§2.3, «Полужирный — недоступно в блоке кода»)
+        static const StrId kWhy[] = {S_ED_NA_TABLE_FMT, S_ED_NA_CODE_FMT, S_ED_NA_OBJECT_FMT, S_ED_NA_FOOTNOTE_FMT, S_ED_NA_RAW_FMT};
+        wchar_t b[256];
+        swprintf_s(b, Tr(kWhy[std::clamp(why, 1, 5) - 1]), name.c_str());
+        return b;
+    }
     std::wstring keys = KeyLabel(d);
     return keys.empty() ? name : name + L" (" + keys + L")";
 }
@@ -331,9 +345,10 @@ void DrawBar() {
     }
 }
 
-// the tooltip of the hovered button: a pill under it, clamped to the window (the bottom-left pill stays empty)
+// the tooltip of the hovered button: a pill under it, clamped to the window (the bottom-left pill stays empty); none
+// while a popover hangs under the bar
 void DrawBarTip() {
-    if (g_hot < 0 || !BarShown()) return;
+    if (g_hot < 0 || !BarShown() || g_pop) return;
     Layout L = Compute(Level());
     const Item& it = L.items[g_hot];
     if (!it.shown) return;
@@ -350,6 +365,172 @@ void DrawBarTip() {
     g.canvas->StrokeRoundRect(x, y, x + w, y + h, 8.f * u, 1.f * u, HighContrast() ? P_OVERLAY_TEXT : P_OVERLAY_BORDER);
     g.canvas->Text(T, x + 10.f * u, y + (h - m.height) * 0.5f, P_OVERLAY_TEXT);
     T->Release();
+}
+
+// ------------------------------------------------------------------------------------------------ popovers (§2.4)
+// Drawn on the canvas like the bar (a menu from TrackPopupMenu stays light in the dark theme): a panel under the button
+// that opened it, rows of 28 u - or, for a table where the caret is not in one, a grid to pick its size from. Every
+// row runs its command through Command(), as the bar's buttons do.
+const float kRowH = 28.f, kPopPad = 4.f, kCell = 18.f, kCellGap = 3.f, kGridPad = 10.f, kGridLabel = 24.f;
+const int kGridCols = 8, kGridRows = 10;
+struct PopRow { UINT cmd, arg; std::wstring label, keys; wchar_t icon; bool semibold, current, enabled; };
+bool g_grid = false;  // the table popover as the size grid
+int g_popHot = -1;    // the hot row (from 0); the grid's hot cell: rows << 4 | columns (from 1)
+float g_popL = 0;     // the left edge: under its button, or under "…" when it came from there
+
+void OverText() { g.editOverText = g_hot >= 0 || g_pop; }  // drawn over the text: frames in full
+
+std::vector<PopRow> Rows() {
+    std::vector<PopRow> v;
+    auto add = [&](UINT cmd, UINT arg, std::wstring label, std::wstring keys = L"", wchar_t icon = 0, bool semibold = false) {
+        v.push_back(PopRow{cmd, arg, std::move(label), std::move(keys), icon, semibold, false, EditCmdEnabled(cmd, nullptr)});
+    };
+    wchar_t b[64];
+    switch (g_pop) {
+    case CMD_BLOCK_MENU: {
+        const int cur = EditStyleId();
+        add(CMD_BLOCK_P, 0, Tr(S_ED_POP_TEXT));
+        v.back().current = cur == 0;
+        for (int n = 1; n <= 6; n++) {
+            swprintf_s(b, Tr(S_ED_STYLE_HEADING_FMT), n);
+            add(CMD_BLOCK_H1 + n - 1, 0, b, L"Ctrl+" + std::to_wstring(n), 0, true);
+            v.back().current = cur == n;
+        }
+        break;
+    }
+    case CMD_TABLE_MENU:
+        for (UINT k = 0; k < 10; k++) add(CMD_TABLE_ROW_ABOVE + k, 0, Tr((StrId)(S_ED_TBL_ROW_ABOVE + k)));
+        break;
+    case CMD_FORMULA_MENU:
+        add(CMD_INS_FORMULA, 0, Tr(S_ED_FORMULA_INLINE), L"Ctrl+M");
+        add(CMD_INS_FORMULA_BLOCK, 0, Tr(S_ED_FORMULA_BLOCK), L"Ctrl+Shift+M");
+        break;
+    case CMD_DIAGRAM_MENU:
+        for (UINT k = 0; k < 9; k++) add(CMD_INS_DIAGRAM, k, Tr((StrId)(S_ED_DIA_FLOW + k)));
+        break;
+    case CMD_EDIT_MORE: {  // the buttons the bar has no room for, in its order
+        const int level = Level();
+        for (int k = 0; k < kCount; k++) {
+            const Def& d = kDefs[k];
+            if (d.group >= G_STATUS || Visible(k, level) || (d.cmd == CMD_TOC && !TocAvailable())) continue;
+            add(d.cmd, 0, Tr(d.tip), KeyLabel(d), d.mdl2 && Mdl2() ? d.mdl2 : d.glyph);
+            v.back().enabled = Enabled(k);
+        }
+        break;
+    }
+    }
+    return v;
+}
+
+// the panel (client DIP)
+struct PopBox { float l, t, r, b; };
+PopBox Box(const std::vector<PopRow>& rows) {
+    const float u = U();
+    float w, h;
+    if (g_grid) {
+        w = (kGridCols * kCell + (kGridCols - 1) * kCellGap + 2 * kGridPad) * u;
+        h = (kGridRows * kCell + (kGridRows - 1) * kCellGap + 2 * kGridPad + kGridLabel) * u;
+    } else {
+        float lw = 0, kw = 0;
+        bool icons = false;
+        for (const PopRow& r : rows) {
+            lw = std::max(lw, TextW(r.label, 13.f * u, r.semibold));
+            if (!r.keys.empty()) kw = std::max(kw, TextW(r.keys, 12.5f * u));
+            icons |= r.icon || r.cmd == CMD_LIST_NUMBER;
+        }
+        w = std::max(180.f * u, (icons ? 28.f * u : 0.f) + lw + (kw > 0 ? kw + 28.f * u : 0.f) + 26.f * u);
+        h = (rows.size() * kRowH + 2 * kPopPad) * u;
+    }
+    float l = std::clamp(g_popL, DocLeft() + 4.f * u, std::max(DocLeft() + 4.f * u, ViewW() - w - 4.f * u));
+    float t = BarTop() + (kBarH + 2.f) * u;
+    return PopBox{l, t, l + w, t + h};
+}
+// the grid's cell k (columns c, rows r from 1)
+void CellRect(const PopBox& p, int c, int r, float* l, float* t) {
+    const float u = U();
+    *l = p.l + (kGridPad + (c - 1) * (kCell + kCellGap)) * u;
+    *t = p.t + (kGridPad + (r - 1) * (kCell + kCellGap)) * u;
+}
+// the row (the grid's cell) under a point, -1 none
+int PopHit(const PopBox& p, const std::vector<PopRow>& rows, float x, float y) {
+    const float u = U();
+    if (g_grid) {
+        for (int r = 1; r <= kGridRows; r++)
+            for (int c = 1; c <= kGridCols; c++) {
+                float l, t;
+                CellRect(p, c, r, &l, &t);
+                if (x >= l - kCellGap * u * 0.5f && x < l + (kCell + kCellGap * 0.5f) * u && y >= t - kCellGap * u * 0.5f &&
+                    y < t + (kCell + kCellGap * 0.5f) * u)
+                    return r << 4 | c;
+            }
+        return -1;
+    }
+    int k = (int)std::floor((y - p.t - kPopPad * u) / (kRowH * u));
+    return x >= p.l && x < p.r && k >= 0 && k < (int)rows.size() ? k : -1;
+}
+
+void DrawPopover() {
+    if (!g_pop || !BarShown()) return;
+    const float u = U();
+    const bool hc = HighContrast();
+    std::vector<PopRow> rows = Rows();
+    PopBox p = Box(rows);
+    g.canvas->FillRoundRect(p.l, p.t, p.r, p.b, 8.f * u, P_OVERLAY_BG);
+    g.canvas->StrokeRoundRect(p.l, p.t, p.r, p.b, 8.f * u, 1.f * u, hc ? P_OVERLAY_TEXT : P_OVERLAY_BORDER);
+    if (g_grid) {  // the size: the hovered range lit, "columns × rows" under it
+        const int hr = g_popHot > 0 ? g_popHot >> 4 : 0, hcol = g_popHot > 0 ? g_popHot & 15 : 0;
+        for (int r = 1; r <= kGridRows; r++)
+            for (int c = 1; c <= kGridCols; c++) {
+                float l, t;
+                CellRect(p, c, r, &l, &t);
+                bool on = r <= hr && c <= hcol;
+                if (on) g.canvas->FillRoundRect(l, t, l + kCell * u, t + kCell * u, 3.f * u, hc ? P_ACCENT : P_CURRENT);
+                g.canvas->StrokeRoundRect(l, t, l + kCell * u, t + kCell * u, 3.f * u, 1.f * u,
+                                          on ? P_ACCENT : hc ? P_OVERLAY_TEXT : P_BORDER);
+            }
+        wchar_t b[64];
+        if (hr) swprintf_s(b, L"%d × %d", hcol, hr);
+        DrawText1(hr ? std::wstring(b) : std::wstring(Tr(S_ED_TIP_TABLE)), p.l + kGridPad * u, p.b - (kGridPad + kGridLabel) * u,
+                  kGridLabel * u, p.r - p.l - 2 * kGridPad * u, 13.f * u, hr ? P_OVERLAY_TEXT : P_MUTED);
+        return;
+    }
+    bool icons = false;
+    for (const PopRow& r : rows) icons |= r.icon || r.cmd == CMD_LIST_NUMBER;
+    for (size_t k = 0; k < rows.size(); k++) {
+        const PopRow& r = rows[k];
+        const float t = p.t + (kPopPad + k * kRowH) * u, b = t + kRowH * u, l = p.l + 4.f * u, rr = p.r - 4.f * u;
+        const bool hot = (int)k == g_popHot && r.enabled;
+        if (r.current) g.canvas->FillRoundRect(l, t, rr, b, 6.f * u, hc ? P_ACCENT : P_CURRENT);
+        if (hot) {
+            if (hc) g.canvas->StrokeRoundRect(l, t, rr, b, 6.f * u, 1.f * u, r.current ? P_ONACCENT : P_OVERLAY_TEXT);
+            else if (!r.current) g.canvas->FillRoundRect(l, t, rr, b, 6.f * u, P_HOVER);
+        }
+        uint8_t pal = !r.enabled ? (hc ? P_MUTED : P_BORDER) : hc && r.current ? P_ONACCENT : P_OVERLAY_TEXT;
+        float x = p.l + 12.f * u;
+        if (icons) {
+            if (r.cmd == CMD_LIST_NUMBER) DrawText1(L"1.", x + 2.f * u, t, kRowH * u, 22.f * u, 13.f * u, pal, true);
+            else if (r.icon) DrawIcon(r.icon, x - 4.f * u, t, 24.f * u, 14.f * u, pal);
+            x += 28.f * u;
+        }
+        float kw = r.keys.empty() ? 0.f : TextW(r.keys, 12.5f * u);
+        DrawText1(r.label, x, t, kRowH * u, p.r - x - (kw ? kw + 24.f * u : 12.f * u), 13.f * u, pal, r.semibold);
+        if (kw) DrawText1(r.keys, p.r - 12.f * u - kw, t, kRowH * u, kw + 2.f * u, 12.5f * u, hc && r.current ? P_ONACCENT : P_MUTED);
+    }
+}
+
+// a row runs: the popover closes first (the command may open another one, or a dialog)
+void RunRow(int hot) {
+    if (g_grid) {
+        if (hot <= 0) return;
+        PopoverClose();
+        Command(CMD_INS_TABLE, (UINT)((hot >> 4) << 4 | (hot & 15)));
+        return;
+    }
+    std::vector<PopRow> rows = Rows();
+    if (hot < 0 || hot >= (int)rows.size() || !rows[hot].enabled) return;
+    UINT cmd = rows[hot].cmd, arg = rows[hot].arg;
+    PopoverClose();
+    Command(cmd, arg);
 }
 
 // ------------------------------------------------------------------------------------------------ the pencil (§2.1)
@@ -579,12 +760,12 @@ void BarChanged() {
 
 bool BarMouse(float x, float y, bool click) {
     if (!BarShown()) {
-        if (g_hot >= 0) { g_hot = -1; g.editOverText = false; BarChanged(); }
+        if (g_hot >= 0) { g_hot = -1; OverText(); BarChanged(); }
         return false;
     }
     const float u = U(), top = BarTop();
     if (x < DocLeft() || y < top || y >= top + kBarH * u) {
-        if (g_hot >= 0) { g_hot = -1; g.editOverText = false; BarChanged(); }
+        if (g_hot >= 0) { g_hot = -1; OverText(); BarChanged(); }
         return false;
     }
     Layout L = Compute(Level());
@@ -594,7 +775,7 @@ bool BarMouse(float x, float y, bool click) {
         if (L.items[k].shown && x >= L.items[k].l && x < L.items[k].r && y >= bt && y < bb) hot = k;
     if (hot != g_hot) {
         g_hot = hot;
-        g.editOverText = hot >= 0;  // the tooltip is drawn over the text: full frames while it shows
+        OverText();  // the tooltip is drawn over the text: full frames while it shows
         BarChanged();
     }
     SetCursor(LoadCursorW(nullptr, hot >= 0 && Enabled(hot) ? IDC_HAND : IDC_ARROW));
@@ -614,19 +795,141 @@ bool PencilMouse(float x, float y, bool click) {
 }
 
 void BarMouseLeave() {
-    if (g_hot >= 0 || g.pencilHot || g_sHot >= 0) {
+    if (g_hot >= 0 || g.pencilHot || g_sHot >= 0 || (g_pop && g_popHot >= 0 && g_grid)) {
         g_hot = g_sHot = -1;
+        if (g_grid) g_popHot = -1;  // (a list popover keeps its hot row for the keyboard)
         g.pencilHot = false;
-        g.editOverText = false;
+        OverText();
         BarChanged();
     }
 }
 
-std::wstring BarTipText() { return g_hot >= 0 && BarShown() ? TipOf(g_hot) : std::wstring(); }
+std::wstring BarTipText() { return g_hot >= 0 && BarShown() && !g_pop ? TipOf(g_hot) : std::wstring(); }
 
-LRESULT BarToolCenter(UINT cmd) {
+// ------------------------------------------------------------------------------------------------ popovers: API
+bool PopoverOpen() { return g_pop != 0; }
+
+void PopoverToggle(UINT cmd) {
+    if (g_pop == cmd) {
+        PopoverClose();
+        return;
+    }
+    if (!BarShown()) return;
+    Layout L = Compute(Level());
+    int k = 0;  // under its button - or under "…" when the bar had no room for it
+    while (k < kCount && kDefs[k].cmd != cmd) k++;
+    if (k >= kCount || !L.items[k].shown) k = kMore;
+    g_popL = L.items[k].shown ? L.items[k].l : ViewW() - 200.f * U();
+    g_pop = cmd;
+    g_grid = cmd == CMD_TABLE_MENU && !EditCmdEnabled(CMD_TABLE_DEL, nullptr);  // not in a table: its size
+    g_popHot = -1;
+    std::vector<PopRow> rows = Rows();  // the keyboard starts at the current value
+    for (size_t i = 0; i < rows.size() && !g_grid; i++)
+        if (rows[i].current) g_popHot = (int)i;
+    OverText();
+    BarChanged();
+    UiaChromeChanged();
+}
+
+void PopoverClose() {
+    if (!g_pop) return;
+    g_pop = 0;
+    g_popHot = -1;
+    g_grid = false;
+    OverText();
+    BarChanged();
+    UiaChromeChanged();
+}
+
+bool PopoverKey(unsigned vk) {
+    if (!g_pop) return false;
+    if (vk == VK_ESCAPE) {
+        PopoverClose();
+        return true;
+    }
+    if (vk == VK_RETURN || vk == VK_SPACE) {
+        RunRow(g_popHot);
+        return true;
+    }
+    if (g_grid) {  // the size, a cell at a time (from 1 × 1)
+        int r = g_popHot > 0 ? g_popHot >> 4 : 0, c = g_popHot > 0 ? g_popHot & 15 : 0;
+        if (vk != VK_LEFT && vk != VK_RIGHT && vk != VK_UP && vk != VK_DOWN) return false;
+        if (!r) r = c = 1;
+        else {
+            c = std::clamp(c + (vk == VK_RIGHT) - (vk == VK_LEFT), 1, kGridCols);
+            r = std::clamp(r + (vk == VK_DOWN) - (vk == VK_UP), 1, kGridRows);
+        }
+        g_popHot = r << 4 | c;
+        BarChanged();
+        return true;
+    }
+    std::vector<PopRow> rows = Rows();
+    const int n = (int)rows.size();
+    if (!n || (vk != VK_UP && vk != VK_DOWN && vk != VK_HOME && vk != VK_END)) return vk == VK_LEFT || vk == VK_RIGHT;
+    const int dir = vk == VK_UP || vk == VK_END ? -1 : 1;
+    int k = vk == VK_HOME ? -1 : vk == VK_END ? n : g_popHot >= 0 && g_popHot < n ? g_popHot : dir > 0 ? -1 : n;
+    for (int i = 0; i < n; i++) {  // the next enabled row, round the ends
+        k = ((k + dir) % n + n) % n;
+        if (rows[k].enabled) break;
+    }
+    g_popHot = k;
+    BarChanged();
+    return true;
+}
+
+bool PopoverMouse(float x, float y, bool click) {
+    if (!g_pop) return false;
+    if (!BarShown()) {
+        PopoverClose();
+        return false;
+    }
+    std::vector<PopRow> rows = Rows();
+    PopBox p = Box(rows);
+    if (x < p.l || x >= p.r || y < p.t || y >= p.b) {
+        if (click) {  // a click outside closes it; one on the button that opened it only closes it
+            Layout L = Compute(Level());
+            const float u = U(), bt = BarTop() + (kBarH - kBtn) * 0.5f * u;
+            bool opener = false;
+            for (int k = 0; k < kCount; k++)
+                opener |= L.items[k].shown && (kDefs[k].cmd == g_pop || (k == kMore && L.items[k].l == g_popL)) &&
+                          x >= L.items[k].l && x < L.items[k].r && y >= bt && y < bt + kBtn * u;
+            PopoverClose();
+            return opener;
+        }
+        if (g_grid && g_popHot >= 0) {
+            g_popHot = -1;
+            BarChanged();
+        }
+        return false;
+    }
+    int hot = PopHit(p, rows, x, y);
+    if (hot != g_popHot && (hot >= 0 || g_grid)) {
+        g_popHot = hot;
+        BarChanged();
+    }
+    bool en = g_grid ? hot > 0 : hot >= 0 && rows[hot].enabled;
+    SetCursor(LoadCursorW(nullptr, en ? IDC_HAND : IDC_ARROW));
+    if (click && en) RunRow(hot);
+    return true;
+}
+
+LRESULT BarToolCenter(UINT cmd, UINT row) {
     const float s = Scale();
     float l, t, r, b;
+    if (row) {  // a popover's row (from 1) - the grid's cell: rows << 4 | columns
+        if (!g_pop || g_pop != cmd || !BarShown()) return -1;
+        std::vector<PopRow> rows = Rows();
+        PopBox p = Box(rows);
+        const float u = U();
+        if (g_grid) {
+            int rr = (int)(row >> 4), cc = (int)(row & 15);
+            if (rr < 1 || rr > kGridRows || cc < 1 || cc > kGridCols) return -1;
+            CellRect(p, cc, rr, &l, &t);
+            return MAKELONG(std::lround((l + kCell * u * 0.5f) * s), std::lround((t + kCell * u * 0.5f) * s));
+        }
+        if (row > rows.size()) return -1;
+        return MAKELONG(std::lround((p.l + p.r) * 0.5f * s), std::lround((p.t + (kPopPad + (row - 0.5f) * kRowH) * u) * s));
+    }
     if (cmd == CMD_EDIT_TOGGLE && !g.editing) {
         if (!PencilRect(&l, &t, &r, &b)) return -1;
         return MAKELONG(std::lround((l + r) * 0.5f * s), std::lround((t + b) * 0.5f * s));
@@ -655,6 +958,23 @@ int EditChromeButtons(ChromeButton* out, int max) {
         const float u = U(), bt = BarTop() + (kBarH - kBtn) * 0.5f * u;
         for (int k = 0; k < kCount; k++)
             if (L.items[k].shown) add(kDefs[k].cmd, L.items[k].l, bt, L.items[k].r, bt + kBtn * u, Enabled(k));
+        if (g_pop) {  // a popover's rows (the grid's cells), each with its argument
+            std::vector<PopRow> rows = Rows();
+            PopBox p = Box(rows);
+            if (g_grid) {
+                for (int r = 1; r <= kGridRows; r++)
+                    for (int c = 1; c <= kGridCols; c++) {
+                        float l, t;
+                        CellRect(p, c, r, &l, &t);
+                        add(CMD_INS_TABLE | (UINT)(r << 4 | c) << 16, l, t, l + kCell * u, t + kCell * u, true);
+                    }
+            } else {
+                for (size_t k = 0; k < rows.size(); k++) {
+                    float t = p.t + (kPopPad + k * kRowH) * u;
+                    add(rows[k].cmd | rows[k].arg << 16, p.l, t, p.r, t + kRowH * u, rows[k].enabled);
+                }
+            }
+        }
     }
     if (int kind = TopStrip(); kind && !g.firstFrame)
         for (const StripButton& b : Buttons(kind)) add(b.cmd, b.l, b.t, b.r, b.b, true);
@@ -670,6 +990,18 @@ std::wstring EditChromeName(UINT cmd, std::wstring* keys) {
     if (cmd == CMD_EDIT_TOGGLE && !g.editing) {
         *keys = L"F2";
         return Tr(S_ED_PENCIL_TIP);
+    }
+    if (g_pop) {  // a popover's row, by its command and argument; the grid's cell by its size
+        if (g_grid && (cmd & 0xFFFF) == CMD_INS_TABLE && cmd >> 16) {
+            wchar_t b[64];
+            swprintf_s(b, Tr(S_ED_GRID_FMT), (int)(cmd >> 16 & 15), (int)(cmd >> 20));
+            return b;
+        }
+        for (const PopRow& r : Rows())
+            if ((r.cmd | r.arg << 16) == cmd && !g_grid) {
+                *keys = r.keys;
+                return r.label;
+            }
     }
     for (int k = 0; k < kCount; k++)
         if (kDefs[k].cmd == cmd) {
@@ -688,6 +1020,7 @@ std::wstring EditChromeName(UINT cmd, std::wstring* keys) {
 void DrawEditChrome(int layer) {
     if (g.firstFrame) return;
     if (layer == 1) {
+        DrawPopover();
         DrawBarTip();
         return;
     }

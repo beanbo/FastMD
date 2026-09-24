@@ -283,6 +283,36 @@ const Pair kStr[] = {
      L"Pasting pictures from the clipboard is not supported yet — drop the file here"},
     // Phase 2c
     {L"Ctrl+щелчок — открыть ссылку", L"Ctrl+click — open link"},
+    // Phase 3a: popovers
+    {L"Обычный текст", L"Normal text"},
+    {L"Вставить строку выше", L"Insert row above"},
+    {L"Вставить строку ниже", L"Insert row below"},
+    {L"Вставить столбец слева", L"Insert column left"},
+    {L"Вставить столбец справа", L"Insert column right"},
+    {L"Удалить строку", L"Delete row"},
+    {L"Удалить столбец", L"Delete column"},
+    {L"По левому краю", L"Align left"},
+    {L"По центру", L"Center"},
+    {L"По правому краю", L"Align right"},
+    {L"Удалить таблицу", L"Delete table"},
+    {L"В строке", L"Inline"},
+    {L"Отдельной строкой", L"On its own line"},
+    {L"Блок-схема", L"Flowchart"},
+    {L"Диаграмма последовательности", L"Sequence diagram"},
+    {L"Диаграмма классов", L"Class diagram"},
+    {L"Диаграмма состояний", L"State diagram"},
+    {L"ER-диаграмма", L"ER diagram"},
+    {L"Диаграмма Ганта", L"Gantt chart"},
+    {L"Круговая диаграмма", L"Pie chart"},
+    {L"Интеллект-карта", L"Mind map"},
+    {L"Хронология", L"Timeline"},
+    // why a button is greyed
+    {L"%s — недоступно в таблице", L"%s — not available in a table"},
+    {L"%s — недоступно в блоке кода", L"%s — not available in a code block"},
+    {L"%s — недоступно для выбранного объекта", L"%s — not available for the selected object"},
+    {L"%s — недоступно в сноске", L"%s — not available in a footnote"},
+    {L"%s — недоступно, пока строка правится как исходный текст", L"%s — not available while the line is edited as source"},
+    {L"Таблица %d × %d", L"Table %d × %d"},
 };
 static_assert(std::size(kStr) == S_COUNT, "one entry per StrId");
 UiLang g_lang = UL_RU;

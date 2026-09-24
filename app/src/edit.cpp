@@ -392,11 +392,16 @@ void SyncPhantom() {
             }
         }
     }
-    float line = g.typo.lineH[R_BODY], h = pb < 0 ? 0.f : ph.kind == PH_BREAK ? line : line + 16.f;
+    // A styled row (§6.7) is as tall as its heading's line, and its caret stands after a list's marker or a quote's bar
+    const uint8_t style = pb >= 0 && ph.kind != PH_BREAK ? ph.style : 0;
+    float line = g.typo.lineH[style >= 1 && style <= 6 ? style : R_BODY], h = pb < 0 ? 0.f : ph.kind == PH_BREAK ? line : line + 16.f;
+    if (style >= 7 && style <= 9) x += 32.f;
+    else if (style == 10) x += 20.f;
     bool caret = pb >= 0 && ph.in;
     if (pb == g.phantomBlock && h == g.phantomH && (ph.kind == PH_BEFORE) == g.phantomBefore && x == g.phantomX &&
-        caret == g.phantomCaret)
+        caret == g.phantomCaret && style == g.phantomStyle)
         return;
+    g.phantomStyle = style;
     g.phantomBlock = pb;
     g.phantomBefore = ph.kind == PH_BEFORE;
     g.phantomBreak = ph.kind == PH_BREAK;
@@ -443,7 +448,8 @@ void ResolveCaret(bool normalize) {
     uint16_t trail = 0;
     TextPos f = TextOfSrc(g.doc, g.src, s.st.focus, s.dir, &trail);
     if (f.block < 0) f = TextPos{0, 0, -1};
-    if (normalize && !trail && s.st.burstBeg == UINT32_MAX && s.st.atom < 0 && !InPhantom()) {
+    // (a pending format keeps the caret where the command left it: out of a span it is being taken off, §8.2)
+    if (normalize && !trail && s.st.burstBeg == UINT32_MAX && s.st.atom < 0 && !InPhantom() && !s.st.pendOn && !s.st.pendOff) {
         uint32_t k = SrcOfText(g.doc, g.src, f, MAP_CARET);
         if (k != UINT32_MAX && k <= n) {
             bool same = s.st.anchor == s.st.focus;
@@ -1404,7 +1410,8 @@ bool EditCanRedo() { return g.editing && s.undo.RedoDepth() > 0; }
 
 int EditStyleId() {
     if (!g.editing || s.focus.block < 0 || (size_t)s.focus.block >= g.doc.blocks.size()) return 0;
-    if (InPhantom()) return 0;  // a phantom row is a new paragraph, whatever block it stands next to (§6.7)
+    // a phantom row is a new paragraph whatever block it stands next to (§6.7) - or a heading once styled as one
+    if (InPhantom()) return s.st.phantom.style <= 6 ? s.st.phantom.style : 0;
     if (s.st.atom >= 0) return 9;
     const Block& b = g.doc.blocks[s.focus.block];
     const BlockSrc* bs = g.doc.blockSrc.size() == g.doc.blocks.size() ? &g.doc.blockSrc[s.focus.block] : nullptr;
@@ -1414,6 +1421,158 @@ int EditStyleId() {
     if (b.kind == BK_CODE) return 7;
     if (b.kind == BK_TEXT && b.heading) return b.heading;
     return 0;
+}
+
+// ---- the context matrix (§8.1) and what the bar shows as on
+namespace {
+enum Where { W_NONE, W_TEXT, W_CODE, W_CELL, W_FOOTNOTE, W_ATOM, W_PHANTOM, W_RAW };
+Where Context() {
+    const Doc& d = g.doc;
+    if (!g.editing || !d.hasMap || d.blockSrc.size() != d.blocks.size()) return W_NONE;
+    if (InPhantom()) return W_PHANTOM;
+    if (s.st.atom >= 0) return W_ATOM;
+    int32_t b = s.focus.block;
+    if (b < 0 || (size_t)b >= d.blocks.size()) return d.blocks.empty() ? W_TEXT : W_NONE;
+    if ((d.blockSrc[b].flags & BS_RAWTEXT) || !s.masks.empty()) return W_RAW;  // raw-while-typing (§6.9)
+    if (IsAtomBlock(d, b)) return W_ATOM;
+    if (d.blocks[b].kind == BK_TABLE) return W_CELL;
+    if (d.blocks[b].kind == BK_CODE) return W_CODE;
+    return d.blockSrc[b].flags & BS_FOOTNOTE ? W_FOOTNOTE : W_TEXT;
+}
+
+// Q_EDIT_ACTIVE (§13.2): bits 0-4 the FMT_* at the caret - of the character before it (at a block's start the one after
+// it), for a selection of every character in it that shows -, a pending format included; 8 bullet item, 9 numbered,
+// 10 task, 11 quote, 12 table cell, 13 code block, 14 object, 15 phantom (its style's list or quote bit too), 16
+// footnote, 17 link; bits 24-31 the style id. Kept until the text, the caret or a pending format changes (the bar asks
+// for it on every frame).
+uint32_t ActiveBits() {
+    struct Key { uint32_t serial, anchor, focus, pend, ph; int32_t atom; uint32_t on; } k{g.editSerial, s.st.anchor, s.st.focus,
+        (uint32_t)s.st.pendOn << 16 | s.st.pendOff, (uint32_t)s.st.phantom.style << 8 | s.st.phantom.kind << 1 | s.st.phantom.in,
+        s.st.atom, g.editing ? 1u + (uint32_t)g.docSerial * 2 : 0u};
+    static Key last{};
+    static uint32_t bits = 0;
+    if (!memcmp(&k, &last, sizeof k)) return bits;
+    last = k;
+    uint32_t b = 0;
+    const Doc& d = g.doc;
+    const int32_t bi = s.focus.block;
+    if (!g.editing) b = 0;
+    else if (InPhantom()) {
+        const uint8_t style = s.st.phantom.style;
+        b = 1u << 15 | (style >= 7 && style <= 10 ? 1u << (style + 1) : 0) | (s.st.pendOn & 0xF);
+    } else if (bi >= 0 && (size_t)bi < d.blocks.size() && d.hasMap && d.blockSrc.size() == d.blocks.size()) {
+        const Block& bl = d.blocks[bi];
+        if (s.st.atom >= 0) b |= 1u << 14;
+        bool item = false;
+        for (int32_t k2 = d.blockSrc[bi].container; k2 >= 0 && (size_t)k2 < d.containers.size(); k2 = d.containers[k2].parent) {
+            const ContainerSrc& c = d.containers[k2];
+            if (c.kind == CT_ITEM && !item) {  // the innermost item
+                item = true;
+                b |= c.taskOff != UINT32_MAX ? 1u << 10 : c.delim ? 1u << 9 : c.bullet ? 1u << 8 : 0;  // (a task is a task)
+            }
+            if (c.kind == CT_QUOTE || c.kind == CT_ALERT) b |= 1u << 11;
+        }
+        if (bl.kind == BK_TABLE) b |= 1u << 12;
+        if (bl.kind == BK_CODE) b |= 1u << 13;
+        if (d.blockSrc[bi].flags & BS_FOOTNOTE) b |= 1u << 16;
+        uint32_t lo = s.focus.t, hi = s.focus.t, rs = bl.textOff, re = bl.textOff + bl.textLen;
+        if (bl.kind == BK_TABLE && s.focus.cell >= 0 && bl.aux < d.tables.size()) {
+            const Cell& cl = d.cells[d.tables[bl.aux].cellOff + s.focus.cell];
+            rs = cl.textOff;
+            re = cl.textOff + cl.textLen;
+        }
+        if (s.st.anchor != s.st.focus && s.anchor.block >= 0) {
+            lo = std::min(s.anchor.t, s.focus.t);
+            hi = std::min(std::max(s.anchor.t, s.focus.t), lo + 20000);  // (a whole book selected: its start will do)
+        }
+        if (s.st.atom < 0)
+            for (uint16_t f : {FMT_BOLD, FMT_ITALIC, FMT_STRIKE, FMT_CODE, FMT_LINK}) {
+                bool on = false;
+                if (lo < hi) {
+                    bool all = true;
+                    for (uint32_t t = lo; t < hi && all; t++) {
+                        wchar_t ch = d.text[t];
+                        if (ch == L' ' || ch == L'\t' || ch == L'\n' || ch == 0xFFFC) continue;
+                        on = true;
+                        all = HasFormat(d, t, f);
+                    }
+                    on &= all;
+                } else {
+                    uint32_t t = lo > rs ? lo - 1 : lo;
+                    on = t < re && HasFormat(d, t, f);
+                }
+                if (on) b |= f;
+            }
+        b = (b | (s.st.pendOn & 0xF)) & ~(uint32_t)s.st.pendOff;
+        if (b & FMT_LINK) b |= 1u << 17;
+    }
+    b |= (uint32_t)EditStyleId() << 24;
+    return bits = b;
+}
+}  // namespace
+
+bool EditCmdEnabled(UINT cmd, int* why) {
+    const Where c = Context();
+    bool en = false;
+    int w = 0;
+    // text, code, cell, footnote, object, phantom (§8.1's rows; a raw leaf takes nothing)
+    auto rule = [&](bool text, bool code, bool cell, bool foot, bool atom, bool ph) {
+        switch (c) {
+        case W_TEXT: en = text; break;
+        case W_CODE: en = code; w = 2; break;
+        case W_CELL: en = cell; w = 1; break;
+        case W_FOOTNOTE: en = foot; w = 4; break;
+        case W_ATOM: en = atom; w = 3; break;
+        case W_PHANTOM: en = ph; break;
+        case W_RAW: w = 5; break;
+        default: break;
+        }
+    };
+    switch (cmd) {
+    case CMD_FMT_BOLD: case CMD_FMT_ITALIC: case CMD_FMT_STRIKE: case CMD_FMT_CODE: case CMD_INS_FORMULA:
+        rule(true, false, true, true, false, true);
+        break;
+    case CMD_BLOCK_MENU: case CMD_BLOCK_P: case CMD_BLOCK_H1: case CMD_BLOCK_H2: case CMD_BLOCK_H3: case CMD_BLOCK_H4:
+    case CMD_BLOCK_H5: case CMD_BLOCK_H6: case CMD_LIST_BULLET: case CMD_LIST_NUMBER: case CMD_LIST_TASK: case CMD_QUOTE:
+        rule(true, false, false, false, false, true);
+        break;
+    case CMD_CODEBLOCK: case CMD_TABLE_MENU: case CMD_INS_TABLE: case CMD_INS_FORMULA_BLOCK: case CMD_DIAGRAM_MENU:
+    case CMD_INS_DIAGRAM: case CMD_INS_HR:
+        rule(true, true, true, false, true, true);
+        break;
+    case CMD_FORMULA_MENU: rule(true, true, true, true, true, true); break;  // (its rows grey themselves)
+    case CMD_TABLE_ROW_ABOVE: case CMD_TABLE_ROW_BELOW: case CMD_TABLE_COL_LEFT: case CMD_TABLE_COL_RIGHT:
+    case CMD_TABLE_DEL_ROW: case CMD_TABLE_DEL_COL: case CMD_TABLE_ALIGN_L: case CMD_TABLE_ALIGN_C: case CMD_TABLE_ALIGN_R:
+    case CMD_TABLE_DEL: {
+        en = c == W_CELL;
+        const Doc& d = g.doc;
+        if (en && (cmd == CMD_TABLE_ROW_ABOVE || cmd == CMD_TABLE_DEL_ROW)) {  // never above the header, nor the header
+            const Block& bl = d.blocks[s.focus.block];
+            en = bl.aux < d.tables.size() && s.focus.cell >= (int32_t)d.tables[bl.aux].cols;
+        }
+        break;
+    }
+    case CMD_EDIT_MORE: en = true; break;
+    default: break;  // the link, the picture and the code language arrive with Phase 3b
+    }
+    if (why) *why = en ? 0 : w;
+    return en;
+}
+
+bool EditCmdActive(UINT cmd) {
+    const uint32_t b = ActiveBits();
+    switch (cmd) {
+    case CMD_FMT_BOLD: return b & FMT_BOLD;
+    case CMD_FMT_ITALIC: return b & FMT_ITALIC;
+    case CMD_FMT_STRIKE: return b & FMT_STRIKE;
+    case CMD_FMT_CODE: return b & FMT_CODE;
+    case CMD_LIST_BULLET: return b & (1u << 8);
+    case CMD_LIST_NUMBER: return b & (1u << 9);
+    case CMD_LIST_TASK: return b & (1u << 10);
+    case CMD_QUOTE: return b & (1u << 11);
+    case CMD_CODEBLOCK: return b & (1u << 13);
+    }
+    return false;
 }
 
 std::wstring EditStripText(int kind) {
@@ -1743,11 +1902,14 @@ void RawLifetime() {
 }
 
 // An operation's result applied: the splices, the swap, the caret, one undo step (§7, §11). typed / fallbacks: the
-// check of typing (§7.3 step 5) - the rendered text must be the old one with the typed characters at the caret.
-bool Apply(EditResult r, std::wstring_view typed = {}, const std::vector<TypeCandidate>* fallbacks = nullptr) {
+// check of typing (§7.3 step 5) - the rendered text must be the old one with the typed characters at the caret. A step
+// that wrote delimiters is checked after the swap (§7.5 step 5) and taken back when they did not render as asked - with
+// a toast, unless `quiet` (the caller has another way: typing with a pending format goes in plain).
+bool Apply(EditResult r, std::wstring_view typed = {}, const std::vector<TypeCandidate>* fallbacks = nullptr, bool quiet = false) {
     if (!r.refused.empty()) {
         DebugLog("edit refused: %s", r.refused.c_str());
         if (r.refused == "atom") ShowToast(Tr(S_ED_ATOM_HINT), 2500);
+        else if (r.refused == "format") ShowToast(Tr(S_ED_CANT_FORMAT), 3000);
         else ShowToast(Tr(S_ED_REFUSED), 2000);
         return false;
     }
@@ -1778,17 +1940,27 @@ bool Apply(EditResult r, std::wstring_view typed = {}, const std::vector<TypeCan
     uint32_t at, oldLen, newLen;
     SpliceRange(r.splices, &at, &oldLen, &newLen);
     bool check = !typed.empty() && fallbacks;
+    const bool verify = r.keep.on || !r.verify.empty();
     Doc old;
-    EditReparse(at, oldLen, newLen, check || r.keep.on ? &old : nullptr);
-    if (r.keep.on && !Kept(old, g.doc, r.keep)) {
-        // §7.5 step 5: the delimiters it wrote back did not render as they must (a flank lost): taken back, refused
+    EditReparse(at, oldLen, newLen, check || verify ? &old : nullptr);
+    if (verify && !Verified(old, g.doc, r)) {
+        // §7.5 step 5: the delimiters it wrote did not render as they must (a flank lost): taken back, refused
         Revert(r.splices);
         s.st = before;
         s.masks = masks;
         s.raw = raw;
         EditReparse(at, newLen, oldLen);
-        ShowToast(Tr(S_ED_CANT_FORMAT), 3000);
+        if (!quiet) ShowToast(Tr(S_ED_CANT_FORMAT), 3000);
         return false;
+    }
+    if (r.selA.block >= 0 && r.selB.block >= 0) {  // a formatting command's selection, found again by its text
+        uint32_t lo = SrcOfText(g.doc, g.src, r.selA, MAP_INNER_START), hi = SrcOfText(g.doc, g.src, r.selB, MAP_INNER_END);
+        if (lo != UINT32_MAX && hi != UINT32_MAX && lo <= hi) {
+            bool fwd = s.st.anchor <= s.st.focus;
+            s.st.anchor = fwd ? lo : hi;
+            s.st.focus = fwd ? hi : lo;
+            ResolveCaret(false);
+        }
     }
     if (check && !TypedOk(old, t0, g.doc, typed)) {
         // It did not render as typed (a closer lost its flank, a formula stopped being one): the other places, in
@@ -1801,10 +1973,13 @@ bool Apply(EditResult r, std::wstring_view typed = {}, const std::vector<TypeCan
             Revert(cur);
             cur.clear();
             std::vector<Splice> alt{Splice{c.at, L"", c.text}};
+            for (const Splice& sp : c.also) alt.push_back(sp);  // (F9-2: a `_` span written with `*`)
             if (!ApplyRaw(alt)) continue;
             cur = alt;
             s.st.focus = s.st.anchor = c.caret;
-            EditReparse(c.at, 0, (uint32_t)c.text.size());
+            uint32_t ca, co, cn;
+            SpliceRange(alt, &ca, &co, &cn);
+            EditReparse(ca, co, cn);
             if (TypedOk(old, t0, g.doc, c.rendered)) {
                 found = true;
                 break;
@@ -1854,7 +2029,7 @@ bool BlankNeedsModel(uint32_t at) {
 
 bool TryDeferredType(const std::wstring& text) {
     if (!DeferredDoc() || s.st.anchor != s.st.focus || s.st.atom >= 0 || !NeedsTypeCheck(text) || InPhantom() ||
-        !s.masks.empty() || !s.raw.empty())
+        !s.masks.empty() || !s.raw.empty() || s.st.pendOn || s.st.pendOff)
         return false;
     bool blank = false;
     for (wchar_t ch : text) {
@@ -1929,16 +2104,22 @@ void Type(std::wstring text) {
     EditCtx c = Ctx();
     EditResult r = OpType(c, s.st, text);
     // The check of §7.3 step 5, but not for blanks (OpType put them where they belong, and one at a line's end shows as
-    // nothing) nor after trailing blanks (they show once text follows): both would always "fail", at two swaps each.
+    // nothing) nor after trailing blanks (they show once text follows): both would always "fail", at two swaps each. A
+    // pending format has its own check (§8.2): when the formatted text does not render as asked it goes in plain, and
+    // the format stays pending.
+    const bool pending = s.st.pendOn || s.st.pendOff;
     bool blanks = std::all_of(text.begin(), text.end(), [](wchar_t ch) { return ch == L' ' || ch == L'\t'; });
-    bool check = !blanks && !s.trail && NeedsTypeCheck(text) && r.splices.size() == 1 && r.splices[0].removed.empty() &&
-                 s.st.anchor == s.st.focus && !InPhantom();
+    bool check = !blanks && !s.trail && !pending && NeedsTypeCheck(text) && r.splices.size() == 1 &&
+                 r.splices[0].removed.empty() && s.st.anchor == s.st.focus && !InPhantom();
     std::vector<TypeCandidate> fb;
     if (check) fb = TypeFallbacks(c, s.st, r.splices[0].at, text);
     bool wasText = s.focus.block >= 0 && !IsAtomBlock(g.doc, s.focus.block);
     const uint32_t want = r.after.focus;  // (where the typing puts the caret, before the swap may have to move it)
-    if (Apply(std::move(r), check ? std::wstring_view(text) : std::wstring_view(), check ? &fb : nullptr))
+    const bool formatted = pending && (r.keep.on || !r.verify.empty());
+    if (Apply(std::move(r), check ? std::wstring_view(text) : std::wstring_view(), check ? &fb : nullptr, formatted))
         RawDetect(wasText, want);
+    else if (formatted)
+        Apply(OpTypePlain(Ctx(), s.st, text));
 }
 
 void Backspace(bool word) {
@@ -2038,6 +2219,39 @@ void UndoRedo(bool redo) {
     StatusTick();
 }
 
+// ---- the commands of §8 (Phase 3a): formatting, block styles, lists, quotes, code blocks, inserts, table operations.
+// One the context matrix greys (§8.1) does nothing. An insert whose caret lands on an object - a formula or diagram
+// block the renderers draw - selects it, as arriving there by the arrows would (§6.2).
+void MoveCaret(TextPos next, bool shift, int8_t aff);
+void FormatCommand(UINT id, UINT arg) {
+    if (g.editModal > 0 || g.fullPending) return;
+    EditSync();
+    PopoverClose();
+    if (!EditCmdEnabled(id, nullptr)) return;
+    EditCtx c = Ctx();
+    EditResult r;
+    switch (id) {
+    case CMD_FMT_BOLD: r = OpToggleInline(c, s.st, FMT_BOLD); break;
+    case CMD_FMT_ITALIC: r = OpToggleInline(c, s.st, FMT_ITALIC); break;
+    case CMD_FMT_STRIKE: r = OpToggleInline(c, s.st, FMT_STRIKE); break;
+    case CMD_FMT_CODE: r = OpToggleInline(c, s.st, FMT_CODE); break;
+    case CMD_LIST_BULLET: case CMD_LIST_NUMBER: case CMD_LIST_TASK: r = OpList(c, s.st, 7 + (int)(id - CMD_LIST_BULLET)); break;
+    case CMD_QUOTE: r = OpQuote(c, s.st); break;
+    case CMD_CODEBLOCK: r = OpCodeBlock(c, s.st); break;
+    case CMD_INS_TABLE: r = OpInsertTable(c, s.st, arg ? (int)(arg >> 4) : 3, arg ? (int)(arg & 15) : 3); break;
+    case CMD_INS_FORMULA: case CMD_INS_FORMULA_BLOCK: r = OpInsertFormula(c, s.st, id == CMD_INS_FORMULA_BLOCK); break;
+    case CMD_INS_DIAGRAM: r = OpInsertDiagram(c, s.st, (int)arg); break;
+    case CMD_INS_HR: r = OpInsertHr(c, s.st); break;
+    default:
+        if (id >= CMD_BLOCK_P && id <= CMD_BLOCK_H6) r = OpBlockStyle(c, s.st, (int)(id - CMD_BLOCK_P));
+        else if (id >= CMD_TABLE_ROW_ABOVE && id <= CMD_TABLE_DEL) r = OpTable(c, s.st, (int)(id - CMD_TABLE_ROW_ABOVE));
+        else return;
+    }
+    const bool insert = id >= CMD_INS_TABLE && id <= CMD_INS_HR;
+    if (Apply(std::move(r)) && insert && !InPhantom() && IsAtomBlock(g.doc, s.focus.block)) MoveCaret(AtomStop(s.focus.block), false, 0);
+    BarChanged();
+}
+
 // the source text in [0, n) replaced by `text` as one step of the given kind (adoption, discard): the minimal middle
 // that differs is the splice, so undo visibly brings the other version back (UX-17)
 void ReplaceAll(const std::wstring& text, EditKind kind) {
@@ -2073,6 +2287,7 @@ void ReplaceAll(const std::wstring& text, EditKind kind) {
     s.st.wantX = -1;
     s.st.lineAff = 0;
     s.st.phantom = Phantom{};  // another text: what the editor showed beside the old one goes
+    s.st.pendOn = s.st.pendOff = 0;
     s.masks.clear();
     s.raw.clear();
     step.after = s.st;
@@ -2389,6 +2604,7 @@ bool EditEnter(EnterHow how, float x, float y) {
 void EditExit(bool silent) {
     if (!g.editing) return;
     EditSync();
+    PopoverClose();
     WaitJob();  // a save in flight lands now, while edit mode can still take its result - never after leaving
     for (UINT_PTR t : {TIMER_CARET, TIMER_EDIT_SAVE, TIMER_EDIT_RETRY, TIMER_EDIT_REPARSE, TIMER_EDIT_JOURNAL, TIMER_EDIT_IDLE})
         KillTimer(g.hwnd, t);
@@ -2835,6 +3051,7 @@ void EditActivated() {
 
 void EditThemeChanged() {
     if (!g.editing) return;
+    PopoverClose();
     if (g.editModal > 0) {  // (a theme broadcast arrives inside menus, dialogs and print jobs too) - once it is over
         s.themePending = true;
         return;
@@ -2904,6 +3121,7 @@ void EditOnSaved(WPARAM serial) {
 namespace {
 void MoveCaret(TextPos next, bool shift, int8_t aff = 0) {
     if (next.block < 0) return;
+    s.st.pendOn = s.st.pendOff = 0;  // any move of the caret clears a pending format (§8.2)
     s.st.atom = -1;
     s.st.lineAff = aff;
     s.st.phantom.in = 0;  // out of a phantom row, if the caret was in one (it lives on while the caret is in its block)
@@ -2926,6 +3144,7 @@ void MoveCaret(TextPos next, bool shift, int8_t aff = 0) {
     RevealCaret();
 }
 void MoveCaretSrc(uint32_t src, bool shift) {  // along trailing blanks, in the source (§6.5)
+    s.st.pendOn = s.st.pendOff = 0;
     s.st.focus = src;
     if (!shift) s.st.anchor = src;
     s.st.atom = -1;
@@ -2940,6 +3159,7 @@ void MoveCaretSrc(uint32_t src, bool shift) {  // along trailing blanks, in the 
 
 // ---- the phantom row (§6.7): the caret goes into it from its block's edge, and out of it to the text around
 void EnterPhantom() {
+    s.st.pendOn = s.st.pendOff = 0;
     s.st.phantom.in = 1;
     s.st.focus = s.st.anchor = s.st.phantom.anchorSrc;
     s.st.atom = -1;
@@ -2977,6 +3197,7 @@ bool InTrailingRun(uint32_t at, bool cell) {
 
 void Move(unsigned vk, bool ctrl, bool shift) {
     EditSync();
+    s.st.pendOn = s.st.pendOff = 0;
     TextPos cur = s.focus;
     if (cur.block < 0) return;
     if (InPhantom() && PhantomMove(vk)) return;
@@ -3089,6 +3310,7 @@ void SelectAllEdit() {
     s.st.anchor = sa;
     s.st.focus = sb;
     s.st.atom = -1;
+    s.st.pendOn = s.st.pendOff = 0;
     s.anchor = a;
     s.focus = b;
     s.trail = 0;
@@ -3123,6 +3345,10 @@ bool EditKey(unsigned vk, bool ctrl, bool shift, bool alt) {
     if (ctrl && alt) return false;  // AltGr text reaches WM_CHAR; Ctrl+Alt+←/→ stay the column's
     if (alt) return false;          // Alt+←/→ leave the document through CanLeaveDocument
     if (vk == VK_CONTROL || vk == VK_SHIFT || vk == VK_MENU) return false;
+    if (PopoverOpen()) {  // its keys (§2.4); any other key closes it and does what it does
+        if (!ctrl && PopoverKey(vk)) return true;
+        PopoverClose();
+    }
     if (unsigned cmd = EditChord(vk, ctrl, shift, alt)) {
         Command(cmd);
         return true;
@@ -3145,6 +3371,7 @@ bool EditKey(unsigned vk, bool ctrl, bool shift, bool alt) {
 
 void EditChar(wchar_t c) {
     if (!g.editing || c < 0x20 || c == 0x7F) return;  // the keys of those arrive as WM_KEYDOWN (§12.5)
+    PopoverClose();
     if (c >= 0xD800 && c <= 0xDBFF) {  // the low half follows
         s.pendingHigh = c;
         return;
@@ -3159,6 +3386,8 @@ void EditChar(wchar_t c) {
 void EditMouseDown(float x, float y, WPARAM keys, int clickCount) {
     if (!g.editing) return;
     EditSync();
+    PopoverClose();
+    s.st.pendOn = s.st.pendOff = 0;
     // the phantom row, or the room below the last block (more than 8 DIP under it): the caret in a new paragraph (UX-3)
     const float docY = y + g.scrollY;
     if (!(keys & MK_SHIFT) && g.phantomBlock >= 0 && docY >= g.phantomY - 4.f && docY < g.phantomY + g.phantomLine + 4.f) {
@@ -3222,6 +3451,7 @@ void EditMouseDrag(float x, float y) {
     if (src == UINT32_MAX) return;
     s.st.focus = src;
     s.st.atom = -1;
+    s.st.pendOn = s.st.pendOff = 0;
     s.st.lineAff = aff;
     s.st.phantom.in = 0;
     s.focus = p;
@@ -3303,7 +3533,10 @@ void EditFocus(bool on) {
         s.sysCaret = false;
     }
     if (on) CaretRestart();
-    else UpdateCaretVisible();
+    else {
+        UpdateCaretVisible();
+        PopoverClose();  // (§2.4: deactivation closes a popover)
+    }
 }
 
 std::wstring EditSelectionSource() {
@@ -3341,6 +3574,12 @@ void EditContextMenu(int sx, int sy, bool keyboard) {
     if (link >= 0) {
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, CMD_LINK_OPEN, Tr(S_ED_MENU_OPEN_LINK));
+    }
+    if (Context() == W_CELL) {  // in a table: its ten actions (§2.9)
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        for (UINT k = 0; k < 10; k++)
+            AppendMenuW(m, MF_STRING | (EditCmdEnabled(CMD_TABLE_ROW_ABOVE + k, nullptr) ? 0 : MF_GRAYED), CMD_TABLE_ROW_ABOVE + k,
+                        Tr((StrId)(S_ED_TBL_ROW_ABOVE + k)));
     }
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, CMD_SELECT_ALL, Tr(S_MENU_SELECT_ALL));
@@ -3381,6 +3620,7 @@ void EditSetContextPoint(float x, float y) {
 // canvas units follows the zoom, and so does the scroll the bar's slide added (§12.1) - else a scrolled frame repairs
 // the strip at its old size, a click below its middle goes to the text, and leaving shifts the page.
 void EditZoomChanged(float from) {
+    PopoverClose();
     float k = from / g.cfg.zoom;
     g.barComp *= k;
     s.maxComp *= k;
@@ -3398,7 +3638,7 @@ void EditDetailsToggled(uint32_t summary) {
 }
 
 // ------------------------------------------------------------------------------------------------ commands (§13.1)
-bool EditCommand(UINT id, UINT) {
+bool EditCommand(UINT id, UINT arg) {
     switch (id) {
     case CMD_RECOVERY_OPEN: case CMD_RECOVERY_RESTORE: case CMD_RECOVERY_DELETE:
         RecoveryCommand(id);
@@ -3545,8 +3785,16 @@ bool EditCommand(UINT id, UINT) {
     case CMD_CUT: Cut(); return true;
     case CMD_PASTE: Paste(); return true;
     case CMD_NEW_PARAGRAPH: EnterKey(2); return true;
+    case CMD_BLOCK_MENU: case CMD_TABLE_MENU: case CMD_FORMULA_MENU: case CMD_DIAGRAM_MENU: case CMD_EDIT_MORE:  // §2.4
+        EditSync();
+        if (EditCmdEnabled(id, nullptr)) PopoverToggle(id);
+        return true;
     }
-    // the formatting, insert, table and popup commands arrive with Phase 3a and 3b
+    if (id >= CMD_FMT_BOLD && id <= CMD_TABLE_DEL) {  // §8 (the link, the code language and the picture are 3b's)
+        FormatCommand(id, arg);
+        return true;
+    }
+    // the popup commands arrive with Phase 3b
     return id >= CMD_EDIT_TOGGLE && id <= CMD_STRIP_CLOSE;
 }
 
@@ -3727,38 +3975,10 @@ bool EditQuery(UINT q, LPARAM lp, LRESULT* out) {
         else { *out = g.framesPartial - s.framesPartial; s.framesPartial = g.framesPartial; }
         return true;
     }
-    case Q_EDIT_ACTIVE: {  // what the caret stands in (§13.2): the bits Phase 2a knows
-        LRESULT b = 0;
-        if (!g.editing) { *out = 0; return true; }
+    case Q_EDIT_ACTIVE:  // what the caret stands in (§13.2)
         EditSync();
-        if (s.st.atom >= 0) b |= 1 << 14;
-        if (InPhantom()) b |= 1 << 15;
-        int32_t bi = s.focus.block;
-        if (bi >= 0 && (size_t)bi < g.doc.blocks.size()) {
-            const Block& bl = g.doc.blocks[bi];
-            if (bl.marker == MK_BULLET) b |= 1 << 8;
-            if (bl.marker == MK_NUMBER) b |= 1 << 9;
-            if (bl.marker == MK_TASK_OPEN || bl.marker == MK_TASK_DONE) b |= 1 << 10;
-            if (bl.muted && !bl.heading) b |= 1 << 11;
-            if (bl.kind == BK_TABLE) b |= 1 << 12;
-            if (bl.kind == BK_CODE) b |= 1 << 13;
-            if (g.doc.blockSrc.size() == g.doc.blocks.size() && (g.doc.blockSrc[bi].flags & BS_FOOTNOTE)) b |= 1 << 16;
-            // the formatting of the character before the caret (or after it at a block's start)
-            uint32_t t = s.focus.t > bl.textOff ? s.focus.t - 1 : s.focus.t;
-            for (uint32_t k = 0; k < bl.runCount; k++) {
-                const Run& r = g.doc.runs[bl.runOff + k];
-                if (t < r.start || t >= r.start + r.len) continue;
-                if (r.flags & F_BOLD) b |= FMT_BOLD;
-                if (r.flags & F_ITALIC) b |= FMT_ITALIC;
-                if (r.flags & F_STRIKE) b |= FMT_STRIKE;
-                if (r.flags & F_CODE) b |= FMT_CODE;
-                if (r.flags & F_LINK) b |= FMT_LINK | (1 << 17);
-            }
-        }
-        b |= (LRESULT)EditStyleId() << 24;
-        *out = b;
+        *out = (LRESULT)ActiveBits();
         return true;
-    }
     case Q_MAP_SELFCHECK:
         if (lp != 1) return false;
         *out = s.selfcheckFailures;
@@ -3795,7 +4015,7 @@ bool EditQuery(UINT q, LPARAM lp, LRESULT* out) {
         return true;
     }
     case Q_EDIT_STRIP: *out = StripKind(); return true;
-    case Q_EDIT_TOOL: *out = BarToolCenter((UINT)(lp & 0xFFFF)); return true;
+    case Q_EDIT_TOOL: *out = BarToolCenter((UINT)(lp & 0xFFFF), (UINT)((lp >> 16) & 0xFFFF)); return true;
     case Q_RELAYOUT_ALL: {
         // The oracle for the swap (T7): every layout made anew from the model, every height exact as the background
         // measuring leaves it, the scroll position kept; a shot of this frame must equal one taken after an edit.

@@ -183,6 +183,7 @@ static void BroadcastSettings() {
 }
 
 void ApplySettings(uint32_t changed, bool persist) {
+    if (changed & (SC_THEME | SC_TYPE | SC_LANGUAGE | SC_COLUMN)) PopoverClose();  // (edit mode's popover, §2.4)
     if (changed & SC_LANGUAGE) SetUiLanguage(ResolveLanguage());
     if (changed & SC_THEME) ApplyTheme();
     if (g.ready) {
@@ -628,10 +629,11 @@ static void OnMouseMove(int mx, int my) {
     int fpart = FindPartAt(x, y);
     int tocItem = -1;
     bool drawer = fpart == FP_NONE && TocOverlayOpen() && TocHit(x, y, &tocItem);
-    bool onStrip = fpart == FP_NONE && !drawer && StripMouse(x, y, false);
-    bool onBar = fpart == FP_NONE && !drawer && !onStrip && BarMouse(x, y, false);
+    bool onPop = fpart == FP_NONE && !drawer && PopoverMouse(x, y, false);  // edit mode's popover lies over the strip
+    bool onStrip = fpart == FP_NONE && !drawer && !onPop && StripMouse(x, y, false);
+    bool onBar = fpart == FP_NONE && !drawer && !onPop && !onStrip && BarMouse(x, y, false);
     if (!onBar) BarMouse(-1.f, -1.f, false);  // leaves the bar's hover
-    if (onStrip || onBar) {
+    if (onPop || onStrip || onBar) {
         std::wstring tip = onStrip ? StripTipAt(x, y) : std::wstring();  // a strip's text it had to cut short, whole
         if (g.hoverLink >= 0 || g.hoverTask >= 0 || g.hoverHeading >= 0 || g.hoverCode >= 0 || tip != g.tip) {
             g.hoverLink = g.hoverTask = g.hoverHeading = g.hoverCode = -1;
@@ -706,6 +708,7 @@ static void OnLButtonDown(int mx, int my, WPARAM keys) {
     if (fpart != FP_NONE) { FindClick(fpart); return; }
     int item;
     if (TocOverlayOpen() && TocHit(x, y, &item)) { TocClick(item); return; }  // the drawer lies over the bar
+    if (PopoverMouse(x, y, true)) return;  // edit mode's popover: a row runs; a click outside closes it
     if (StripMouse(x, y, true)) return;  // a strip's button, or the strip itself over the document
     if (BarMouse(x, y, true)) return;    // edit mode's toolbar
     if (TocHit(x, y, &item)) { TocClick(item); return; }
@@ -866,6 +869,7 @@ static void OnWheel(int delta, WORD keys, int sx, int sy, bool horizontal) {
     POINT p{sx, sy};
     ScreenToClient(g.hwnd, &p);
     float x = p.x / Scale(), y = p.y / Scale(), notches = (float)delta / WHEEL_DELTA;
+    PopoverClose();  // the wheel closes edit mode's popover (§2.4)
     if (!horizontal && (keys & MK_CONTROL)) { ZoomStep(delta > 0 ? 1 : -1); return; }
     int item;
     if (!horizontal && TocHit(x, y, &item)) { TocWheel(-notches * 84.f); return; }
@@ -1107,6 +1111,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (!g.ready || (w == g.pxW && h == g.pxH) || w == 0 || h == 0) return 0;
         g.pxW = w;
         g.pxH = h;
+        PopoverClose();  // (edit mode's popover: anchored to a button that may have moved)
         g.canvas->Resize(w, h);
         g.offscreenValid = false;
         float tw = g.textW, ww = g.wideW;

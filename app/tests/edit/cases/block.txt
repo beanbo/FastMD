@@ -183,11 +183,23 @@ flags: nolist
 do: Task
 want: - [ ] ‸a\n- [ ] b\n
 
-=== task_off (§8.5: task off: the boxes go, the marker stays)
+=== task_off (§8.5: off - every block a task item: the marker goes with its box)
 src: - [ ] ‸a\n
 flags: nolist
 do: Task
-want: - ‸a\n
+want: ‸a\n
+
+=== bullet_on_task (§8.5: task ↔ plain - a bulleted task made a bulleted item loses its box)
+src: - [ ] ‸a\n- [x] b\n
+flags: nolist
+do: Bullet
+want: - ‸a\n- b\n
+
+=== number_on_task (bullet ↔ number of a task list: the boxes stay)
+src: - [x] ‸a\n
+flags: nolist
+do: Number
+want: 1. [x] ‸a\n
 
 === bullet_joins_list (§8.5: right after a list of that kind: its next item; a tight list stays tight)
 src: - a\n\nb‸\n

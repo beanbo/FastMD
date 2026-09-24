@@ -17,7 +17,7 @@
 
 namespace {
 IRawElementProviderSimple* g_root = nullptr;
-const int kMaxButtons = 32;  // the bar's 22, a strip's 3, the pencil
+const int kMaxButtons = 128;  // the bar's 22, a popover's rows (the size grid's 80 cells), a strip's 3, the pencil
 uint32_t g_chromeSig = 0;    // the buttons the last structure-changed event told about
 
 uint32_t Clamp(uint32_t pos) { return std::min<uint32_t>(pos, (uint32_t)g.doc.text.size()); }

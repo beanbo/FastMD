@@ -817,6 +817,33 @@ static void DrawAtomOutline(float top, float bottom) {
     g.canvas->StrokeRoundRect(l - 2.f, t - 2.f, r + 2.f, b + 2.f, 2.f, 1.f, P_ACCENT);
 }
 
+// A styled phantom row (§6.7) shows what it will be: a list's marker (a bullet, `1.`, an empty box) left of where the
+// caret stands, a quote's bar, or «Заголовок 2» in the muted colour at that heading's size
+static void DrawPhantomStyle(float top, float bottom) {
+    const uint8_t st = g.phantomStyle;
+    if (!st || g.phantomBlock < 0 || g.phantomBreak) return;
+    const float y = g.phantomY - g.scrollY, x = g.phantomX;
+    if (y + g.phantomLine <= top || y >= bottom) return;
+    if (st <= 6) {
+        wchar_t b[64];
+        swprintf_s(b, Tr(S_ED_STYLE_HEADING_FMT), (int)st);
+        IDWriteTextLayout* L = nullptr;
+        if (SUCCEEDED(g.dwf->CreateTextLayout(b, (UINT32)wcslen(b), g.typo.fmt[st], 2000.f, 400.f, &L)) && L) {
+            L->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            g.canvas->Text(L, x, y, P_MUTED);
+            L->Release();
+        }
+    } else if (st <= 9) {
+        Block m{};
+        m.marker = st == 7 ? MK_BULLET : st == 8 ? MK_NUMBER : MK_TASK_OPEN;
+        m.number = 1;
+        m.listLevel = 1;
+        DrawMarker(m, x, y + g.typo.baseline[R_BODY], false);
+    } else {
+        g.canvas->FillRect(x - 20.f, y, x - 20.f + Metrics::kQuoteBar, y + g.phantomLine, P_BORDER);
+    }
+}
+
 // The caret of edit mode (§12.2): the width Windows asks for, only while the blink phase is on and the document has
 // the keyboard (edit.cpp decides), in a block that is laid out already - the paint path never lays out - and clipped to
 // the block's box inside the document column.
@@ -865,6 +892,7 @@ static void DrawDocumentBand(float top, float bottom) {
         g.canvas->FillRect(tl + q.x, t, tl + q.x + Metrics::kQuoteBar, b, pal);
     }
     if (g.editing) {
+        DrawPhantomStyle(top, bottom);
         DrawEditCaret(top, bottom);
     } else if (g.caretOn) {  // the blocks around it are laid out already: no need to measure anything here
         float cx, dy, ch;
@@ -998,6 +1026,7 @@ struct FrameKey {
     int8_t caretAff = 0;
     float stripH = 0, phantomY = 0;
     bool phantomCaret = false;
+    uint8_t phantomStyle = 0;
     bool operator==(const FrameKey&) const = default;
 };
 FrameKey g_last;
@@ -1058,6 +1087,7 @@ FrameKey CurrentKey() {
     k.phantomBlock = g.phantomBlock;
     k.phantomY = g.phantomY;
     k.phantomCaret = g.phantomCaret;
+    k.phantomStyle = g.phantomStyle;
     // things drawn over the text: they would have to be repaired pixel by pixel, so those frames are drawn in full
     bool pill = !g.tip.empty() || (g.hoverLink >= 0 && !g.selecting) || g.focusLink >= 0;
     bool toast = !g.toast.empty() && GetTickCount() < g.toastUntil;

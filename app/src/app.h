@@ -227,6 +227,7 @@ struct App {
     int32_t phantomBlock = -1;
     bool phantomBefore = false, phantomBreak = false, phantomCaret = false;  // phantomCaret: the caret stands in it
     float phantomH = 0, phantomX = 0, phantomY = 0, phantomLine = 0;
+    uint8_t phantomStyle = 0;      // what the row will be (§6.7): 1-6 heading, 7 bullet, 8 numbered, 9 task, 10 quote
     uint32_t framesPartial = 0, framesFull = 0;    // scrolled and full frames (Q_FRAME_STATS)
     bool pencilHot = false;        // the pencil button (reading mode, left of the gear) is under the mouse
     uint32_t editChrome = 0;       // bumped whenever the bar, a strip or the pencil would draw differently (frame key)
@@ -681,6 +682,10 @@ bool EditCanUndo();
 bool EditCanRedo();
 int EditStyleId();                   // the style label: 0 text, 1-6 heading, 7 code, 8 table, 9 atom, 10 footnote
 std::wstring EditStripText(int kind);  // the conflict, encoding, leave and journal strips say what happened
+// the context matrix (§8.1): may that command run where the caret is? why: 1 table, 2 code, 3 object, 4 footnote,
+// 5 raw text, 0 not built yet / nothing to say
+bool EditCmdEnabled(UINT cmd, int* why);
+bool EditCmdActive(UINT cmd);        // the format, list, quote or code block at the caret is on (Q_EDIT_ACTIVE's bits)
 
 // ------------------------------------------------------------------------------------------------ editbar.cpp
 enum StripId : int { STRIP_NONE, STRIP_CONFLICT, STRIP_ENCODING, STRIP_LEAVE, STRIP_READONLY, STRIP_MISSING,
@@ -700,11 +705,18 @@ bool BarMouse(float x, float y, bool click);  // the toolbar: true = the point i
 bool PencilMouse(float x, float y, bool click);  // reading mode's pencil button, left of the gear
 void BarMouseLeave();
 void BarChanged();                   // something the bar shows changed: repaint (and a full frame)
-LRESULT BarToolCenter(UINT cmd);     // Q_EDIT_TOOL for a bar button or the pencil
+LRESULT BarToolCenter(UINT cmd, UINT row = 0);  // Q_EDIT_TOOL: a bar button, the pencil, a popover's row (from 1)
 int BarCollapse();                   // Q_EDIT_COLLAPSE
 std::wstring BarTipText();           // the tooltip shown now ("" = none)
-// UI Automation (§12.8): the buttons the chrome shows now - the bar's, a strip's, the pencil - in reading order, and what
-// a screen reader calls one of them (keys: its shortcut, "" = none)
+// the popovers under the bar's buttons (§2.4): style, table (grid or actions), formula, diagram, "…"
+bool PopoverOpen();
+void PopoverToggle(UINT cmd);        // opened under its button (under "…" when that one is collapsed), or closed
+void PopoverClose();                 // Esc, a click outside, the wheel, a resize, the zoom, the theme, deactivation
+bool PopoverKey(unsigned vk);        // ↑ ↓ ← → Home End Enter Esc: true = the popover took it
+bool PopoverMouse(float x, float y, bool click);  // true = the point is on it (or a click on its button closed it)
+// UI Automation (§12.8): the buttons the chrome shows now - the bar's, a popover's rows, a strip's, the pencil - in
+// reading order, and what a screen reader calls one of them (keys: its shortcut, "" = none). A popover row's cmd carries
+// its argument in the high word, as WM_COMMAND does.
 struct ChromeButton { UINT cmd; float l, t, r, b; bool enabled; };  // client DIP
 int EditChromeButtons(ChromeButton* out, int max);
 std::wstring EditChromeName(UINT cmd, std::wstring* keys);

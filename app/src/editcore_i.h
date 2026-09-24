@@ -58,6 +58,8 @@ template <class F> void ForSpans(const Doc& d, const TextPos& p, TRange r, F f) 
         if (sp.tBeg >= r.beg && sp.tEnd <= r.end && (!cs || (sp.openBeg >= cs->beg && sp.openBeg <= cs->end))) f(sp);
     }
 }
+// the same spans as a list: for the commands, which run once per key - one loop each instead of a template copy each
+std::vector<const SpanSrc*> SpansIn(const Doc& d, const TextPos& p, TRange r);
 uint32_t InsertionPoint(const Doc& d, const std::wstring& src, const TextPos& p);
 uint32_t LastStop(const Doc& d, int32_t block);
 TextPos BlockEdge(const Doc& d, int32_t block, bool atEnd);

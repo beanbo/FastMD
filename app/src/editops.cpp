@@ -306,20 +306,26 @@ bool HasFormat(const Doc& d, uint32_t t, uint16_t fmt) {
     auto it = std::upper_bound(bl.begin(), bl.end(), t, [](uint32_t v, const Block& b) { return v < b.textOff; });
     if (it == bl.begin()) return false;
     const int32_t b = (int32_t)(it - bl.begin()) - 1;
-    int32_t cell = -1;
+    const CellSrc* cs = nullptr;  // in a table: the spans opening in the cell that holds t
     if (const Table* tb = TableOf(d, b)) {
-        for (uint32_t k = 0; k < tb->rows * tb->cols && cell < 0; k++) {
+        for (uint32_t k = 0; k < tb->rows * tb->cols && !cs; k++) {
             const Cell& cl = d.cells[tb->cellOff + k];
-            if (t >= cl.textOff && t < cl.textOff + cl.textLen) cell = (int32_t)k;
+            if (t >= cl.textOff && t < cl.textOff + cl.textLen && tb->cellOff + k < d.cellSrc.size()) cs = &d.cellSrc[tb->cellOff + k];
         }
-        if (cell < 0) return false;
+        if (!cs) return false;
     }
-    TextPos p{t, b, cell};
-    TRange rg;
-    if (!RangeOf(d, p, &rg)) return false;
-    bool has = false;
-    ForSpans(d, p, rg, [&](const SpanSrc& sp) { has |= Gives(sp, fmt) && sp.tBeg <= t && t < sp.tEnd; });
-    return has;
+    const BlockSrc& bs = d.blockSrc[b];
+    for (uint32_t k = bs.spanOff; k < bs.spanOff + bs.spanCount && k < d.spans.size(); k++) {
+        const SpanSrc& sp = d.spans[k];
+        if (sp.tBeg <= t && t < sp.tEnd && Gives(sp, fmt) && (!cs || (sp.openBeg >= cs->beg && sp.openBeg <= cs->end))) return true;
+    }
+    return false;
+}
+
+std::vector<const SpanSrc*> ec::SpansIn(const Doc& d, const TextPos& p, TRange r) {
+    std::vector<const SpanSrc*> v;
+    ForSpans(d, p, r, [&](const SpanSrc& sp) { v.push_back(&sp); });
+    return v;
 }
 
 bool Verified(const Doc& a, const Doc& b, const EditResult& r) {
@@ -348,11 +354,11 @@ bool PieceSrc(const Doc& d, const TextPos& p, TRange rg, uint32_t t0, uint32_t t
     if (!g0 || !g1) return false;
     *sA = g0->kind == SEG_PLAIN ? g0->s + (t0 - g0->t) : g0->s;
     *sB = g1->kind == SEG_PLAIN ? g1->s + (t1 - g1->t) : g1->s + g1->sLen;
-    ForSpans(d, p, rg, [&](const SpanSrc& sp) {
-        if ((sp.flags & SF_UNCLOSED) || sp.tBeg < t0 || sp.tEnd > t1 || sp.tBeg == sp.tEnd) return;
-        *sA = std::min(*sA, sp.openBeg);
-        *sB = std::max(*sB, sp.closeEnd);
-    });
+    for (const SpanSrc* sp : SpansIn(d, p, rg)) {
+        if ((sp->flags & SF_UNCLOSED) || sp->tBeg < t0 || sp->tEnd > t1 || sp->tBeg == sp->tEnd) continue;
+        *sA = std::min(*sA, sp->openBeg);
+        *sB = std::max(*sB, sp->closeEnd);
+    }
     return *sA <= *sB;
 }
 
@@ -370,34 +376,32 @@ std::vector<Piece> Pieces(const EditCtx& c, const TextPos& A, const TextPos& B, 
         t0 = std::clamp(t0, rg.beg, rg.end);
         t1 = std::clamp(t1, rg.beg, rg.end);
         if (t1 <= t0) return;
-        auto whole = [&](const SpanSrc& sp) {
-            if ((sp.flags & SF_UNCLOSED) || !Atomic(sp)) return false;
-            if (fmt == FMT_CODE) return remove ? !Gives(sp, FMT_CODE) : !NotText(sp);
-            return true;
-        };
+        const std::vector<const SpanSrc*> spans = SpansIn(d, p, rg);
         for (bool grew = true; grew;) {
             grew = false;
-            ForSpans(d, p, rg, [&](const SpanSrc& sp) {
-                if (whole(sp) && sp.tBeg < t1 && sp.tEnd > t0 && (sp.tBeg < t0 || sp.tEnd > t1)) {
-                    t0 = std::min(t0, sp.tBeg);
-                    t1 = std::max(t1, sp.tEnd);
+            for (const SpanSrc* sp : spans) {
+                bool whole = !(sp->flags & SF_UNCLOSED) && Atomic(*sp) &&
+                             (fmt != FMT_CODE || (remove ? !Gives(*sp, FMT_CODE) : !NotText(*sp)));
+                if (whole && sp->tBeg < t1 && sp->tEnd > t0 && (sp->tBeg < t0 || sp->tEnd > t1)) {
+                    t0 = std::min(t0, sp->tBeg);
+                    t1 = std::max(t1, sp->tEnd);
                     grew = true;
                 }
-            });
+            }
         }
         std::vector<uint32_t> cuts{t0, t1};
         std::vector<std::pair<uint32_t, uint32_t>> out_;  // left out of inline code
-        ForSpans(d, p, rg, [&](const SpanSrc& sp) {
-            if (sp.flags & SF_UNCLOSED) return;
+        for (const SpanSrc* sp : spans) {
+            if (sp->flags & SF_UNCLOSED) continue;
             // every edge of the spans the format is taken off (one piece each), of what inline code leaves out; of the
             // other spans the edges of those that go on beyond the piece - a span inside it just nests in the new one
-            bool every = (remove && Gives(sp, fmt)) || (fmt == FMT_CODE && !remove && NotText(sp));
-            bool beyond = sp.tBeg < t0 || sp.tEnd > t1;
-            if (!every && !(((sp.flags & SF_ENTERABLE) || Link(sp)) && beyond)) return;
-            for (uint32_t e : {sp.tBeg, sp.tEnd})
+            bool every = (remove && Gives(*sp, fmt)) || (fmt == FMT_CODE && !remove && NotText(*sp));
+            bool beyond = sp->tBeg < t0 || sp->tEnd > t1;
+            if (!every && !(((sp->flags & SF_ENTERABLE) || Link(*sp)) && beyond)) continue;
+            for (uint32_t e : {sp->tBeg, sp->tEnd})
                 if (e > t0 && e < t1) cuts.push_back(e);
-            if (fmt == FMT_CODE && !remove && NotText(sp)) out_.push_back({sp.tBeg, sp.tEnd});
-        });
+            if (fmt == FMT_CODE && !remove && NotText(*sp)) out_.push_back({sp->tBeg, sp->tEnd});
+        }
         if (fmt == FMT_CODE && !remove) {  // a picture in a line without a span of its own (HTML <img>): left out too
             SegSpan ss = SegsIn(d, b, rg);
             for (const SrcSeg* g = ss.b; g < ss.e; g++)
@@ -488,15 +492,15 @@ bool AddTo(const EditCtx& c, Piece pc, uint16_t fmt, std::vector<Ed>& eds, EditR
         return true;
     }
     const std::wstring mark = Mark(fmt);
+    const std::vector<const SpanSrc*> spans = SpansIn(d, p, rg);
     if (!Opens(Prev(src, sA), At(src, sA)) || !Closes(Prev(src, sB), At(src, sB))) {
         // out to the word's edges, if no span edge is in the way (`don⟦'t⟧` → `**don't**`)
         uint32_t t0 = pc.t0, t1 = pc.t1;
         while (t0 > rg.beg && WordChar(d.text[t0 - 1])) t0--;
         while (t1 < rg.end && WordChar(d.text[t1])) t1++;
         bool crosses = false;
-        ForSpans(d, p, rg, [&](const SpanSrc& sp) {
-            for (uint32_t e : {sp.tBeg, sp.tEnd}) crosses |= (e >= t0 && e < pc.t0) || (e > pc.t1 && e <= t1);
-        });
+        for (const SpanSrc* sp : spans)
+            for (uint32_t e : {sp->tBeg, sp->tEnd}) crosses |= (e >= t0 && e < pc.t0) || (e > pc.t1 && e <= t1);
         if (crosses || !PieceSrc(d, p, rg, t0, t1, &sA, &sB) || !Opens(Prev(src, sA), At(src, sA)) ||
             !Closes(Prev(src, sB), At(src, sB)))
             return false;
@@ -504,19 +508,19 @@ bool AddTo(const EditCtx& c, Piece pc, uint16_t fmt, std::vector<Ed>& eds, EditR
         pc.t1 = t1;
     }
     bool left = false, right = false;
-    ForSpans(d, p, rg, [&](const SpanSrc& sp) {
-        if (!Gives(sp, fmt) || (sp.flags & SF_UNCLOSED)) return;
-        if (sp.tBeg >= pc.t0 && sp.tEnd <= pc.t1) {  // inside: its delimiters go, the new span covers it
-            eds.push_back(Ed{sp.openBeg, sp.openEnd, L""});
-            eds.push_back(Ed{sp.closeBeg, sp.closeEnd, L""});
-        } else if (!left && sp.closeEnd == sA && Sub(src, sp.closeBeg, sp.closeEnd) == mark) {
-            eds.push_back(Ed{sp.closeBeg, sp.closeEnd, L""});  // `**a**⟦b⟧` → `**ab**`
+    for (const SpanSrc* sp : spans) {
+        if (!Gives(*sp, fmt) || (sp->flags & SF_UNCLOSED)) continue;
+        if (sp->tBeg >= pc.t0 && sp->tEnd <= pc.t1) {  // inside: its delimiters go, the new span covers it
+            eds.push_back(Ed{sp->openBeg, sp->openEnd, L""});
+            eds.push_back(Ed{sp->closeBeg, sp->closeEnd, L""});
+        } else if (!left && sp->closeEnd == sA && Sub(src, sp->closeBeg, sp->closeEnd) == mark) {
+            eds.push_back(Ed{sp->closeBeg, sp->closeEnd, L""});  // `**a**⟦b⟧` → `**ab**`
             left = true;
-        } else if (!right && sp.openBeg == sB && Sub(src, sp.openBeg, sp.openEnd) == mark) {
-            eds.push_back(Ed{sp.openBeg, sp.openEnd, L""});
+        } else if (!right && sp->openBeg == sB && Sub(src, sp->openBeg, sp->openEnd) == mark) {
+            eds.push_back(Ed{sp->openBeg, sp->openEnd, L""});
             right = true;
         }
-    });
+    }
     if (!left) eds.push_back(Ed{sA, sA, mark});
     if (!right) eds.push_back(Ed{sB, sB, mark});
     r.verify.push_back(EditResult::Expect{pc.t0, pc.t1, fmt, true});
@@ -535,9 +539,11 @@ bool RemoveFrom(const EditCtx& c, Piece pc, uint16_t fmt, std::vector<Ed>& eds, 
     if (!RangeOf(d, p, &rg)) return false;
     TrimPiece(d, pc);
     if (pc.t0 >= pc.t1) return true;
-    bool ok = true, any = false;
-    ForSpans(d, p, rg, [&](const SpanSrc& S) {
-        if (!ok || !Gives(S, fmt) || (S.flags & SF_UNCLOSED) || S.tBeg > pc.t0 || S.tEnd < pc.t1) return;
+    bool any = false;
+    const std::vector<const SpanSrc*> spans = SpansIn(d, p, rg);
+    for (const SpanSrc* sptr : spans) {
+        const SpanSrc& S = *sptr;
+        if (!Gives(S, fmt) || (S.flags & SF_UNCLOSED) || S.tBeg > pc.t0 || S.tEnd < pc.t1) continue;
         any = true;
         if (S.type == MD_SPAN_CODE) {  // `ab⟦cd⟧ef` → `ab`cd`ef`, cd escaped
             std::wstring run;
@@ -551,16 +557,15 @@ bool RemoveFrom(const EditCtx& c, Piece pc, uint16_t fmt, std::vector<Ed>& eds, 
                 if (k >= 0) ins.insert(ins.begin() + k, L'\\');
             }
             eds.push_back(Ed{S.openBeg, S.closeEnd, ins});
-            return;
+            continue;
         }
         // a span between it and the piece that goes on beyond the piece would have to be cut too: not done
-        ForSpans(d, p, rg, [&](const SpanSrc& J) {
-            if (&J == &S || (J.flags & SF_UNCLOSED) || Atomic(J)) return;
-            bool inS = J.openBeg >= S.openEnd && J.closeEnd <= S.closeBeg;
-            bool holds = J.tBeg <= pc.t0 && J.tEnd >= pc.t1 && (J.tBeg < pc.t0 || J.tEnd > pc.t1);
-            if (inS && holds) ok = false;
-        });
-        if (!ok) return;
+        for (const SpanSrc* J : spans) {
+            if (J == sptr || (J->flags & SF_UNCLOSED) || Atomic(*J)) continue;
+            bool inS = J->openBeg >= S.openEnd && J->closeEnd <= S.closeBeg;
+            bool holds = J->tBeg <= pc.t0 && J->tEnd >= pc.t1 && (J->tBeg < pc.t0 || J->tEnd > pc.t1);
+            if (inS && holds) return false;
+        }
         std::wstring o = Sub(src, S.openBeg, S.openEnd), k = Sub(src, S.closeBeg, S.closeEnd);
         // where the delimiters go: the closer after the text before the piece, the opener before the text after it
         // (where only blanks are left beside the piece, they go plain with it)
@@ -573,7 +578,7 @@ bool RemoveFrom(const EditCtx& c, Piece pc, uint16_t fmt, std::vector<Ed>& eds, 
         const bool head = cAt == UINT32_MAX, tail = oAt == UINT32_MAX;
         eds.push_back(Ed{S.openBeg, S.openEnd, L""});
         eds.push_back(Ed{S.closeBeg, S.closeEnd, L""});
-        if (head && tail) return;  // the whole span: both delimiters go
+        if (head && tail) continue;  // the whole span: both delimiters go
         // F9-2: a `_` delimiter that would stand inside a word would not be one - the span is written with `*`
         if ((S.flags & SF_UNDERSCORE) && ((cAt != UINT32_MAX && Intraword(src, cAt)) || (oAt != UINT32_MAX && Intraword(src, oAt)))) {
             std::replace(o.begin(), o.end(), L'_', L'*');
@@ -587,8 +592,7 @@ bool RemoveFrom(const EditCtx& c, Piece pc, uint16_t fmt, std::vector<Ed>& eds, 
             eds.push_back(Ed{oAt, oAt, o});
             eds.push_back(Ed{S.closeEnd, S.closeEnd, k});
         }
-    });
-    if (!ok) return false;
+    }
     if (any) r.verify.push_back(EditResult::Expect{pc.t0, pc.t1, fmt, false});
     return true;
 }
@@ -600,15 +604,15 @@ uint16_t ec::StickyAt(const Doc& d, const TextPos& p) {
     TRange rg;
     if (!ValidBlock(d, p.block) || !RangeOf(d, p, &rg)) return 0;
     uint32_t hard = 0;  // a link, code or formula ending there too: a span inside it cannot be carried past its closer
-    ForSpans(d, p, rg, [&](const SpanSrc& sp) {
-        if (sp.tEnd == p.t && !(sp.flags & (SF_ENTERABLE | SF_UNCLOSED))) hard = std::max(hard, sp.closeEnd);
-    });
+    const std::vector<const SpanSrc*> spans = SpansIn(d, p, rg);
+    for (const SpanSrc* sp : spans)
+        if (sp->tEnd == p.t && !(sp->flags & (SF_ENTERABLE | SF_UNCLOSED))) hard = std::max(hard, sp->closeEnd);
     uint16_t bits = 0;
-    ForSpans(d, p, rg, [&](const SpanSrc& sp) {
-        if (sp.tEnd != p.t || sp.tBeg >= p.t || (sp.flags & SF_UNCLOSED) || sp.type >= 0x80 || sp.closeBeg < hard) return;
+    for (const SpanSrc* sp : spans) {
+        if (sp->tEnd != p.t || sp->tBeg >= p.t || (sp->flags & SF_UNCLOSED) || sp->type >= 0x80 || sp->closeBeg < hard) continue;
         for (uint16_t f : {FMT_BOLD, FMT_ITALIC, FMT_STRIKE})
-            if (Gives(sp, f)) bits |= f;
-    });
+            if (Gives(*sp, f)) bits |= f;
+    }
     return bits;
 }
 
@@ -630,18 +634,19 @@ EditResult ec::TypePending(const EditCtx& c, const EditState& st, std::wstring_v
     std::vector<Ed> eds;
     std::wstring pre, post;
     // off: out of the outermost span of those formats open at the caret, and of the spans nested in it there
+    const std::vector<const SpanSrc*> spans = SpansIn(d, p, rg);
     const SpanSrc* O = nullptr;
-    ForSpans(d, p, rg, [&](const SpanSrc& sp) {
-        if (sp.flags & SF_UNCLOSED || sp.openEnd > s || s > sp.closeBeg) return;
+    for (const SpanSrc* sp : spans) {
+        if ((sp->flags & SF_UNCLOSED) || sp->openEnd > s || s > sp->closeBeg) continue;
         for (uint16_t f : kFmts)
-            if ((off & f) && Gives(sp, f) && (!O || sp.openBeg < O->openBeg)) O = &sp;
-    });
+            if ((off & f) && Gives(*sp, f) && (!O || sp->openBeg < O->openBeg)) O = sp;
+    }
     if (O) {
         std::vector<const SpanSrc*> k;  // open at the caret inside O (O too), innermost first
-        ForSpans(d, p, rg, [&](const SpanSrc& sp) {
-            if (!(sp.flags & SF_UNCLOSED) && sp.openEnd <= s && s <= sp.closeBeg && sp.openBeg >= O->openBeg && sp.closeEnd <= O->closeEnd)
-                k.push_back(&sp);
-        });
+        for (const SpanSrc* sp : spans)
+            if (!(sp->flags & SF_UNCLOSED) && sp->openEnd <= s && s <= sp->closeBeg && sp->openBeg >= O->openBeg &&
+                sp->closeEnd <= O->closeEnd)
+                k.push_back(sp);
         Order(k, [](const SpanSrc* a, const SpanSrc* b) { return a->openBeg > b->openBeg; });
         bool atEnd = true, atStart = true;  // only closers up to O's end (only openers from its start): outside of it
         for (uint32_t x = s; x < O->closeBeg && atEnd; x++) {
@@ -670,10 +675,10 @@ EditResult ec::TypePending(const EditCtx& c, const EditState& st, std::wstring_v
         if (!(on & f)) continue;
         const SpanSrc* X = nullptr;
         if (f != FMT_CODE && pre.empty())
-            ForSpans(d, p, rg, [&](const SpanSrc& sp) {
-                if (!Gives(sp, f) || (sp.flags & SF_UNCLOSED) || Sub(src, sp.closeBeg, sp.closeEnd) != Mark(f)) return;
-                if (sp.closeEnd == s || (sticky && sp.closeEnd < s && AllBlank(src, sp.closeEnd, s))) X = &sp;
-            });
+            for (const SpanSrc* sp : spans) {
+                if (!Gives(*sp, f) || (sp->flags & SF_UNCLOSED) || Sub(src, sp->closeBeg, sp->closeEnd) != Mark(f)) continue;
+                if (sp->closeEnd == s || (sticky && sp->closeEnd < s && AllBlank(src, sp->closeEnd, s))) X = sp;
+            }
         if (X) {
             eds.push_back(Ed{X->closeBeg, X->closeEnd, L""});
             merged = Sub(src, X->closeBeg, X->closeEnd) + merged;
@@ -768,9 +773,9 @@ EditResult OpToggleInline(const EditCtx& c, const EditState& st, uint16_t fmt) {
         if (!ValidBlock(d, p.block) || !RangeOf(d, p, &rg) || d.blocks[p.block].kind == BK_CODE) return Refuse(st, "context");
         const uint32_t s = st.focus;
         const SpanSrc* S = nullptr;  // the innermost span of the format around the caret
-        ForSpans(d, p, rg, [&](const SpanSrc& sp) {
-            if (Gives(sp, fmt) && !(sp.flags & SF_UNCLOSED) && sp.openEnd <= s && s <= sp.closeBeg && (!S || sp.openBeg > S->openBeg)) S = &sp;
-        });
+        for (const SpanSrc* sp : SpansIn(d, p, rg))
+            if (Gives(*sp, fmt) && !(sp->flags & SF_UNCLOSED) && sp->openEnd <= s && s <= sp->closeBeg && (!S || sp->openBeg > S->openBeg))
+                S = sp;
         if (!S) {
             a.pendOn |= fmt;
         } else {
@@ -887,8 +892,10 @@ EditResult OpBlockStyle(const EditCtx& c, const EditState& st, int level) {
 
 // ------------------------------------------------------------------------------------------------ lists (§8.5)
 namespace {
+// an item's kind as the bar shows it (Q_EDIT_ACTIVE): a task item is a task, whatever its marker
 bool OfKind(const ContainerSrc& it, int kind) {
-    return kind == 9 ? it.taskOff != UINT32_MAX : kind == 8 ? it.delim != 0 : it.bullet != 0;
+    bool task = it.taskOff != UINT32_MAX;
+    return kind == 9 ? task : !task && (kind == 8 ? it.delim != 0 : it.bullet != 0);
 }
 bool SameList(const Doc& d, int32_t x, int32_t item) {
     const ContainerSrc& a = d.containers[x];
@@ -968,13 +975,7 @@ EditResult OpList(const EditCtx& c, const EditState& st, int kind) {
             const ContainerSrc& it = d.containers[items[i]];
             const int32_t fb = (int32_t)it.firstBlock;
             const BlockSrc& fs = d.blockSrc[fb];
-            if (kind == 9) {  // the box only
-                uint32_t e = it.taskOff + 2;
-                if (e < src.size() && Blank(src[e])) e++;
-                eds.push_back(Ed{it.taskOff - 1, e, L""});
-                continue;
-            }
-            eds.push_back(Ed{it.markOff, fs.beg, L""});
+            eds.push_back(Ed{it.markOff, fs.beg, L""});  // (a task's box with it)
             Reindent(d, src, items[i], -(int)(it.contentCol - Col(src, it.markOff)), eds);
             if (Para(d, fb)) EscapeAt(eds, Sub(src, fs.beg, LineEndOf(src, fs.beg)), fs.beg, true);
             // blank lines keep the paragraphs apart - from each other and from the items left before and after them
@@ -996,8 +997,15 @@ EditResult OpList(const EditCtx& c, const EditState& st, int kind) {
     uint32_t num = 1;
     for (int32_t x : change) {
         const ContainerSrc& it = d.containers[x];
-        if (kind == 9) {
+        if (kind == 9) {  // a box put in
             if (it.taskOff == UINT32_MAX) eds.push_back(Ed{d.blockSrc[it.firstBlock].beg, d.blockSrc[it.firstBlock].beg, L"[ ] "});
+            continue;
+        }
+        if (it.taskOff != UINT32_MAX && (kind == 7 ? it.bullet != 0 : it.delim != 0)) {  // a task of that marker: plain
+            uint32_t e = it.taskOff + 2;
+            if (e < src.size() && Blank(src[e])) e++;
+            eds.push_back(Ed{it.taskOff - 1, e, L""});
+            num++;
             continue;
         }
         if (OfKind(it, kind)) {
@@ -1088,7 +1096,8 @@ EditResult OpQuote(const EditCtx& c, const EditState& st) {
                 gap.push_back(Line{l, bl[i], true});
                 l = SkipEol(src, le) > l ? SkipEol(src, le) : l + 1;
             }
-            if (blanks) lines.insert(lines.end(), gap.begin(), gap.end());
+            if (blanks)
+                for (const Line& l : gap) lines.push_back(l);
         }
         lines.push_back(Line{bs.line, bl[i], false});
         for (uint32_t l : MoreLines(src, bs, bs.outerEnd)) lines.push_back(Line{l, bl[i], false});
@@ -1234,7 +1243,7 @@ EditResult OpCodeBlock(const EditCtx& c, const EditState& st) {
             caretLine = (int)lines.size() + cl;
             caretCol = cc;
         }
-        lines.insert(lines.end(), v.begin(), v.end());
+        for (std::wstring& l : v) lines.push_back(std::move(l));
     }
     std::wstring all;
     for (auto& l : lines) all += l + L"\n";
