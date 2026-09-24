@@ -968,7 +968,7 @@ static void DrawChrome() {
     if (!g.toast.empty() && GetTickCount() < g.toastUntil) {
         // a long pill at the bottom left (a link's in edit mode) reaches under the toast: the toast goes a row up
         float cx = DocLeft() + DocW() * 0.5f, y = ViewH() - 64.f;
-        if (pillR > cx - DrawPill(g.toast, cx, y, true, true) * 0.5f) y -= 30.f;
+        if (pillR > 0.f && pillR > cx - DrawPill(g.toast, cx, y, true, true) * 0.5f) y -= 30.f;
         DrawPill(g.toast, cx, y, true);
     }
     DrawEditChrome(1);     // a toolbar button's tooltip, over everything

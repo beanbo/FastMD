@@ -4612,7 +4612,7 @@ def pill_right(hwnd, name, at, away):
     plain = shot(hwnd, name + "-none")
     post(hwnd, WM_MOUSEMOVE, 0, lp(*at), 0.4)
     img = shot(hwnd, name)
-    box = (0, img.height - 60, img.width - 24, img.height)
+    box = (0, img.height - 28, img.width - 24, img.height - 22)  # (the pill's middle rows: never a toast's)
     diff = ImageChops.difference(plain.crop(box), img.crop(box)).convert("L").point(lambda v: 255 if v > 30 else 0)
     bb = diff.getbbox()
     return bb[2] if bb else 0

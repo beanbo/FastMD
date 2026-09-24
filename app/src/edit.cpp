@@ -147,6 +147,7 @@ struct Session {
     bool ctxValid = false;
     // ---- the bar's slide (§2.3, §12.1)
     float slideFrom = 0, slideTo = 0, maxComp = 0;
+    float slideY = 0;                  // the scroll position the last step set, before the frame rounded it
     uint64_t slideT0 = 0;
     // ---- the caret's blink (§12.2)
     bool phaseOn = true, focused = false, sysCaret = false;
@@ -2100,7 +2101,11 @@ void SetBarT(float t) {
     if (!g.doc.blocks.empty() && g.Y.size() == g.doc.blocks.size()) RecomputeY();
     float comp = std::min(EditInset(), s.maxComp), d = comp - g.barComp;
     g.barComp = comp;
-    g.scrollY = std::clamp(g.scrollY + d, 0.f, MaxScroll());
+    // Every frame puts the scroll position on whole device pixels. The make-up goes on from where the last step left
+    // it, not from that rounded value - else up to half a pixel per step adds up, and the page ends a few pixels away
+    // from where it was (a scroll the reader made meanwhile is more than that, and is kept).
+    float from = std::fabs(g.scrollY - s.slideY) * Scale() <= 0.51f ? s.slideY : g.scrollY;
+    g.scrollY = s.slideY = std::clamp(from + d, 0.f, MaxScroll());
     g.targetY = std::clamp(g.targetY + d, 0.f, MaxScroll());
     BarChanged();
 }
@@ -2117,6 +2122,7 @@ void StartSlide(bool in, bool instant) {
     s.slideFrom = g.barT;
     s.slideTo = in ? 1.f : 0.f;
     s.slideT0 = Qpc();
+    s.slideY = g.scrollY;
     s.maxComp = in ? std::min(44.f / g.cfg.zoom, g.scrollY) : g.barComp;
     BOOL anim = TRUE;
     SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &anim, 0);
