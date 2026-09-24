@@ -51,8 +51,13 @@ the section that resolves it.
    a file that changed behind our back, and refuses to enter edit mode on a file it cannot write back losslessly.
 3. **Startup pays nothing.** No edit-mode code or data runs before the first frame: source maps are opt-in
    (`wantMap`, §4.3) and built only on entering edit mode; new DLLs (uxtheme) are delay-loaded; recovery lookups run
-   after the first frame. The speed guard (PLAN §0) stays green; the exe grows by at most **+96 KB** over 1.2.0's
-   986,112 bytes, updater work included (§15.1).
+   after the first frame. The speed guard (PLAN §0) stays green and is the binding gate. Exe size: after Phase 1 the
+   original +96 KB budget was already exceeded (1,171,968 bytes); moving edit mode into a delay-loaded DLL was rejected
+   (static CRT in both modules makes STL objects unsafe to pass across, so it would need a copying C interface around
+   `Doc`). Decision (orchestrator, after Phase 1): edit mode stays in the exe; every edit-only translation unit
+   (`editcore`, `editops`, `editfile`, `edit`, `editbar`, `editpop`) is compiled with `/O1` (favour size, it is not
+   on a hot path except `SrcOfText`/`TextOfSrc`, which are measured); `FastMD.exe` ≤ **1,450,000 bytes** at Phase 4
+   (≈ +0.5–0.8 ms per launch by the measured 1.2–1.9 ms/MB exe tax), and the speed guard must stay within its limits.
 4. **WYSIWYG, not a source view.** Markdown markers are never shown, the caret moves over rendered text, and typing
    Markdown syntax at a *visible* block start still works (`# `, `- `, `> ` … become formatting after the re-parse, as in
    Typora). Syntax that would appear at a line start the reader cannot see is escaped (§7.4).
@@ -2342,7 +2347,7 @@ strided to a few thousand stops and offsets per input) — a failure writes `out
 7. Speed guard in the explorer context (`bench/tools/explorer-launch`): the gap to baseline-win32 ≤ 0 ms on medium and
    ≤ +15 ms on large (1.2.0: −16.4 / −16.5 ms); interleaved A/B parse time of medium and large-prefix without maps
    unchanged within noise.
-8. Exe size recorded; cumulative growth ≤ +96 KB over 986,112 bytes (`FastMD.exe` ≤ 1,084,416 bytes at Phase 4).
+8. Exe size recorded; `FastMD.exe` ≤ 1,450,000 bytes at Phase 4 (§1 principle 3), edit-only TUs built with `/O1`.
 9. Light and dark screenshots of every new visual (from 2a); 100 % and 150 % in Phase 4.
 10. The edit UI tests once against the ASan app build.
 11. The phase report records §5.8's numbers, the local flush cost, the size and any code-vs-design differences.
