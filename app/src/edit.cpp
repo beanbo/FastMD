@@ -181,6 +181,8 @@ struct Session {
     // ---- questions (Q_LAST_PROMPT)
     int lastPrompt = 0;
     uint32_t prompts = 0;
+    // ---- UI Automation's events, raised when the typing or the moves pause (§12.8)
+    bool uiaText = false, uiaSel = false;
     // ---- edit mode's file watch (§10.7)
     DWORD rereadMs = 0;
     uint32_t framesPartial = 0, framesFull = 0;  // Q_FRAME_STATS: the counts at the last query
@@ -489,8 +491,20 @@ void CaretRestart() {
     SystemCaret();
 }
 
-// The caret is under the bar, a strip or the find bar, or below the window: the document moves by the overflow only,
-// never re-centred (§12.1).
+// The band [dy, dy + h) of the document is under the bar, a strip or the find bar, or below the window: the document
+// moves by the overflow only, never re-centred (§12.1).
+void RevealBand(float dy, float h) {
+    float top = EditRevealTop(), target = g.scrollY;
+    if (dy < g.scrollY + top) target = dy - top;
+    else if (dy + h > g.scrollY + ViewH() - 48.f) target = std::min(dy - top, dy + h - ViewH() + 48.f);
+    target = std::clamp(target, 0.f, MaxScroll());
+    if (std::fabs(target - g.scrollY) > 0.5f) {
+        g.userMoved = true;
+        g.restoreBlock = -1;
+        ScrollTo(target, false);
+    }
+}
+
 void RevealCaret() {
     if (!g.editing || g.doc.blocks.empty()) return;
     float cx = 0, dy, h;
@@ -508,15 +522,7 @@ void RevealCaret() {
     } else if (!CaretGeomAt(g.selFocus, g.caretBlock, g.caretCell, &cx, &dy, &h, true)) {
         return;
     }
-    float top = EditRevealTop(), target = g.scrollY;
-    if (dy < g.scrollY + top) target = dy - top;
-    else if (dy + h > g.scrollY + ViewH() - 48.f) target = std::min(dy - top, dy + h - ViewH() + 48.f);
-    target = std::clamp(target, 0.f, MaxScroll());
-    if (std::fabs(target - g.scrollY) > 0.5f) {
-        g.userMoved = true;
-        g.restoreBlock = -1;
-        ScrollTo(target, false);
-    }
+    RevealBand(dy, h);
     int32_t b = g.caretBlock;
     float vx, vw, cw;
     if (ab < 0 && b >= 0 && HScrollInfo((uint32_t)b, &vx, &vw, &cw)) {  // a code block or table wider than its box
@@ -525,13 +531,20 @@ void RevealCaret() {
     }
 }
 
+// A screen reader hears about a change of the text or of the selection once the typing or the moves pause (§12.8):
+// every change re-arms the timer, and its tick raises what is pending.
+void UiaLater(bool text) {
+    (text ? s.uiaText : s.uiaSel) = true;
+    if (g.hwnd) SetTimer(g.hwnd, TIMER_EDIT_UI, 100, nullptr);
+}
+
 void RawLifetime();
 void CaretMoved() {
     s.undo.BreakCoalescing();
     s.pendingHigh = 0;
     RawLifetime();  // raw-while-typing ends where the caret leaves what it holds (§6.9)
     CaretRestart();
-    if (g.hwnd) SetTimer(g.hwnd, TIMER_EDIT_UI, 100, nullptr);  // a screen reader hears it once the moves pause
+    UiaLater(false);
     BarChanged();  // the style label follows the caret's block
 }
 
@@ -951,7 +964,10 @@ void EditReparse(uint32_t at, uint32_t oldLen, uint32_t newLen, Doc* keepOld) {
             g.lowerText.clear();
         }
     }
-    if (g.findOpen && !g.findQuery.empty()) FindRefresh();
+    if (g.findOpen && !g.findQuery.empty()) {  // (texts that differ around the edit: the current match is kept by offset)
+        if (textSame) FindRefresh(ts.oldBeg, ts.oldEnd, ts.newEnd);
+        else FindRefresh(UINT32_MAX, UINT32_MAX, UINT32_MAX);
+    }
     g.hoverLink = g.hoverCode = g.hoverHBlock = g.dragHBlock = g.hbarFlash = g.hoverHeading = -1;
     g.hoverTask = g.downTask = g.focusLink = g.ctxLink = g.ctxImage = g.tocHover = -1;
     g.restoreBlock = -1;
@@ -972,7 +988,7 @@ void EditReparse(uint32_t at, uint32_t oldLen, uint32_t newLen, Doc* keepOld) {
     // 13. sources the table has not seen go to the picture worker
     StartImages();
     // 14. a screen reader hears about it once the typing pauses
-    if (g.hwnd) SetTimer(g.hwnd, TIMER_EDIT_UI, 100, nullptr);
+    UiaLater(true);
     // 15.
     if (SelfCheckOn()) {
         std::string why;
@@ -2094,6 +2110,7 @@ void SlideDone() {
     FindRelayoutInput();  // the find box shows again, under the bar
     if (g.editing) RevealCaret();
     BarChanged();
+    UiaChromeChanged();  // the bar's buttons came or went
 }
 
 void StartSlide(bool in, bool instant) {
@@ -3206,6 +3223,7 @@ void EditMouseDrag(float x, float y) {
     Publish();
     UpdateCaretVisible();
     CaretRestart();
+    UiaLater(false);
     Invalidate();
 }
 
@@ -3248,6 +3266,27 @@ void EditTaskClick(uint32_t block) {
 }
 
 bool EditOpenLinkOnClick(WPARAM keys) { return !g.editing || (keys & MK_CONTROL); }
+
+// UI Automation selects a text range (§12.8): the caret and the selection go there through the editor - into the
+// source, at caret stops, as a click and a Shift+click would put them - and the view moves as little as it must.
+void EditSelectText(uint32_t from, uint32_t to) {
+    if (!g.editing) return;
+    EditSync();
+    if (g.doc.blocks.empty()) return;
+    auto at = [](uint32_t t, int dir) {  // (the end of a range belongs to the block it ends, not the next one)
+        t = std::min<uint32_t>(t, (uint32_t)g.doc.text.size());
+        return SnapStop(TextPos{t, (int32_t)BlockOfPos(dir < 0 && t ? t - 1 : t), -1}, dir);
+    };
+    MoveCaret(at(from, 1), false);
+    if (to > from) MoveCaret(at(to, -1), true);
+}
+
+// ... and scrolls one into view: as little as for the caret, never centred
+void EditRevealText(uint32_t pos) {
+    float cx, dy, h;
+    if (g.editing && CaretGeomAt(std::min<uint32_t>(pos, (uint32_t)g.doc.text.size()), -1, -1, &cx, &dy, &h, true))
+        RevealBand(dy, h);
+}
 
 void EditFocus(bool on) {
     s.focused = on;
@@ -3582,8 +3621,10 @@ void EditTimer(UINT_PTR id) {
         break;
     case TIMER_EDIT_UI:
         KillTimer(g.hwnd, TIMER_EDIT_UI);
-        UiaDocumentChanged();
-        UiaSelectionChanged();
+        if (s.uiaText) UiaDocumentChanged();
+        if (s.uiaText || s.uiaSel) UiaSelectionChanged();
+        s.uiaText = s.uiaSel = false;
+        UiaChromeChanged();  // buttons came or went (a strip, the collapse level)
         BarChanged();  // the status slot's 300 ms have passed
         if (s.hintPending && g.editing) {  // the first entry's hint, once no third click can take the entry back
             DWORD since = GetTickCount() - s.enteredAt, wait = GetDoubleClickTime();

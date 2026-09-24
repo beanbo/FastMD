@@ -377,7 +377,8 @@ void TrimCache();
 void Render();                       // draw the frame into the canvas (a pure scroll only redraws what changed)
 void ForceFullRedraw();              // the canvas content is no longer trusted: the next frame is drawn in full
 void WithAnchor(void (*fn)());       // keep the top visible block in place while heights change
-void DrawPill(const std::wstring& s, float x, float y, bool centered);
+// a pill of UI text at x (centered: its middle at x), 30 DIP tall; returns its width (measure: only that)
+float DrawPill(const std::wstring& s, float x, float y, bool centered, bool measure = false);
 IDWriteTextLayout* UiLayout(const std::wstring& s, float maxW, IDWriteTextFormat* fmt = nullptr);
 // one icon-font glyph centred in a box × box square; the font loads on first use, so never in the first frame
 void DrawIcon(wchar_t icon, float l, float t, float box, float size, uint8_t pal);
@@ -445,7 +446,8 @@ enum FindInputEvent : WPARAM { FI_TEXT = 1, FI_KEY, FI_FOCUS };
 void FindOpen();
 void FindClose();
 void FindUpdate(bool keepCurrent);
-void FindRefresh();                  // the text changed under the matches: find them again without scrolling
+// an edit replaced the text [beg, oldEnd) with [beg, newEnd): find the matches again without scrolling (§12.6)
+void FindRefresh(uint32_t beg, uint32_t oldEnd, uint32_t newEnd);
 void FindStep(int dir);
 void FindToggleCase();
 void FindToggleWord();
@@ -584,8 +586,9 @@ void SaveFoundUpdate(const std::wstring& version, const std::wstring& url, const
 
 // ------------------------------------------------------------------------------------------------ uia.cpp
 LRESULT UiaHandleGetObject(WPARAM wp, LPARAM lp);  // WM_GETOBJECT: hand a screen reader the document
-void UiaDocumentChanged();                         // another document was opened
+void UiaDocumentChanged();                         // the text changed: another document, an edit
 void UiaSelectionChanged();                        // the selection moved
+void UiaChromeChanged();                           // edit mode's buttons may have come or gone (§12.8)
 void UiaShutdown();                                // on close
 
 // ------------------------------------------------------------------------------------------------ crash.cpp
@@ -668,6 +671,8 @@ void EditSetContextPoint(float x, float y);  // where the reading menu was opene
 void EditZoomChanged(float from);    // after a zoom change: the bar's scroll make-up and the strip follow the new unit
 void EditDetailsToggled(uint32_t summary);  // a <details> folded in edit mode: the caret leaves what it hid
 std::wstring EditSelectionSource();  // copy as Markdown in edit mode: the source of the selection
+void EditSelectText(uint32_t from, uint32_t to);  // UI Automation's Select in edit mode: through the editor (§12.8)
+void EditRevealText(uint32_t pos);   // ... and its ScrollIntoView: the caret's minimal reveal
 // what the bar shows (editbar.cpp)
 SaveState EditSaveState();           // Q_EDIT_SAVE_STATE
 SaveState EditStatusShown();         // the status slot now: a change shows only after 300 ms (UX-24)
@@ -698,6 +703,11 @@ void BarChanged();                   // something the bar shows changed: repaint
 LRESULT BarToolCenter(UINT cmd);     // Q_EDIT_TOOL for a bar button or the pencil
 int BarCollapse();                   // Q_EDIT_COLLAPSE
 std::wstring BarTipText();           // the tooltip shown now ("" = none)
+// UI Automation (§12.8): the buttons the chrome shows now - the bar's, a strip's, the pencil - in reading order, and what
+// a screen reader calls one of them (keys: its shortcut, "" = none)
+struct ChromeButton { UINT cmd; float l, t, r, b; bool enabled; };  // client DIP
+int EditChromeButtons(ChromeButton* out, int max);
+std::wstring EditChromeName(UINT cmd, std::wstring* keys);
 
 // ------------------------------------------------------------------------------------------------ settings_ui.cpp
 void SettingsOpen();

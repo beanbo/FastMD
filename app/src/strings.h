@@ -62,6 +62,8 @@ enum StrId : uint16_t {
     S_ED_RECOVERY_FIRST,
     // Phase 2b: a refused emission (§7.5), the empty header cell's placeholder (§7.10), a picture on the clipboard (§7.11)
     S_ED_CANT_FORMAT, S_ED_COLUMN_FMT, S_ED_PASTE_PICTURE,
+    // Phase 2c: the pill over a link in edit mode (§2.8, UX-19)
+    S_ED_LINK_TIP,
     S_COUNT
 };
 

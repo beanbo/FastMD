@@ -4595,6 +4595,170 @@ def test_edit_raw_typing():
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ edit mode, phase 2c
+FIND_DOC = ("# Поиск в правке\n\nВступление без искомого.\n\nЕщё вступление.\n\n[Документация проекта](https://example.com/docs)\n\n"
+            + "".join(f"Абзац {k}: слово здесь, и текст дальше.\n\n" for k in range(1, 31)))
+
+
+def find_box_text(hwnd):
+    buf = ctypes.create_unicode_buffer(64)
+    u32.SendMessageW(q(hwnd, "FIND_EDIT"), WM_GETTEXT, 64, ctypes.cast(buf, ctypes.c_void_p).value)
+    return buf.value
+
+
+def pill_right(hwnd, name, at, away):
+    """the right edge of the pill a hover at `at` shows at the bottom left: what changed against a hover at `away`"""
+    post(hwnd, WM_MOUSEMOVE, 0, lp(*away), 0.3)
+    plain = shot(hwnd, name + "-none")
+    post(hwnd, WM_MOUSEMOVE, 0, lp(*at), 0.4)
+    img = shot(hwnd, name)
+    box = (0, img.height - 60, img.width - 24, img.height)
+    diff = ImageChops.difference(plain.crop(box), img.crop(box)).convert("L").point(lambda v: 255 if v > 30 else 0)
+    bb = diff.getbbox()
+    return bb[2] if bb else 0
+
+
+def test_edit_find():
+    """§12.5, §12.6 (2c, T15): with the find box focused, characters reach the box and the document stays as it is; after
+    a click into the document they edit it, the matches follow the text (the current one stays the one it was) and the
+    view does not move; the find bar sits under the toolbar. Over a link the pill says how Ctrl+click opens it (UX-19)"""
+    ok = True
+    doc = OUT / "edit-find.md"
+    doc.write_bytes(FIND_DOC.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    # (the test hooks keep a posted hover: the link's pill is looked at)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_TEST_HOOKS": "1"})
+    try:
+        text = FIND_DOC
+        enter_edit(hwnd, 1, dx=1)
+        cmd(hwnd, "FIND", 0.6)
+        type_text(hwnd, "слово", 0.5)  # posted to the document window: the box has the keyboard
+        box, matches = find_box_text(hwnd), q(hwnd, "MATCHES")
+        ok &= check("edit 2c: with the find box focused, typed characters reach the box, not the document",
+                    box == "слово" and matches == 30 and q(hwnd, "SRC_HASH", 0) == src_hash(text) and
+                    q(hwnd, "EDIT_DIRTY") == 0, f"box {box!r}, {matches} matches, dirty {q(hwnd, 'EDIT_DIRTY')}")
+        shot(hwnd, "116-edit-find")
+        shot_dark(hwnd, "116-edit-find-dark")
+        r = wt.RECT()
+        u32.GetWindowRect(q(hwnd, "FIND_EDIT"), ctypes.byref(r))
+        p = wt.POINT(r.left, r.top)
+        u32.ScreenToClient(hwnd, ctypes.byref(p))
+        bar_bottom = 2 * (q(hwnd, "EDIT_TOOL", CMD["EDIT_EXIT"]) >> 16)  # (the ✕ is centred in the bar)
+        ok &= check("edit 2c: the find bar sits under the toolbar", q(hwnd, "EDIT_BAR") == 100 and p.y > bar_bottom > 0,
+                    f"the box's top {p.y}, the bar's bottom {bar_bottom}")
+        # a click into the document: the keyboard goes there, and typing edits the document
+        cur, y0 = q(hwnd, "CUR_MATCH"), q(hwnd, "SCROLLY")
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 4, q(hwnd, "BLOCK_Y", 1) + 10, 0.4)
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.1)
+        type_text(hwnd, " слово", 0.5)
+        text = text.replace("Вступление без искомого.", "Вступление без искомого. слово", 1)
+        typed = q(hwnd, "SRC_HASH", 0) == src_hash(text)
+        m1, c1, y1 = q(hwnd, "MATCHES"), q(hwnd, "CUR_MATCH"), q(hwnd, "SCROLLY")
+        ok &= check("edit 2c: after a click into the document, typing edits it; the matches follow, the current one is "
+                    "still the one it was (one further on), the view stays", typed and find_box_text(hwnd) == "слово" and
+                    m1 == 31 and c1 == cur + 1 and y1 == y0, f"typed {typed}, matches {m1}, current {cur} → {c1}, "
+                    f"scroll {y0} → {y1}")
+        for _ in range(len(" слово")):
+            post(hwnd, WM_KEYDOWN, VK["back"], 0, 0.08)
+        time.sleep(0.4)
+        text = FIND_DOC
+        m2, c2, y2 = q(hwnd, "MATCHES"), q(hwnd, "CUR_MATCH"), q(hwnd, "SCROLLY")
+        ok &= check("edit 2c: deleting before the current match keeps it current (its offset shifted with the edit)",
+                    q(hwnd, "SRC_HASH", 0) == src_hash(text) and m2 == 30 and c2 == cur and y2 == y0,
+                    f"matches {m2}, current {c2} (want {cur}), scroll {y2}")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.3)  # the find bar first,
+        still = q(hwnd, "EDITING") == 1 and q(hwnd, "FIND_OPEN") == 0
+        # the link's pill in edit mode says how the link opens, then where it goes: longer than reading mode's
+        link = lambda: (q(hwnd, "TEXT_LEFT") + 30, q(hwnd, "BLOCK_Y", 3) + 12)
+        away = lambda: (q(hwnd, "TEXT_LEFT") + 30, q(hwnd, "BLOCK_Y", 6) + 12)
+        edit_light = pill_right(hwnd, "118-edit-link-tip", link(), away())
+        cmd(hwnd, "THEME_DARK", 0.6)
+        edit_dark = pill_right(hwnd, "118-edit-link-tip-dark", link(), away())
+        cmd(hwnd, "THEME_LIGHT", 0.6)
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.5)  # then edit mode
+        ok &= check("edit 2c: Esc closes the find bar first, then leaves edit mode", still and q(hwnd, "EDITING") == 0)
+        wait_for(lambda: q(hwnd, "EDIT_BAR") == 0, 2.0)
+        reading = pill_right(hwnd, "118-edit-link-tip-reading", link(), away())
+        ok &= check("edit 2c: over a link in edit mode the pill says how Ctrl+click opens it, before the address (light "
+                    "and dark)", edit_light > reading + 120 and edit_dark > reading + 120 and reading > 60,
+                    f"the pill ends at {edit_light} / {edit_dark} px, reading mode's (the address only) at {reading}")
+    finally:
+        close_edit(proc, hwnd)
+    return ok
+
+
+OUTLINE_DOC = "# Обзор\n\n" + "".join(f"## Раздел {k}\n\nТекст раздела {k} для набора.\n\n" for k in range(1, 31))
+
+
+def test_edit_outline():
+    """§12.7 (2c, R21): while editing the outline keeps its list where the reader left it - no re-centring on entry or
+    while typing - and the current heading stays; a heading made by typing joins the list; deleting the only heading
+    neither undocks the panel nor moves the column; after leaving the panel follows the headings again"""
+    ok = True
+    doc = OUT / "edit-outline.md"
+    doc.write_bytes(OUTLINE_DOC.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        text = OUTLINE_DOC
+        if not q(hwnd, "TOC_OPEN"):
+            cmd(hwnd, "TOC", 0.8)
+        docked, count = q(hwnd, "TOC_DOCKED"), q(hwnd, "TOC_COUNT")
+        wheel(hwnd, 100, 400, -3, wait=0.4)  # the reader scrolled the list: its first items out of sight
+        y_item = q(hwnd, "TOC_ITEM_Y", 0)
+        enter_edit(hwnd, 2, dx=1)
+        settle(hwnd)
+        cur, y_entry = q(hwnd, "TOC_CURRENT"), q(hwnd, "TOC_ITEM_Y", 0)
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.1)
+        type_text(hwnd, " и ещё немного", 0.5)
+        text = text.replace("Текст раздела 1 для набора.", "Текст раздела 1 для набора. и ещё немного", 1)
+        ok &= check("edit 2c: the outline keeps its list where the reader scrolled it on entry and while typing; the "
+                    "current heading stays", docked == 1 and y_item < 0 and y_entry == y_item and
+                    q(hwnd, "TOC_ITEM_Y", 0) == y_item and q(hwnd, "TOC_CURRENT") == cur and
+                    q(hwnd, "SRC_HASH", 0) == src_hash(text), f"docked {docked}, item 0 at {y_item} → {y_entry} → "
+                    f"{q(hwnd, 'TOC_ITEM_Y', 0)}, current {cur} → {q(hwnd, 'TOC_CURRENT')}")
+        shot(hwnd, "117-edit-outline")
+        shot_dark(hwnd, "117-edit-outline-dark")
+        # a heading typed at a paragraph's start joins the list; the undo takes it out again
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        type_text(hwnd, "## ", 0.5)
+        grown = q(hwnd, "TOC_COUNT") == count + 1 and q(hwnd, "TOC_DOCKED") == 1
+        for _ in range(3):
+            if q(hwnd, "SRC_HASH", 0) != src_hash(text):
+                cmd(hwnd, "UNDO", 0.3)
+        ok &= check("edit 2c: a heading made by typing joins the list, the undo takes it out",
+                    grown and q(hwnd, "TOC_COUNT") == count and q(hwnd, "SRC_HASH", 0) == src_hash(text),
+                    f"grown {grown}, count {q(hwnd, 'TOC_COUNT')} (was {count})")
+        cmd(hwnd, "SAVE", 0.4)
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.5)
+    finally:
+        close_edit(proc, hwnd)
+    # the only heading deleted with the keys: the panel stays docked and the column where it was until edit mode ends
+    doc = OUT / "edit-outline-one.md"
+    doc.write_bytes("# Единственный заголовок\n\nАбзац под ним.\n".encode("utf-8"))
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        if not q(hwnd, "TOC_OPEN"):
+            cmd(hwnd, "TOC", 0.8)
+        docked, left = q(hwnd, "TOC_DOCKED"), q(hwnd, "TEXT_LEFT")
+        enter_edit(hwnd, 0, dx=1)
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        post(hwnd, WM_KEYDOWN, VK["back"], 0, 0.5)  # (a heading's start: it becomes a paragraph)
+        gone = q(hwnd, "SRC_HASH", 0) == src_hash("Единственный заголовок\n\nАбзац под ним.\n")
+        ok &= check("edit 2c: deleting the only heading leaves the outline docked and the column in place",
+                    docked == 1 and gone and q(hwnd, "TOC_DOCKED") == 1 and q(hwnd, "TEXT_LEFT") == left and
+                    q(hwnd, "TOC_COUNT") == 0, f"docked {docked} → {q(hwnd, 'TOC_DOCKED')}, heading gone {gone}, "
+                    f"left {left} → {q(hwnd, 'TEXT_LEFT')}, items {q(hwnd, 'TOC_COUNT')}")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.6)
+        ok &= check("edit 2c: after leaving, the panel follows the headings: none left, it goes",
+                    q(hwnd, "EDITING") == 0 and q(hwnd, "TOC_DOCKED") == 0 and q(hwnd, "TEXT_LEFT") != left,
+                    f"docked {q(hwnd, 'TOC_DOCKED')}, left {q(hwnd, 'TEXT_LEFT')}")
+    finally:
+        close_edit(proc, hwnd)
+        del_reg("Outline")
+    return ok
+
+
 def main():
     OUT.mkdir(exist_ok=True)
     reset_profile()
@@ -4632,7 +4796,8 @@ def main():
              ("edit_chrome_zoom", test_edit_chrome_zoom), ("edit_modal", test_edit_modal),
              ("edit_recovery_guards", test_edit_recovery_guards), ("edit_structure", test_edit_structure),
              ("edit_selection", test_edit_selection), ("edit_paste_plain", test_edit_paste_plain),
-             ("edit_table_typing", test_edit_table_typing), ("edit_raw_typing", test_edit_raw_typing)]
+             ("edit_table_typing", test_edit_table_typing), ("edit_raw_typing", test_edit_raw_typing),
+             ("edit_find", test_edit_find), ("edit_outline", test_edit_outline)]
     only = [n for n in os.environ.get("FASTMD_ONLY", "").split(",") if n]  # e.g. FASTMD_ONLY=update,settings
     for name, t in tests:
         if not only or name in only:

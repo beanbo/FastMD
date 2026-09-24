@@ -502,6 +502,7 @@ void StripShow(int kind) {
     g_sHot = -1;
     SetStripH();
     BarChanged();
+    UiaChromeChanged();
 }
 
 void StripHide(int kind) {
@@ -510,6 +511,7 @@ void StripHide(int kind) {
     g_sHot = -1;
     SetStripH();
     BarChanged();
+    UiaChromeChanged();
 }
 
 void StripHideEditing() {
@@ -640,6 +642,48 @@ LRESULT BarToolCenter(UINT cmd) {
 }
 
 int BarCollapse() { return Level(); }
+
+// UI Automation's view of the chrome (§12.8): what is on screen, left to right and top to bottom - the bar, the strip
+// under it (or at the top in reading mode), the pencil
+int EditChromeButtons(ChromeButton* out, int max) {
+    int n = 0;
+    auto add = [&](UINT cmd, float l, float t, float r, float b, bool en) {
+        if (n < max) out[n++] = ChromeButton{cmd, l, t, r, b, en};
+    };
+    if (BarShown()) {
+        Layout L = Compute(Level());
+        const float u = U(), bt = BarTop() + (kBarH - kBtn) * 0.5f * u;
+        for (int k = 0; k < kCount; k++)
+            if (L.items[k].shown) add(kDefs[k].cmd, L.items[k].l, bt, L.items[k].r, bt + kBtn * u, Enabled(k));
+    }
+    if (int kind = TopStrip(); kind && !g.firstFrame)
+        for (const StripButton& b : Buttons(kind)) add(b.cmd, b.l, b.t, b.r, b.b, true);
+    float l, t, r, b;
+    if (PencilRect(&l, &t, &r, &b)) add(CMD_EDIT_TOGGLE, l, t, r, b, true);
+    return n;
+}
+
+// a button's name is its tooltip without the shortcut, which is the accelerator key; the status slot's is the status
+// in full, a strip button's its label
+std::wstring EditChromeName(UINT cmd, std::wstring* keys) {
+    keys->clear();
+    if (cmd == CMD_EDIT_TOGGLE && !g.editing) {
+        *keys = L"F2";
+        return Tr(S_ED_PENCIL_TIP);
+    }
+    for (int k = 0; k < kCount; k++)
+        if (kDefs[k].cmd == cmd) {
+            *keys = KeyLabel(kDefs[k]);
+            return k == kStatus ? EditStatusTip() : std::wstring(Tr(kDefs[k].tip));
+        }
+    std::wstring text;
+    uint8_t accent;
+    std::vector<StripButton> b;
+    Describe(TopStrip(), &text, &accent, &b);
+    for (const StripButton& x : b)
+        if (x.cmd == cmd) return Tr(x.label);
+    return L"";
+}
 
 void DrawEditChrome(int layer) {
     if (g.firstFrame) return;

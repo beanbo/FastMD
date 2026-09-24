@@ -35,7 +35,7 @@ add_executable(FastMD WIN32
     src/layout.cpp src/canvas_gdi.cpp src/canvas_print.cpp src/print.cpp
     src/highlight.cpp src/theme.cpp src/util.cpp
     src/find.cpp src/toc.cpp src/home.cpp src/store.cpp src/shell.cpp src/settings_ui.cpp src/strings.cpp
-    src/copy.cpp src/drag.cpp src/crash.cpp src/update.cpp src/uia.cpp src/tasks.cpp
+    src/copy.cpp src/drag.cpp src/crash.cpp src/update.cpp src/tasks.cpp
     third_party/md4c/md4c.c
     res/fastmd.rc)
 
@@ -49,7 +49,8 @@ set_source_files_properties(third_party/md4c/md4c.c PROPERTIES COMPILE_OPTIONS "
 # Edit mode's sources favour size (docs/EDIT-MODE.md §1 principle 3): none of them is on a hot path except the map
 # queries, which are measured, and the exe pays ~1.5 ms per MB on every launch whether edit mode is used or not. They
 # are compiled on their own with /O1 (the rest of the program keeps /O2) and linked into the exe with everything else.
-add_library(fastmd_edit OBJECT src/editcore.cpp src/editfile.cpp src/edit.cpp src/editbar.cpp)
+# The screen-reader provider joins them: it runs only while a screen reader asks, one call at a time.
+add_library(fastmd_edit OBJECT src/editcore.cpp src/editfile.cpp src/edit.cpp src/editbar.cpp src/uia.cpp)
 target_include_directories(fastmd_edit PRIVATE ${CMAKE_BINARY_DIR}/generated)
 target_compile_definitions(fastmd_edit PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS
     MD4C_USE_UTF16)

@@ -729,17 +729,20 @@ void DrawIcon(wchar_t icon, float l, float t, float box, float size, uint8_t pal
     L->Release();
 }
 
-void DrawPill(const std::wstring& s, float cx, float y, bool centered) {
+float DrawPill(const std::wstring& s, float cx, float y, bool centered, bool measure) {
     IDWriteTextLayout* L = UiLayout(s, std::max(100.f, ViewW() - 48.f));
-    if (!L) return;
+    if (!L) return 0.f;
     DWRITE_TEXT_METRICS m{};
     L->GetMetrics(&m);
     float w = std::ceil(m.width) + 24.f, h = 30.f;
     float x = centered ? std::floor(cx - w * 0.5f) : cx;
-    g.canvas->FillRoundRect(x, y, x + w, y + h, 8.f, P_OVERLAY_BG);
-    g.canvas->StrokeRoundRect(x, y, x + w, y + h, 8.f, 1.f, P_OVERLAY_BORDER);
-    g.canvas->Text(L, x + 12.f, y + (h - m.height) * 0.5f, P_OVERLAY_TEXT);
+    if (!measure) {
+        g.canvas->FillRoundRect(x, y, x + w, y + h, 8.f, P_OVERLAY_BG);
+        g.canvas->StrokeRoundRect(x, y, x + w, y + h, 8.f, 1.f, P_OVERLAY_BORDER);
+        g.canvas->Text(L, x + 12.f, y + (h - m.height) * 0.5f, P_OVERLAY_TEXT);
+    }
     L->Release();
+    return w;
 }
 
 static void DrawScrollbar() {
@@ -948,12 +951,26 @@ static void DrawChrome() {
     DrawToc();             // the drawer over them all; docked, the panel is beside them
     if (g.findOpen) DrawFindBar();
     const std::wstring* pill = nullptr;
+    std::wstring linkTip;
     if (!g.tip.empty()) pill = &g.tip;
-    else if (g.hoverLink >= 0 && (size_t)g.hoverLink < g.doc.links.size() && !g.selecting) pill = &g.doc.links[g.hoverLink];
-    else if (g.focusLink >= 0 && (size_t)g.focusLink < g.doc.links.size()) pill = &g.doc.links[g.focusLink];
-    if (pill && !g.path.empty()) DrawPill(*pill, DocLeft() + 10.f, ViewH() - 40.f, false);
-    else if (pill) DrawPill(*pill, 10.f, ViewH() - 40.f, false);
-    if (!g.toast.empty() && GetTickCount() < g.toastUntil) DrawPill(g.toast, DocLeft() + DocW() * 0.5f, ViewH() - 64.f, true);
+    else if (g.hoverLink >= 0 && (size_t)g.hoverLink < g.doc.links.size() && !g.selecting) {
+        pill = &g.doc.links[g.hoverLink];
+        if (g.editing) {  // a click there places the caret: say how the link opens, then where it goes (UX-19)
+            linkTip = Tr(S_ED_LINK_TIP) + (L"  ·  " + *pill);
+            pill = &linkTip;
+        }
+    } else if (g.focusLink >= 0 && (size_t)g.focusLink < g.doc.links.size()) pill = &g.doc.links[g.focusLink];
+    float pillR = -1.f;
+    if (pill) {
+        float x = g.path.empty() ? 10.f : DocLeft() + 10.f;
+        pillR = x + DrawPill(*pill, x, ViewH() - 40.f, false);
+    }
+    if (!g.toast.empty() && GetTickCount() < g.toastUntil) {
+        // a long pill at the bottom left (a link's in edit mode) reaches under the toast: the toast goes a row up
+        float cx = DocLeft() + DocW() * 0.5f, y = ViewH() - 64.f;
+        if (pillR > cx - DrawPill(g.toast, cx, y, true, true) * 0.5f) y -= 30.f;
+        DrawPill(g.toast, cx, y, true);
+    }
     DrawEditChrome(1);     // a toolbar button's tooltip, over everything
 }
 

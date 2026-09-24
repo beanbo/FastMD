@@ -1133,6 +1133,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         OnWheel(GET_WHEEL_DELTA_WPARAM(wp), GET_KEYSTATE_WPARAM(wp), GET_X(lp), GET_Y(lp), msg == WM_MOUSEHWHEEL);
         return msg == WM_MOUSEHWHEEL ? TRUE : 0;
     case WM_KEYDOWN:
+    case WM_KEYUP:
+        // edit mode: over a link the hand means "Ctrl+click opens it", so it comes and goes with Ctrl (§2.8)
+        if (wp == VK_CONTROL && g.editing && g.hoverLink >= 0)
+            SetCursor(LoadCursorW(nullptr, msg == WM_KEYDOWN ? IDC_HAND : IDC_IBEAM));
+        if (msg == WM_KEYUP) break;
         if (!g.ready || g.firstFrame) return 0;
         if (OnKeyDown(wp, GetKeyState(VK_CONTROL) < 0, GetKeyState(VK_SHIFT) < 0, GetKeyState(VK_MENU) < 0)) return 0;
         break;

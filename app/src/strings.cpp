@@ -281,6 +281,8 @@ const Pair kStr[] = {
     {L"Столбец %d", L"Column %d"},
     {L"Вставка картинок из буфера пока не поддерживается — перетащите файл сюда",
      L"Pasting pictures from the clipboard is not supported yet — drop the file here"},
+    // Phase 2c
+    {L"Ctrl+щелчок — открыть ссылку", L"Ctrl+click — open link"},
 };
 static_assert(std::size(kStr) == S_COUNT, "one entry per StrId");
 UiLang g_lang = UL_RU;

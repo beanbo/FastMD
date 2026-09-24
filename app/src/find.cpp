@@ -289,10 +289,13 @@ float CountAreaW() {  // fixed width: the text box does not move while the count
 }  // namespace
 
 // ------------------------------------------------------------------------------------------------ matching
-// The matches of the query in the current text. true = there are some and g.curMatch is set: the one at or after the
-// previous current match (keepCurrent), else the first at or below the top of the viewport.
-static bool FindMatches(bool keepCurrent) {
-    uint32_t prev = (g.curMatch >= 0 && (size_t)g.curMatch < g.matches.size()) ? g.matches[g.curMatch] : UINT32_MAX;
+static uint32_t CurrentMatch() {
+    return (g.curMatch >= 0 && (size_t)g.curMatch < g.matches.size()) ? g.matches[g.curMatch] : UINT32_MAX;
+}
+
+// The matches of the query in the current text. true = there are some and g.curMatch is set: the one at or after prev
+// (keepCurrent), else the first at or below the top of the viewport.
+static bool FindMatches(bool keepCurrent, uint32_t prev) {
     g.matches.clear();
     g.curMatch = -1;
     if (g.findQuery.empty() || g.doc.text.empty()) return false;
@@ -327,13 +330,17 @@ static bool FindMatches(bool keepCurrent) {
 }
 
 void FindUpdate(bool keepCurrent) {
-    if (FindMatches(keepCurrent)) FindStep(0);
+    if (FindMatches(keepCurrent, CurrentMatch())) FindStep(0);
     else Invalidate();
 }
 
-// An edit changed the text: the marks follow it, but the view stays where the reader is working (§12.6).
-void FindRefresh() {
-    FindMatches(true);
+// An edit replaced the text [beg, oldEnd) with [beg, newEnd): the marks follow it, and the current match stays the one
+// it was - shifted with the text after the edit, the first one after the edit's start when the edit took it - but the
+// view stays where the reader is working (§12.6).
+void FindRefresh(uint32_t beg, uint32_t oldEnd, uint32_t newEnd) {
+    uint32_t prev = CurrentMatch();
+    if (prev != UINT32_MAX && prev >= beg) prev = prev >= oldEnd ? prev - oldEnd + newEnd : beg;
+    FindMatches(true, prev);
     Invalidate();
 }
 

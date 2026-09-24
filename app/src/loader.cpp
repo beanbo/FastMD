@@ -1065,6 +1065,7 @@ void OnFullDoc() {
     StartMeasure();
     StartImages();
     Invalidate();
+    UiaDocumentChanged();  // a screen reader read the prefix: the rest of the document is there now (§12.8)
     EditOnFullDoc();  // edit mode was asked for while this was on its way: it is entered now
 }
 
