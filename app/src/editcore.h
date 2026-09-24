@@ -59,6 +59,8 @@ struct EditResult {
 // a table position must name its cell. Clusters are the caller's business (ClusterFn).
 bool     CaretStop(const Doc&, const TextPos&);
 enum MapMode { MAP_CARET, MAP_OUTER_START, MAP_OUTER_END, MAP_INNER_START };
+// UINT32_MAX when there is nothing to map: no map, no such block or cell, a synthesized block. An object atom (a
+// picture block, an HTML block, front matter) maps to its first line (MAP_OUTER_END: the end of its last line).
 uint32_t SrcOfText(const Doc&, const std::wstring& src, const TextPos&, MapMode);
 // dir: which way to go from a source position that has no text of its own (a delimiter, a prefix, a gap between
 // blocks): -1 to the text boundary before it, +1 to the one after. trailCols (may be null): columns of trailing blanks

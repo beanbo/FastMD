@@ -161,6 +161,10 @@ def main():
     dll_path = HERE.parent / "build" / "Release" / "fastmd-preview.dll"
     if "--dll" in args:
         dll_path = pathlib.Path(args[args.index("--dll") + 1])
+    if not (dll_path.parent / "fastmd-tex.dll").exists():
+        # the DLL looks for the formula library beside itself: without it formulas stay source text, and math.md
+        # differs from a baseline taken with it for that reason alone
+        print(f"[WARN] no fastmd-tex.dll beside {dll_path}: formulas will not be typeset")
     ole.CoInitializeEx(None, 2)  # COINIT_APARTMENTTHREADED, as a shell host would be (WIC needs COM)
     dll = ctypes.WinDLL(str(dll_path))
     dll.DllGetClassObject.restype = ctypes.c_long

@@ -152,7 +152,9 @@ struct Builder {
     bool inCell = false;
 
     // ---- edit mode's text <-> source map (docs/EDIT-MODE.md §4.4). Idle unless `map`: a reading-mode parse takes
-    // none of these paths, and md4c's hooks are not even installed then.
+    // none of these paths, and md4c's hooks are not even installed then. The bigger map-only methods are kept out of
+    // line (MAPFN), so reading mode's hot paths do not carry their code inlined.
+#define MAPFN __declspec(noinline)
     bool map = false;
     int noSegs = 0;            // > 0: text appended now gets no segment (HTML-block text, front matter, tag atoms)
     struct Extent {
@@ -238,7 +240,7 @@ struct Builder {
     // last `indent` columns of the blanks before `beg` (tab stops of 4 from the line start). A space there is PLAIN, a
     // tab an atom as wide as it is, and a tab that is partly a container's indentation is split (SEGF_SPLITTAB). The
     // previous line's "\n" atom ends where this line's code indentation starts (line end + container prefix).
-    void OnVerbatimLine(uint32_t beg, uint32_t end, unsigned indent) {
+    MAPFN void OnVerbatimLine(uint32_t beg, uint32_t end, unsigned indent) {
         if (inHtmlBlock || !collecting || leafKind != BK_CODE || noSegs) return;
         beg += mdBase;
         end += mdBase;
@@ -291,7 +293,7 @@ struct Builder {
 
     // Span delimiters: the enter hook comes before md4c's enter callback, the leave hook after its leave callback, so
     // the text a span adds itself (a picture's U+FFFC, a footnote's "[n]", a formula's U+FFFC) lies between the two.
-    void OnSpanExtent(MD_SPANTYPE type, int enter, uint32_t beg, uint32_t end) {
+    MAPFN void OnSpanExtent(MD_SPANTYPE type, int enter, uint32_t beg, uint32_t end) {
         beg += mdBase;
         end += mdBase;
         if (enter) EnsureLeaf();
@@ -380,7 +382,7 @@ struct Builder {
         sp.closeBeg = sp.closeEnd = std::max(at, sp.openEnd);
         sp.flags |= SF_UNCLOSED;
     }
-    void CutOpenSpans(uint32_t at) {
+    MAPFN void CutOpenSpans(uint32_t at) {
         uint32_t tNow = (uint32_t)d.text.size();
         for (size_t m = openSpans.size(); m-- > 0;) CutSpan(openSpans[m], at, tNow);
         openSpans.clear();
@@ -453,7 +455,7 @@ struct Builder {
 
     // An inline HTML tag in map mode: what HtmlInline adds (a <br>'s "\n", an <img>'s U+FFFC) is one atom over the
     // tag's source; formatting tags become pseudo-spans.
-    void MapHtmlTag(const HtmlTag& tag, const MD_CHAR* s, MD_SIZE n) {
+    MAPFN void MapHtmlTag(const HtmlTag& tag, const MD_CHAR* s, MD_SIZE n) {
         bool inSrc = srcBase && s >= srcBase && s < srcEnd;
         uint32_t so = inSrc ? (uint32_t)(s - srcBase) : srcCur;
         if (tag.name.empty()) {  // a comment
@@ -481,7 +483,7 @@ struct Builder {
     }
 
     // Segments for a chunk AppendText has just added: [start, start+len) of the text, from s[0..n).
-    void MapChunk(uint32_t start, uint32_t len, const MD_CHAR* s, MD_SIZE n, bool inSrc, bool isEntity, bool raw) {
+    MAPFN void MapChunk(uint32_t start, uint32_t len, const MD_CHAR* s, MD_SIZE n, bool inSrc, bool isEntity, bool raw) {
         if (!SegsOn()) return;
         if (inSrc) {
             uint32_t so = (uint32_t)(s - srcBase);
@@ -606,7 +608,7 @@ struct Builder {
     }
 
     // The source record of the leaf just emitted, from its extent (§4.4's block table). Clears the extent.
-    void LeafSrc() {
+    MAPFN void LeafSrc() {
         BlockSrc& bs = d.blockSrc.back();
         Extent e = ext;
         ext.set = false;
@@ -744,7 +746,7 @@ struct Builder {
     // it go; a PLAIN segment across its end is cut there; everything after moves with the text. The content then
     // starts at the first source character left (alertBeg).
     uint32_t alertBeg = UINT32_MAX;
-    void AlertMap(uint32_t tagEnd, int32_t shift) {
+    MAPFN void AlertMap(uint32_t tagEnd, int32_t shift) {
         std::vector<SrcSeg> kept;
         for (size_t i = segStart; i < d.segs.size(); i++) {
             SrcSeg sg = d.segs[i];
@@ -1375,7 +1377,7 @@ struct Builder {
     }
     // A list item: md4c (patched) hands over its marker's offset, or for a task item the offset of the mark between
     // the brackets - then the marker is found by walking back from '[' over the blanks.
-    void PushItem(const MD_BLOCK_LI_DETAIL* li, bool tight) {
+    MAPFN void PushItem(const MD_BLOCK_LI_DETAIL* li, bool tight) {
         ContainerSrc c;
         c.kind = CT_ITEM;
         c.tight = tight;
@@ -1487,8 +1489,9 @@ struct Builder {
                 pendTask = mdBase + (uint32_t)li->task_mark_offset;
             } else if (list.type == C_OL) { pendMarker = MK_NUMBER; pendNumber = list.next++; }
             else pendMarker = MK_BULLET;
-            stack.push_back(Ctx{C_LI, list.tight, false, 0, 0, -1});
-            if (map) PushItem(li, list.tight);
+            bool tight = list.tight;  // read before the push: it may move the stack, and `list` with it (found by ASan)
+            stack.push_back(Ctx{C_LI, tight, false, 0, 0, -1});
+            if (map) PushItem(li, tight);
             break;
         }
         case MD_BLOCK_HR:
@@ -1712,7 +1715,7 @@ struct Builder {
     // prefix), where it ends and where its pipes are. md4c reports cells only, so a row is found from its first present
     // cell; the delimiter row, which md4c never reports, is the line after the header, split on '|'. A cell a short
     // row lacks gets its row's end as its place.
-    void TableRows(int ti) {
+    MAPFN void TableRows(int ti) {
         const Table& tb = d.tables[ti];
         TableSrc& ts = d.tableSrc[ti];
         ts.rows.clear();
@@ -1982,6 +1985,8 @@ struct Builder {
         return 0;
     }
 };
+
+#undef MAPFN
 
 int cbEnter(MD_BLOCKTYPE t, void* det, void* u) { return ((Builder*)u)->Enter(t, det); }
 int cbLeave(MD_BLOCKTYPE t, void* det, void* u) { return ((Builder*)u)->Leave(t, det); }
