@@ -217,6 +217,65 @@ def clipboard_has(fmt):
         u32.CloseClipboard()
 
 
+k32.GlobalAlloc.restype = wt.HGLOBAL
+k32.GlobalAlloc.argtypes = [wt.UINT, ctypes.c_size_t]
+u32.SetClipboardData.restype = wt.HANDLE
+u32.SetClipboardData.argtypes = [wt.UINT, wt.HANDLE]
+
+
+u32.CreateWindowExW.restype = wt.HWND
+u32.CreateWindowExW.argtypes = [wt.DWORD, wt.LPCWSTR, wt.LPCWSTR, wt.DWORD, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                ctypes.c_int, wt.HWND, wt.HMENU, wt.HINSTANCE, wt.LPVOID]
+u32.OpenClipboard.argtypes = [wt.HWND]
+u32.GetMessageW.argtypes = [ctypes.POINTER(wt.MSG), wt.HWND, wt.UINT, wt.UINT]
+u32.DispatchMessageW.argtypes = [ctypes.POINTER(wt.MSG)]
+CLIP_OWNER = []  # a message-only window of this process: the clipboard's owner while the test puts text on it
+
+
+def clip_owner():
+    """the window set_clipboard opens the clipboard with. Its own thread pumps its messages: the next owner's
+    EmptyClipboard sends it WM_DESTROYCLIPBOARD and waits for the answer - a window of the test's thread, which sleeps,
+    would hold the app up in its Cut until the test's next SendMessage"""
+    if not CLIP_OWNER:
+        import threading
+        ready = threading.Event()
+
+        def pump():
+            CLIP_OWNER.append(u32.CreateWindowExW(0, "STATIC", "fastmd-uitest-clipboard", 0, 0, 0, 0, 0,
+                                                  wt.HWND(-3), None, None, None))  # HWND_MESSAGE
+            ready.set()
+            msg = wt.MSG()
+            while u32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                u32.DispatchMessageW(ctypes.byref(msg))
+
+        threading.Thread(target=pump, daemon=True).start()
+        ready.wait(2.0)
+    return CLIP_OWNER[0] if CLIP_OWNER else None
+
+
+def set_clipboard(text):
+    """plain text on the clipboard (CF_UNICODETEXT), as another program would put it there (§13.6). The clipboard is
+    opened with a window of this process: opened with none, EmptyClipboard leaves it ownerless and SetClipboardData
+    fails"""
+    data = text.encode("utf-16-le") + b"\0\0"
+    owner = clip_owner()
+    for _ in range(20):
+        if u32.OpenClipboard(owner):
+            break
+        time.sleep(0.05)
+    else:
+        return False
+    try:
+        u32.EmptyClipboard()
+        h = k32.GlobalAlloc(0x0002, len(data))  # GMEM_MOVEABLE
+        p = k32.GlobalLock(h)
+        ctypes.memmove(p, data, len(data))
+        k32.GlobalUnlock(h)
+        return bool(u32.SetClipboardData(13, h))
+    finally:
+        u32.CloseClipboard()
+
+
 def post(hwnd, msg, wp=0, lpv=0, wait=0.06):
     u32.PostMessageW(hwnd, msg, wp, lpv)
     time.sleep(wait)
@@ -4181,6 +4240,361 @@ def test_edit_recovery_guards():
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ edit mode, phase 2b
+STRUCT_DOC = ("# Структура\n\nАбзац раз.\n\n- пункт а\n- пункт б\n- \n- пункт в\n\n"
+              "| x | y |\n|---|---|\n|  | z |\n")
+
+
+def active(hwnd, bit):
+    return bool(q(hwnd, "EDIT_ACTIVE") & (1 << bit))
+
+
+def test_edit_structure():
+    """§6.7, §7.6-§7.8 (2b): Enter at a paragraph's end makes a phantom row and writes nothing, typing makes it real;
+    Enter in a list; Tab in a list; ↑/↓ stop on an empty item and an empty cell; ↓ out of a table that ends the document
+    and a click below the last block make a phantom; Backspace at a heading's start; Enter in a mixed-EOL file writes
+    the line's own ending"""
+    ok = True
+    doc = OUT / "edit-structure.md"
+    doc.write_bytes(STRUCT_DOC.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        text = STRUCT_DOC
+        enter_edit(hwnd, 1, dx=1)
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.1)
+        post(hwnd, WM_KEYDOWN, VK["return"], 0, 0.4)
+        c = caret_xy(hwnd)
+        ok &= check("edit 2b: Enter at a paragraph's end: a phantom row after it with the caret in it, the file unchanged",
+                    q(hwnd, "EDIT_PHANTOM", 0) == 1 and active(hwnd, 15) and q(hwnd, "SRC_HASH", 0) == src_hash(text) and
+                    q(hwnd, "EDIT_DIRTY") == 0 and c and q(hwnd, "BLOCK_Y", 1) + 20 < c[1] < q(hwnd, "BLOCK_Y", 2),
+                    f'phantom {q(hwnd, "EDIT_PHANTOM", 0)}, caret {c}, blocks at {q(hwnd, "BLOCK_Y", 1)}, '
+                    f'{q(hwnd, "BLOCK_Y", 2)}')
+        shot(hwnd, "112-edit-phantom")
+        shot_dark(hwnd, "112-edit-phantom-dark")
+        type_text(hwnd, "Новый", 0.3)
+        text = text.replace("Абзац раз.\n", "Абзац раз.\n\nНовый\n", 1)
+        ok &= check("edit 2b: typing makes the phantom real: a paragraph of its own, blank lines around it",
+                    q(hwnd, "SRC_HASH", 0) == src_hash(text) and q(hwnd, "EDIT_PHANTOM", 0) == -1,
+                    f'len {q(hwnd, "SRC_LEN", 0)} vs {u16(text)}, phantom {q(hwnd, "EDIT_PHANTOM", 0)}')
+        # Enter at an item's end writes an empty item (undone again)
+        post(hwnd, WM_KEYDOWN, VK["down"], 0, 0.2)
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.1)
+        post(hwnd, WM_KEYDOWN, VK["return"], 0, 0.4)
+        s1 = text.replace("- пункт а\n", "- пункт а\n- \n", 1)
+        ok &= check("edit 2b: Enter at a list item's end writes an empty item, the caret in it",
+                    q(hwnd, "SRC_HASH", 0) == src_hash(s1) and q(hwnd, "EDIT_CARET_SRC") == s1.index("- пункт а\n- \n") + 12,
+                    f'caret {q(hwnd, "EDIT_CARET_SRC")}, len {q(hwnd, "SRC_LEN", 0)} vs {u16(s1)}')
+        cmd(hwnd, "UNDO", 0.3)
+        # Tab nests an item under the one before it (undone again)
+        post(hwnd, WM_KEYDOWN, VK["down"], 0, 0.2)
+        post(hwnd, WM_KEYDOWN, VK["tab"], 0, 0.4)
+        s2 = text.replace("- пункт б\n", "  - пункт б\n", 1)
+        ok &= check("edit 2b: Tab in a list item nests it under the item before", q(hwnd, "SRC_HASH", 0) == src_hash(s2),
+                    f'len {q(hwnd, "SRC_LEN", 0)} vs {u16(s2)}')
+        cmd(hwnd, "UNDO", 0.3)
+        undone = q(hwnd, "SRC_HASH", 0) == src_hash(text)
+        # ↓ from «пункт б»: the empty item, «пункт в», the table's first row, the empty cell of its second
+        post(hwnd, WM_KEYDOWN, VK["down"], 0, 0.2)
+        empty_item = q(hwnd, "EDIT_CARET_SRC") == text.index("- \n- пункт в") + 2
+        post(hwnd, WM_KEYDOWN, VK["down"], 0, 0.2)
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        post(hwnd, WM_KEYDOWN, VK["down"], 0, 0.2)
+        x_cell = text.index("| x |") + 2  # (the column the caret keeps is right of the narrow «x»: before or after it)
+        row0 = x_cell <= q(hwnd, "EDIT_CARET_SRC") <= x_cell + 1
+        post(hwnd, WM_KEYDOWN, VK["down"], 0, 0.2)
+        at, row1 = q(hwnd, "EDIT_CARET_SRC"), text.index("|  | z |")
+        empty_cell = row1 < at < row1 + 4 and active(hwnd, 12)
+        ok &= check("edit 2b: ↓ stops on an empty item and on an empty cell (the undos restored the text)",
+                    undone and empty_item and row0 and empty_cell, f"undone {undone}, empty item {empty_item}, row 0 "
+                    f"{row0}, caret {at} (row at {row1}), active {q(hwnd, 'EDIT_ACTIVE'):#x}")
+        post(hwnd, WM_KEYDOWN, VK["up"], 0, 0.2)
+        up = x_cell <= q(hwnd, "EDIT_CARET_SRC") <= x_cell + 1
+        post(hwnd, WM_KEYDOWN, VK["down"], 0, 0.2)
+        post(hwnd, WM_KEYDOWN, VK["down"], 0, 0.2)  # (§6.7: first to the last stop, the table's last cell's end)
+        at_last = q(hwnd, "EDIT_CARET_SRC") == text.index("z |") + 1 and q(hwnd, "EDIT_PHANTOM", 0) == -1
+        post(hwnd, WM_KEYDOWN, VK["down"], 0, 0.4)
+        last = q(hwnd, "BLOCK_COUNT") - 1
+        ok &= check("edit 2b: ↑ back into the row above; ↓ to the last stop, then out of a table that ends the document: a "
+                    "phantom after it", up and at_last and q(hwnd, "EDIT_PHANTOM", 0) == last and active(hwnd, 15) and
+                    q(hwnd, "SRC_HASH", 0) == src_hash(text), f'up {up}, at the last stop {at_last}, phantom '
+                    f'{q(hwnd, "EDIT_PHANTOM", 0)} (last {last})')
+        # the caret elsewhere: the phantom goes; a click well below the last block brings one back
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 1, q(hwnd, "BLOCK_Y", 1) + 10, 0.3)
+        gone = q(hwnd, "EDIT_PHANTOM", 0) == -1
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 40, q(hwnd, "BLOCK_Y", last) + 160, 0.4)
+        ok &= check("edit 2b: a click below the last block: a phantom after it, the caret in it",
+                    gone and q(hwnd, "EDIT_PHANTOM", 0) == last and active(hwnd, 15), f'gone {gone}, phantom '
+                    f'{q(hwnd, "EDIT_PHANTOM", 0)}')
+        # Backspace at a heading's start makes it a paragraph
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 1, q(hwnd, "BLOCK_Y", 0) + 14, 0.3)
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        post(hwnd, WM_KEYDOWN, VK["back"], 0, 0.4)
+        text = text[2:]
+        ok &= check("edit 2b: Backspace at a heading's start makes it a paragraph",
+                    q(hwnd, "SRC_HASH", 0) == src_hash(text) and q(hwnd, "EDIT_CARET_SRC") == 0,
+                    f'caret {q(hwnd, "EDIT_CARET_SRC")}, len {q(hwnd, "SRC_LEN", 0)} vs {u16(text)}')
+        cmd(hwnd, "SAVE", 0.4)
+        ok &= check("edit 2b: saved as it reads", doc.read_bytes() == text.encode("utf-8"))
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+    # a file with both line ends: Enter writes the line's own (§7.6, D15)
+    doc = OUT / "edit-mixed-eol.md"
+    doc.write_bytes("Первая строка\r\n\r\nВторая строка\n\nТретья\n".encode("utf-8"))
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        enter_edit(hwnd, 0, dx=1)
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        for _ in range(3):
+            post(hwnd, WM_KEYDOWN, VK["right"], 0, 0.05)
+        post(hwnd, WM_KEYDOWN, VK["return"], 0, 0.4)
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 1, q(hwnd, "BLOCK_Y", 2) + 10, 0.3)
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        for _ in range(3):
+            post(hwnd, WM_KEYDOWN, VK["right"], 0, 0.05)
+        post(hwnd, WM_KEYDOWN, VK["return"], 0, 0.4)
+        cmd(hwnd, "SAVE", 0.4)
+        want = "Пер\r\n\r\nвая строка\r\n\r\nВто\n\nрая строка\n\nТретья\n".encode("utf-8")
+        ok &= check("edit 2b: in a mixed-EOL file Enter writes the line ending of the line it splits",
+                    doc.read_bytes() == want, f"file {doc.read_bytes()!r}")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+    return ok
+
+
+SEL_DOC = ("# Выделение\n\nПервый абзац со **словом жирным** внутри.\n\n[опора]: https://example.com\n\n"
+           "Второй абзац по [опора].\n")
+
+
+def test_edit_selection():
+    """§2.8, §7.9 (2b; the word selection moved here from test_basics, T24): in edit mode a double click selects a word,
+    a triple click the paragraph; typing over a bold selection stays bold; deleting across two paragraphs keeps the
+    reference definition between them"""
+    ok = True
+    doc = OUT / "edit-selection.md"
+    doc.write_bytes(SEL_DOC.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        text = SEL_DOC
+        enter_edit(hwnd, 1, dx=1)
+        time.sleep(0.7)  # (not a triple click with the entry's double click)
+        x, y = q(hwnd, "TEXT_LEFT") + 20, q(hwnd, "BLOCK_Y", 1) + 12
+        dbl_click(hwnd, x, y, 0.4)
+        i1 = text.index("Первый")
+        a, f = q(hwnd, "EDIT_ANCHOR_SRC"), q(hwnd, "EDIT_CARET_SRC")
+        ok &= check("edit 2b: a double click in edit mode selects the word", a == i1 and f in (i1 + 6, i1 + 7),
+                    f"selection {a}..{f}, word at {i1}")
+        time.sleep(0.7)
+        for k in range(3):
+            post(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp(x, y), 0.01)
+            post(hwnd, WM_LBUTTONUP, 0, lp(x, y), 0.01)
+        time.sleep(0.4)
+        a, f = q(hwnd, "EDIT_ANCHOR_SRC"), q(hwnd, "EDIT_CARET_SRC")
+        ok &= check("edit 2b: a triple click selects the paragraph's text",
+                    a == i1 and f == text.index("внутри.") + len("внутри."), f"selection {a}..{f}")
+        # typing over a selection that starts in bold text stays bold
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        for _ in range(len("Первый абзац со ")):
+            post(hwnd, WM_KEYDOWN, VK["right"], 0, 0.03)
+        keys(hwnd, [VK["right"]] * len("словом"), shift=True, wait=0.05)
+        type_text(hwnd, "делом", 0.4)
+        text = text.replace("**словом жирным**", "**делом жирным**", 1)
+        ok &= check("edit 2b: typing over a selected bold word keeps it bold", q(hwnd, "SRC_HASH", 0) == src_hash(text),
+                    f'len {q(hwnd, "SRC_LEN", 0)} vs {u16(text)}')
+        # a selection from the first paragraph into the second, over the reference definition between them
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        for _ in range(5):
+            post(hwnd, WM_KEYDOWN, VK["right"], 0, 0.03)
+        keys(hwnd, [VK["down"]], shift=True, wait=0.3)
+        a, f = q(hwnd, "EDIT_ANCHOR_SRC"), q(hwnd, "EDIT_CARET_SRC")
+        spans = a == i1 + 5 and text.index("Второй") < f < text.index("[опора].")
+        post(hwnd, WM_KEYDOWN, VK["delete"], 0, 0.4)
+        want = text[:a] + text[f:].rstrip("\n") + "\n\n[опора]: https://example.com\n"
+        ok &= check("edit 2b: deleting across two paragraphs joins them and keeps the reference definition",
+                    spans and q(hwnd, "SRC_HASH", 0) == src_hash(want) and q(hwnd, "EDIT_CARET_SRC") == a,
+                    f'selection {a}..{f}, len {q(hwnd, "SRC_LEN", 0)} vs {u16(want)}')
+        cmd(hwnd, "SAVE", 0.4)
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+    return ok
+
+
+PASTE_DOC = "# Вставка\n\n> Цитата здесь\n\n| a | b |\n|---|---|\n| c | d |\n\nАбзац для вырезания.\n"
+
+
+def test_edit_paste_plain():
+    """§7.11 (2b): plain text pasted into a quote gets the quote's prefix on every line; into a cell its line ends
+    become <br> and a pipe \\|; Cut takes the selection to the clipboard"""
+    ok = True
+    doc = OUT / "edit-paste.md"
+    doc.write_bytes(PASTE_DOC.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        text = PASTE_DOC
+        enter_edit(hwnd, 1, dx=1)
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.1)
+        put = set_clipboard("один\r\n\r\nдва")
+        cmd(hwnd, "PASTE", 0.4)
+        text = text.replace("> Цитата здесь\n", "> Цитата здесьодин\n>\n> два\n", 1)
+        ok &= check("edit 2b: a paste into a quote: every line gets the quote's prefix, the file's line ends",
+                    put and q(hwnd, "SRC_HASH", 0) == src_hash(text) and q(hwnd, "EDIT_CARET_SRC") == text.index("два") + 3,
+                    f'on the clipboard {put}, caret {q(hwnd, "EDIT_CARET_SRC")}, len {q(hwnd, "SRC_LEN", 0)} vs '
+                    f'{u16(text)}')
+        table = q(hwnd, "BLOCK_COUNT") - 2
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 16, q(hwnd, "BLOCK_Y", table) + 14, 0.3)
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.2)
+        at = q(hwnd, "EDIT_CARET_SRC")
+        put = set_clipboard("x|y\nz")
+        cmd(hwnd, "PASTE", 0.4)
+        want_at = text.index("| a |") + 3
+        text = text.replace("| a |", "| ax\\|y<br>z |", 1)
+        ok &= check("edit 2b: a paste into a cell: its line end becomes <br>, its pipe \\|",
+                    at in (want_at, want_at + 1) and put and q(hwnd, "SRC_HASH", 0) == src_hash(text), f'caret {at} (want {want_at}), '
+                    f'on the clipboard {put}, len {q(hwnd, "SRC_LEN", 0)} vs {u16(text)}')
+        last = q(hwnd, "BLOCK_COUNT") - 1
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 1, q(hwnd, "BLOCK_Y", last) + 10, 0.3)
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        for _ in range(len("Абзац ")):
+            post(hwnd, WM_KEYDOWN, VK["right"], 0, 0.03)
+        keys(hwnd, [VK["right"]] * len("для "), shift=True, wait=0.05)
+        cmd(hwnd, "CUT", 0.4)
+        text = text.replace("Абзац для вырезания.", "Абзац вырезания.", 1)
+        got = clipboard()
+        ok &= check("edit 2b: Cut takes the selection out and puts it on the clipboard",
+                    q(hwnd, "SRC_HASH", 0) == src_hash(text) and got == "для ", f"clipboard {got!r}, len "
+                    f'{q(hwnd, "SRC_LEN", 0)} vs {u16(text)}')
+        cmd(hwnd, "SAVE", 0.4)
+        ok &= check("edit 2b: the pastes saved", doc.read_bytes() == text.encode("utf-8"),
+                    f"file {doc.read_bytes().decode('utf-8')!r}")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+    return ok
+
+
+TABLE_DOC = ("Таблица:\n\n| Имя | Число |\n|---|---|\n| а | 1 |\n| б |\n\n"
+             "|  | Итого |\n|---|---|\n| 5 | 6 |\n")
+
+
+def test_edit_table_typing():
+    """§7.10, §7.6, §7.8 (2b): a typed pipe is written \\|; typing into a missing cell completes the row; Enter goes
+    down a column; Tab selects the next cell's text; Enter on an empty last row takes it away and makes a phantom after
+    the table; an empty header cell shows its column's placeholder while editing"""
+    ok = True
+    doc = OUT / "edit-table.md"
+    doc.write_bytes(TABLE_DOC.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        text = TABLE_DOC
+        enter_edit(hwnd, 0, dx=1)
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        post(hwnd, WM_KEYDOWN, VK["down"], 0, 0.2)
+        first = q(hwnd, "EDIT_CARET_SRC") == text.index("Имя")
+        post(hwnd, WM_KEYDOWN, VK["tab"], 0, 0.3)
+        a, f = q(hwnd, "EDIT_ANCHOR_SRC"), q(hwnd, "EDIT_CARET_SRC")
+        ok &= check("edit 2b: Tab in a cell selects the next cell's text",
+                    first and a == text.index("Число") and f == a + len("Число"), f"first cell {first}, selection {a}..{f}")
+        post(hwnd, WM_KEYDOWN, VK["right"], 0, 0.1)
+        post(hwnd, WM_KEYDOWN, VK["return"], 0, 0.3)
+        row1 = text.index("| а | 1 |")
+        down = q(hwnd, "EDIT_CARET_SRC") == row1 + 6
+        type_text(hwnd, "|", 0.3)
+        text = text.replace("| а | 1 |", "| а | \\|1 |", 1)
+        ok &= check("edit 2b: Enter goes down the column; a typed pipe is written \\|",
+                    down and q(hwnd, "SRC_HASH", 0) == src_hash(text), f"down {down}, len "
+                    f'{q(hwnd, "SRC_LEN", 0)} vs {u16(text)}')
+        post(hwnd, WM_KEYDOWN, VK["down"], 0, 0.2)
+        type_text(hwnd, "2", 0.3)
+        text = text.replace("| б |\n", "| б | 2 |\n", 1)
+        ok &= check("edit 2b: typing into a cell the row lacks completes the row", q(hwnd, "SRC_HASH", 0) == src_hash(text),
+                    f'caret {q(hwnd, "EDIT_CARET_SRC")}, len {q(hwnd, "SRC_LEN", 0)} vs {u16(text)}')
+        post(hwnd, WM_KEYDOWN, VK["return"], 0, 0.3)
+        grown = q(hwnd, "SRC_HASH", 0) == src_hash(text.replace("| б | 2 |\n", "| б | 2 |\n|  |  |\n", 1))
+        post(hwnd, WM_KEYDOWN, VK["return"], 0, 0.4)
+        style = (q(hwnd, "EDIT_ACTIVE") >> 24) & 0xFF
+        ok &= check("edit 2b: Enter on the last row adds a row; on that empty row it goes again, a phantom after the table "
+                    "(the style box says «Текст»)", grown and q(hwnd, "SRC_HASH", 0) == src_hash(text) and
+                    q(hwnd, "EDIT_PHANTOM", 0) == 1 and active(hwnd, 15) and style == 0,
+                    f'grown {grown}, phantom {q(hwnd, "EDIT_PHANTOM", 0)}, style {style}')
+        # the second table's empty header cell: «Столбец 1» / "Column 1", muted, only while editing
+        cell0 = lambda y: (q(hwnd, "TEXT_LEFT") + 4, y + 6, q(hwnd, "TEXT_LEFT") + 30, y + 32)  # (inside its borders)
+        box = cell0(q(hwnd, "BLOCK_Y", 2))
+        img = shot(hwnd, "115-edit-column-placeholder")
+        shot_dark(hwnd, "115-edit-column-placeholder-dark")
+        editing_ink = ink(img, box)
+        cmd(hwnd, "SAVE", 0.4)
+        ok &= check("edit 2b: the table edits saved", doc.read_bytes() == text.encode("utf-8"))
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.6)
+        wait_for(lambda: q(hwnd, "EDIT_BAR") == 0, 2.0)
+        time.sleep(0.6)
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 1, q(hwnd, "BLOCK_Y", 0) + 10, 0.4)  # (reading mode's caret out of the cell)
+        box = cell0(q(hwnd, "BLOCK_Y", 2))  # (the bar and the phantom row went: the table moved up)
+        reading_ink = ink(shot(hwnd, "115-edit-column-placeholder-reading"), box)
+        ok &= check("edit 2b: an empty header cell shows its column's placeholder while editing, not while reading",
+                    editing_ink > 20 and reading_ink < 5, f"ink {editing_ink} editing, {reading_ink} reading")
+    finally:
+        close_edit(proc, hwnd)
+    return ok
+
+
+RAW_DOC = "# Сырой ввод\n\nПервый абзац.\n\nПоследний абзац.\n"
+
+
+def test_edit_raw_typing():
+    """§6.9 (2b): a picture typed as source stays source while the caret is in it, and becomes a picture once the caret
+    leaves; `<!--` typed in a new paragraph stays text (with a warning colour) and the blocks after it still render"""
+    ok = True
+    doc = OUT / "edit-raw.md"
+    doc.write_bytes(RAW_DOC.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        text = RAW_DOC
+        enter_edit(hwnd, 2, dx=1)
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.1)
+        post(hwnd, WM_KEYDOWN, VK["return"], 0, 0.3)
+        type_text(hwnd, "![x](img/diagram0.png)", 0.5)
+        text = text + "\n![x](img/diagram0.png)\n"
+        picture = lambda b: q(hwnd, "DRAG", (2 << 16) | b)  # formats of a picture block; 0 for any other block
+        raw = q(hwnd, "EDIT_RAW") == 1 and picture(3) == 0 and q(hwnd, "BLOCK_COUNT") == 4
+        ok &= check("edit 2b: a picture typed as source stays text while the caret is in it, the caret after the `)`",
+                    raw and q(hwnd, "SRC_HASH", 0) == src_hash(text) and q(hwnd, "EDIT_CARET_SRC") == len(text) - 1,
+                    f'raw {q(hwnd, "EDIT_RAW")}, picture {picture(3)}, blocks {q(hwnd, "BLOCK_COUNT")}, caret '
+                    f'{q(hwnd, "EDIT_CARET_SRC")}, len {q(hwnd, "SRC_LEN", 0)} vs {u16(text)}')
+        shot(hwnd, "114-edit-raw-picture")
+        shot_dark(hwnd, "114-edit-raw-picture-dark")
+        post(hwnd, WM_KEYDOWN, VK["up"], 0, 0.4)
+        became = wait_for(lambda: picture(3) & DF_DIB, 5.0)
+        ok &= check("edit 2b: the caret leaves it: a picture", q(hwnd, "EDIT_RAW") == 0 and became,
+                    f'raw {q(hwnd, "EDIT_RAW")}, picture {picture(3)}')
+        # an HTML comment opened in a new paragraph: nothing closes it, yet the rest of the document still renders
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 1, q(hwnd, "BLOCK_Y", 1) + 10, 0.3)
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.1)
+        post(hwnd, WM_KEYDOWN, VK["return"], 0, 0.3)
+        type_text(hwnd, "<!--", 0.5)
+        text = text.replace("Первый абзац.\n", "Первый абзац.\n\n<!--\n", 1)
+        n = q(hwnd, "BLOCK_COUNT")
+        ys = [q(hwnd, "BLOCK_Y", k) for k in range(n)]
+        ok &= check("edit 2b: `<!--` typed in a new paragraph stays text, and the blocks after it still render",
+                    q(hwnd, "EDIT_RAW") == 1 and q(hwnd, "SRC_HASH", 0) == src_hash(text) and n == 5 and
+                    q(hwnd, "EDIT_CARET_SRC") == text.index("<!--") + 4 and
+                    ys == sorted(ys) and picture(4) != 0, f'raw {q(hwnd, "EDIT_RAW")}, blocks {n} at {ys}, len '
+                    f'{q(hwnd, "SRC_LEN", 0)} vs {u16(text)}')
+        shot(hwnd, "113-edit-raw-comment")
+        shot_dark(hwnd, "113-edit-raw-comment-dark")
+        cmd(hwnd, "SAVE", 0.4)
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+    return ok
+
+
 def main():
     OUT.mkdir(exist_ok=True)
     reset_profile()
@@ -4216,7 +4630,9 @@ def main():
              ("edit_debounced", test_edit_debounced), ("settings_autosave", test_settings_autosave),
              ("edit_review_keys", test_edit_review_keys), ("edit_review_doc", test_edit_review_doc),
              ("edit_chrome_zoom", test_edit_chrome_zoom), ("edit_modal", test_edit_modal),
-             ("edit_recovery_guards", test_edit_recovery_guards)]
+             ("edit_recovery_guards", test_edit_recovery_guards), ("edit_structure", test_edit_structure),
+             ("edit_selection", test_edit_selection), ("edit_paste_plain", test_edit_paste_plain),
+             ("edit_table_typing", test_edit_table_typing), ("edit_raw_typing", test_edit_raw_typing)]
     only = [n for n in os.environ.get("FASTMD_ONLY", "").split(",") if n]  # e.g. FASTMD_ONLY=update,settings
     for name, t in tests:
         if not only or name in only:
