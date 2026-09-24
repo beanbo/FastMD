@@ -3590,6 +3590,10 @@ def test_settings_autosave():
         cmd(hwnd, "SETTINGS", 0.8)
         sh = q(hwnd, "SETTINGS_HWND")
         shot(sh, "107-settings-autosave")
+        # the new row in the dark theme too (§15.1 item 9): the settings window follows the theme at once
+        cmd(hwnd, "THEME_DARK", 0.6)
+        shot(sh, "107-settings-autosave-dark")
+        cmd(hwnd, "THEME_LIGHT", 0.5)
         click_setting(hwnd, sh, 1200)
         off = reg_value("Autosave") == 0
         post(sh, WM_KEYDOWN, 0x1B, 0, 0.3)
@@ -3684,9 +3688,13 @@ def test_edit_review_keys():
         click(hwnd, q(hwnd, "TEXT_LEFT") + 5, q(hwnd, "BLOCK_Y", 5) + 10, 0.5)
         folded = q(hwnd, "EDIT_CARET_SRC") == text.find("<details") and q(hwnd, "EDIT_ATOM") == 0x40000000 | 5
         shot(hwnd, "110-edit-details-folded")
+        shot_dark(hwnd, "110-edit-details-folded-dark")  # (the selected object's outline in the dark theme too)
+        kept = q(hwnd, "EDIT_ATOM")
         click(hwnd, q(hwnd, "TEXT_LEFT") + 5, q(hwnd, "BLOCK_Y", 5) + 10, 0.5)  # open again
         ok &= check("edit 2a review: folding a <details> takes the caret out of it, onto its summary", inside and folded,
                     f'inside {inside}, caret {q(hwnd, "EDIT_CARET_SRC")}')
+        ok &= check("edit 2a review: the theme's re-parse keeps the summary selected", kept == 0x40000000 | 5,
+                    f"atom {kept:#x}")
         # a right click on the bar: the menu, but the caret and the view stay (the text under the bar is hidden)
         wheel(hwnd, 450, 400, -3, wait=0.8)
         settle(hwnd)
