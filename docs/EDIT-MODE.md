@@ -80,20 +80,26 @@ the section that resolves it.
 |---|---|
 | **Double-click** on document text (reading mode, `clickCount == 2`, `window.cpp:712`) | at the second press point (hit-tested text position, mapped to source after the entry re-parse) |
 | Double-click on an object atom (formula, diagram, picture, HTML block, front matter) | the atom is selected and its source popup opens (§9) |
-| **F2** (`CMD_EDIT_TOGGLE`) or the **pencil button** | at the caret / selection focus if `caretOn` or a selection is visible; else at the start of the first text block whose top is visible below the bar |
+| **F2** (`CMD_EDIT_TOGGLE`) or the **pencil button** | at the caret / selection focus if `caretOn` or a selection is visible (its line inside the window: not the caret the last session left far above); else at the start of the first text block whose top is visible below the bar |
 | Context menu «Редактировать здесь\tF2» / "Edit here\tF2" (`CMD_EDIT_HERE`) | at the right-click point (`ContextMenu` already hit-tests it, `window.cpp:332-336`) |
 
-- A double-click on a **link** does not enter: its first click opens the link on button-up (unchanged). Task boxes,
-  `<summary>` lines, heading anchors and the code copy button keep their single-click actions and never enter.
+- A double-click on a **link** does not enter: its first click opens the link on button-up (unchanged), and a click that
+  opened a link or jumped (an anchor link, the heading icon) never counts as the first click of a double click - the
+  next press is a click on what is there now. Task boxes, `<summary>` lines, heading anchors and the code copy button
+  keep their single-click actions and never enter. A link is what lies under the point: the character HitTestPoint
+  found, in the block under it (never the end of the block above).
 - **Triple-click stays a reading action** (UX-5): a third press within `GetDoubleClickTime()` of the double-click that
-  entered, before any splice, cancels the entry (`EditExit(silent)`, bar slides back, no save) and runs
-  `SelectBlockAt` in reading mode.
+  entered, before any splice, cancels the entry (`EditExit`, bar slides back, no save) and runs `SelectBlockAt` in
+  reading mode at the text position of the double click that entered (near the top the bar has slid the page under the
+  pointer since).
 - **Pencil button** (reading mode only): glyph E70F, 30×30 at `[ViewW−78, 8] – [ViewW−48, 38]` (left of the gear,
   same look, hover and hit rules as the gear, `settings_ui.cpp:366-387`); hidden on the start screen, on a
   load-failed document, while find is open, in the first frame and in bench mode. Tooltip «Редактировать (F2 или
   двойной щелчок)» / "Edit (F2 or double-click)". `Q_EDIT_TOOL(CMD_EDIT_TOGGLE)` returns its centre in reading mode.
 - The first entry ever (per profile, registry `EditHintShown`) shows the toast «Режим правки: Esc — выйти, F2 —
-  войти снова» / "Edit mode: Esc — leave, F2 — enter again". The first *splice* of each process session shows, when
+  войти снова» / "Edit mode: Esc — leave, F2 — enter again" - after an entry by double click only once
+  `GetDoubleClickTime()` has passed (a triple click takes the entry back and leaves the hint for the next one). The
+  first *splice* of each process session shows, when
   autosave is on, «Правки сохраняются в файл автоматически · Ctrl+Z — отменить» / "Edits are saved to the file
   automatically · Ctrl+Z — undo".
 
@@ -106,6 +112,7 @@ the section that resolves it.
 | `g.loadFailed` | «Файл не загрузился — править нечего» | "The file did not load — nothing to edit" |
 | `g.fullPending` | «Документ ещё загружается…»; the request is remembered and entry happens automatically when `OnFullDoc` arrives within 2 s | "The document is still loading…" |
 | `DataDir()` empty | «Нет папки данных FastMD — правка отключена» | "No FastMD data folder — editing is off" |
+| an interrupted save of this file waits on the RECOVERY strip (§10.5: the file may be torn, and a torn file is no baseline) | «Сначала решите, что делать с прерванным сохранением (полоса сверху)» | "First decide what to do with the interrupted save (the strip above)" |
 | file cannot be read (open fails, short read, size changed, D5) | «Не удалось прочитать файл: <причина>» | "Could not read the file: <reason>" |
 | NUL bytes outside BOM-detected UTF-16 (D14) | «Файл похож на двоичный — правка отключена» | "The file looks binary — editing is off" |
 | BOM FE FF (UTF-16 BE) | «UTF-16 BE не поддерживается для правки» | "UTF-16 BE files cannot be edited" |
@@ -133,7 +140,9 @@ The ✕ button, F2 (with no atom selected), `CMD_EDIT_EXIT` and the edit context
 **Leaving requires that nothing is unsaved** (D6, UX-15): leaving commits the popup, forces a pending re-parse
 (§5.8), and flushes (§10.3). If the flush fails, edit mode stays and the **leave strip** appears: «Правки не
 сохранены: <причина>. [Повторить] [Сохранить как…] [Отменить правки]». «Отменить правки» reverts `g.src` to the disk
-text as one undoable step (kind DISCARD) and then leaves.
+text as one undoable step (kind DISCARD) and then leaves - after a save in flight on the worker has landed (if it wrote
+the edits, nothing is left to discard): no save ever lands after edit mode was left, so the file and reading mode
+always show the same text.
 
 After leaving: the caret stays drawn, collapsed, at the edit caret's text position (`caretOn = true`); an Esc that
 arrives within 1 s of the Esc that left edit mode never posts `WM_CLOSE` (UX-6); the undo history is kept until the
@@ -181,7 +190,9 @@ code points fall back to MDL2 as listed.
   («Текст», «Заголовок 1…6», «Код», «Таблица», «Сноска», «—»; EN "Text", "Heading 1…6", "Code", "Table",
   "Footnote", "—") + 22 u chevron
   + 16 u padding. The status slot is as wide as the widest of «Сохранено», «Не сохранено», «Сохранение…» (EN "Saved",
-  "Not saved", "Saving…") + 16 u; error texts are elided with "…" and shown whole in the tooltip.
+  "Not saved", "Saving…") + 16 u; a longer text (why a save failed) grows to the left into the free space, up to 8 u
+  after the last left-hand button - the slot's right edge and every button stay where they are - and is elided with
+  "…" only where that space ends; the tooltip has it whole.
 - **Collapse** (UX-11). The collapse level is the smallest level `L ∈ 0…6` at which everything fits; it is recomputed
   only on resize, DPI, zoom or language change. Level 1: the status becomes an icon (E73E saved, E895 saving, a 6 u
   `P_ACCENT` dot when dirty, E7BA in `P_ALERT_CAUTION` on an error). Level 2: Strike and Inline code move into "…".
@@ -223,10 +234,13 @@ it. `Q_EDIT_TOOL(id | row << 16)` returns a row centre.
 
 ### 2.5 Strips and banners
 
-A strip is a 36 u band directly under the bar (reading-mode strips: at the top of the document area), full bar width,
-`P_OVERLAY_BG` with a 3 u accent bar at the left in the colour given, text in `g.typo.ui`, buttons in the settings
-"Button" style (`settings_ui.cpp:126-147`) at the right. It covers the document (no inset); the reveal margin
-accounts for it (§12.1). At most one strip is shown; priority top to bottom:
+A strip is a 36 u band directly under the bar, full bar width (reading-mode strips: at the top of the document area,
+between the floating outline button and the pencil / gear, which stay drawn and clickable), `P_OVERLAY_BG` with a 3 u
+accent bar at the left in the colour given, text in `g.typo.ui`, buttons in the settings "Button" style
+(`settings_ui.cpp:126-147`) at the right. A text that does not fit beside the buttons is elided with "…" and shown whole
+in the tooltip pill while the pointer is over it. It covers the document (no inset); the reveal margin accounts for it
+(§12.1). Its height is `36 u` at the current zoom (a zoom change while it is shown resizes it). At most one strip is
+shown; priority top to bottom:
 
 | Strip (`Q_EDIT_STRIP`) | Accent | Text RU | Text EN | Buttons (CMD) |
 |---|---|---|---|---|
@@ -279,7 +293,7 @@ passing); `UpdateTitle()` runs only when `dirty` flips or edit mode is entered o
 | Ctrl+Home / Ctrl+End | document start / end | — |
 | PgUp / PgDn | by `ViewH() − 56 − EditRevealTop()`, moving the caret | — |
 | Shift + any move | extends the selection | — |
-| Ctrl+A | select all | `CMD_SELECT_ALL` |
+| Ctrl+A (with Shift too) | select all | `CMD_SELECT_ALL` |
 | Ctrl+C / Ctrl+Insert | copy: rich formats as today + the private "FastMD Markdown" format (§7.11) | `CMD_COPY` |
 | Ctrl+Shift+C | copy as Markdown | `CMD_COPY_MD` |
 | Ctrl+X / Shift+Delete | cut (Phase 2b; unbound before) | `CMD_CUT` |
@@ -294,10 +308,10 @@ passing); `UpdateTitle()` runs only when `dirty` flips or edit mode is entered o
 | Ctrl+Shift+K | code block | `CMD_CODEBLOCK` |
 | Ctrl+T | table 3×3 (header + 2 rows) | `CMD_INS_TABLE` (arg 0) |
 | Ctrl+M / Ctrl+Shift+M | inline formula / formula block | `CMD_INS_FORMULA`, `CMD_INS_FORMULA_BLOCK` |
-| Enter or F2 on a selected object atom | open its source popup (HR: Enter creates a phantom after it) | `CMD_ATOM_EDIT` |
+| Enter or F2 on a selected object atom | open its source popup (HR: Enter creates a phantom after it). Until 3b's popups: Enter does nothing, F2 leaves edit mode | `CMD_ATOM_EDIT` |
 | F2 (nothing selected) | leave edit mode | `CMD_EDIT_TOGGLE` |
 | Esc | the chain of §2.2 | — |
-| Ctrl+E | flush; on success leave edit mode and open the external editor; on failure stay and show the leave strip (D19) | `CMD_EDIT` (104) |
+| Ctrl+E (with Shift too) | flush; on success leave edit mode and open the external editor; on failure stay and show the leave strip (D19) | `CMD_EDIT` (104) |
 | F5 / Ctrl+R | flush; on success leave edit mode and reload (the disk now holds the edits); on failure stay (R14) | `CMD_RELOAD` |
 | Alt+← / Alt+→, mouse X buttons, Ctrl+O, Ctrl+W, a click on a link to another .md | leave the document through the leave-document rules (§10.8) — never "suspended" (T20) | — |
 | Space | types a space (never pages) | — |
@@ -309,7 +323,9 @@ Every chord has a CMD id; functional UI tests use `cmd()` and only `test_edit_bi
 ### 2.8 Mouse in edit mode
 
 - Click in text: collapsed caret (no drag candidates for links/images); Shift+click extends; press-drag selects with
-  autoscroll; a press inside the selection that moves starts the existing drag-out (copy only, modal, §10.10).
+  autoscroll - upwards from the bottom of the bar and a strip, not the window's edge: the selection never reaches into
+  text hidden under them; a press inside the selection that moves starts the existing drag-out (copy only, modal,
+  §10.10). A click right of a wrapped line's end puts the caret at the end of that line (§12.2 `lineAff`).
 - Double-click selects a word; triple-click selects the block's text (a cell's text in a table).
 - Click on an object atom: selects it and opens its popup (UX-2). Click on an HR: selects it.
 - Click on link text: places the caret. **Ctrl+click** opens the link (Ctrl read from `MK_CONTROL` in the message's
@@ -317,7 +333,10 @@ Every chord has a CMD id; functional UI tests use `cmd()` and only `test_edit_bi
   открыть ссылку» / "Ctrl+click — open link" (UX-19).
 - Click on a task box: toggles it through a splice (undoable, kind TASK; §8.10).
 - Click below the last block (more than 8 DIP under its bottom): caret in a phantom after the last block (UX-3).
-- Right-click outside the selection moves the caret there (collapsed) before the menu opens (UX-18).
+- Right-click outside the selection moves the caret there (collapsed) before the menu opens (UX-18) - not on the bar or
+  a strip, over text they hide: there the menu opens and the caret stays.
+- Folding a `<details>` (a click on its summary) whose body holds the caret puts the caret on the summary (its atom):
+  it never stands in text nobody sees.
 - Files dropped in edit mode (`WM_DROPFILES`): image files (png, jpg, jpeg, gif, bmp, svg, webp, ico, tif, tiff) are
   inserted at `DragQueryPoint` → `HitTestDoc` as `![stem](dest)` (§8.8); any other file is opened through the
   leave-document rules (UX-14).
@@ -351,8 +370,9 @@ apply are greyed. A keyboard-invoked menu opens at the caret (`CaretPoint` → `
   popup opened with** (the step nets to nothing); Ctrl+Enter or a click outside keeps the text. Ctrl+Z / Ctrl+Y inside
   the popup use the popup's own history. After closing, the caret stands after the atom.
 - While an atom is selected and no popup is open, typed characters do nothing and the pill shows «Enter — изменить ·
-  Delete — удалить · ←/→ — выйти» / "Enter — edit · Delete — delete · ←/→ — leave". Typing never goes into the
-  paragraph next to a selected atom.
+  Delete — удалить · ←/→ — выйти» / "Enter — edit · Delete — delete · ←/→ — leave" (until 3b brings the popups
+  without its first part: «Delete — удалить · ←/→ — выйти»). Typing never goes into the paragraph next to a selected
+  atom.
 - A render that fails keeps the last good picture with a 1 px `P_ALERT_CAUTION` outline and shows the error in the
   popup; in reading mode a failed display formula or diagram shows its source in `P_MUTED` instead of a blank box.
 
@@ -948,8 +968,14 @@ No message is pumped between the first splice of an operation and the end of ste
 - Threshold `kEditDeferChars = 262144` characters (`FASTMD_EDIT_DEBOUNCE_CHARS=<n>` overrides; 0 defers every
   eligible keystroke — tests use it on small files).
 - **Deferred-eligible** operations only: `OpType` of ordinary characters (§7.3) with a collapsed caret, no phantom,
-  no pending format, no selected atom, not in a table cell, not at a break atom, no raw-while-typing; and a
-  non-word `OpBackspace` whose cluster lies inside `[burstBeg, focus)` (text typed in this burst). The splice is
+  no pending format, no selected atom, not in a table cell, no raw-while-typing; and a non-word `OpBackspace` whose
+  cluster (`GraphemeLite` over the source, which there is the typed text) lies inside `[burstBeg, focus)` (text typed
+  in this burst). The first keystroke of a burst goes through `OpType` with the fresh model, which knows the break
+  edges and trailing blanks (§6.5, §6.6): it is deferred when that is a plain insertion of exactly the typed text (a
+  blank typed in trailing blanks is not). Later keystrokes go at the caret, line ends included - except a blank where
+  only blanks remain up to the line end: that is a trailing blank or, before a soft break, the second blank of an
+  accidental hard break, which only the model can tell apart; unless the next line is blank or there is none (the
+  block ends there) it goes through `OpType` (ending the burst). The splice is
   applied to `g.src` at once, `focus` advances arithmetically, and the first deferred keystroke arms
   `TIMER_EDIT_REPARSE` for 150 ms (later keystrokes do not re-arm it), so the view catches up at most every 150 ms plus
   one parse. The stale document is used for nothing.
@@ -999,8 +1025,10 @@ Clusters come from `ClusterFn`: the app uses `IDWriteTextLayout::GetClusterMetri
 tests use a table-driven approximation (surrogate pairs, combining marks U+0300–036F, U+1AB0–1AFF, U+20D0–20FF,
 U+FE20–FE2F, variation selectors, ZWJ sequences, regional-indicator pairs). ←/→ step over a text atom or an inline
 object atom in one step (never selecting it). Backspace after an inline object atom / Delete before it selects it
-(atom id = image index, the caret is hidden and the atom outlined); the next Backspace or Delete deletes its outer
-range. Block atoms are selected on arrival by any caret move; ← / → / ↑ / ↓ from a selected block atom go to the
+(atom id = image index, the caret is hidden and the atom outlined; the caret's source stands on the atom - a
+picture's `outerBeg`, a block atom's `line` - so the arrows and Esc go on from the atom, not from where the key was
+pressed); the next Backspace or Delete deletes its outer range. Block atoms are selected on arrival by any caret move;
+← / → / ↑ / ↓ from a selected block atom go to the
 neighbouring stop. Atom ids: inline = image index; block = `0x40000000 | block index` (for `BS_RAW` the `rawId`).
 
 ### 6.3 Text → source: `SrcOfText(doc, src, pos, mode)`
@@ -1067,9 +1095,10 @@ deferred burst is active. So after typing a space before a soft break, the next 
 drawn.
 
 ### 6.5 Whitespace the renderer drops (F1, UX-1)
-- **Trailing blanks.** The spaces and tabs between a source line's last segment and its EOL are invisible (md4c trims
-  them). The caret may stand anywhere in that run: `TextOfSrc` returns the line's last text position with `trailCols`
-  = the width in columns of `g.src[segEnd, focus)`, and the caret is drawn that many space-advances (measured in the
+- **Trailing blanks.** The spaces and tabs between a source line's last segment - and the closers of the spans that end
+  with it (a link's `](u)`, a code span's backtick) - and its EOL are invisible (md4c trims them). The caret may stand
+  anywhere in that run: `TextOfSrc` returns the line's last text position with `trailCols` = the width in columns of
+  `g.src[segEnd, focus)` (`segEnd` after those closers), and the caret is drawn that many space-advances (measured in the
   run's font) further right, clamped to the block box. End and → reach the end of the run; ←, Backspace and Delete act
   on those source characters one at a time. In a cell the run ends at the separator pipe.
 - **Leading blanks.** A Space or Tab typed at the first content position of a block, a cell or a phantom is dropped
@@ -1080,11 +1109,15 @@ drawn.
 
 ### 6.6 Soft and hard breaks (F7)
 - A soft break is a text atom drawn as a space; a hard break (`\`+EOL, two spaces+EOL, `<br>`) is a text atom drawn as
-  a line break. The caret stands at either edge, never inside.
-- Whitespace typed at the **left** edge of a soft break moves the caret across it and inserts nothing (the break
-  already renders as that space); at the **right** edge it is dropped (§6.5). Typing therefore never leaves trailing
-  blanks before a line end, and never two (no accidental hard break).
-- A `\` typed at the left edge of a soft or hard break is written `\\`.
+  a line break. The caret stands at either edge, never inside. The blanks a soft break starts with are the trailing
+  blanks of its line (§6.5); a hard break's two blanks are the break itself: `TextOfSrc` maps into them to its edges,
+  End and → stop at its left edge (→ once more crosses it), and Delete there removes the whole break.
+- Whitespace typed at the **left** edge of a soft break - or while the caret stands in the blanks it starts with -
+  moves the caret across it and inserts nothing (the break already renders as that space); at the **right** edge it is
+  dropped (§6.5). Typing therefore never leaves trailing blanks before a line end, and never two (no accidental hard
+  break).
+- A `\` typed at the left edge of a soft or hard break is written `\\` (also right before a backslash break's own `\`,
+  which then stays a break after an escaped backslash).
 - Enter, Shift+Enter and list Enter at either edge of a break atom **replace** the atom's source (§7.6).
 - Backspace at the right edge / Delete at the left edge of a break atom removes its whole source (lines join with
   nothing between them).
@@ -1195,8 +1228,14 @@ merge rule and block-syntax escaping (§7.4) run as part of the same step.
   spacing (1–4 blanks) and kind (`-`/`+`/`*`, `N.`/`N)`, task box).
 
 ### 7.3 Typing (`OpType`)
-1. A selected atom: nothing (hint pill, §2.10). A phantom: materialise it (§6.7). A selection: replace (§7.9).
-2. The insertion point: `SrcOfText(caret, MAP_CARET)`, or `focus` itself when the caret stands in trailing blanks.
+1. A selected atom: nothing (hint pill, §2.10). A phantom: materialise it (§6.7). A selection: replace (§7.9). No
+   block at all (the document's last character went, 2a; 2b's phantom replaces this): the text goes after the last
+   non-blank line - `E + E` before it when something invisible (a reference definition, a comment) is there - as a
+   paragraph of its own.
+2. The insertion point: `SrcOfText(caret, MAP_CARET)`, or `focus` itself when the caret stands in trailing blanks. A
+   blank typed at the end of an enterable span goes after its closers (`MAP_OUTER_END`: `a **bold** ‸`, never
+   `a **bold **`, which is no bold at all) - the sticky mark below, and the merge that extends the span over the next
+   word, arrive with §7.5 in 3a; until then that word is plain.
 3. Context transforms:
    - Space/Tab at the first content position of a block, cell or phantom (outside code) → dropped (§6.5);
    - whitespace at a soft-break edge → §6.6;
@@ -1219,7 +1258,9 @@ merge rule and block-syntax escaping (§7.4) run as part of the same step.
    recorded twice) by the first candidate that verifies: the other side of the adjacent delimiters (after the closers
    / before the openers at `s`); then, next to a `$` delimiter, the character with a separating blank. If none
    verifies, the original splice stays (typing is never blocked). Examples: `**API‸**s` + `.` → `**API**.‸s`;
-   `the $E$‸ is` + `x` → `the $E$ x‸ is`. In deferred mode (§5.7) verification is skipped.
+   `the $E$‸ is` + `x` → `the $E$ x‸ is`. In deferred mode (§5.7) verification is skipped, and it is not run for
+   blanks (step 2 placed them; one at a line's end renders as nothing) nor for text typed after trailing blanks (they
+   render only once text follows): both would always "fail", at two swaps each.
 6. Undo coalescing (§11), autosave, title, first-edit toast; §7.4 escaping (the trigger typed at a visible block start
    is exempt).
 
@@ -1344,10 +1385,16 @@ empty phantom pops a level (F18, UX-3).
 
 ### 7.7 Backspace and Delete (F19)
 Inside a block: delete one cluster, text atom or trailing-blank character (Ctrl: to the word boundary); an inline
-object atom is selected by the first press and deleted (its outer range) by the second. A span emptied by the deletion
-loses its delimiters (`****`, `[]()`, ``` `` ```); §7.5 normalisation and merge run (`*a* ‸*b*` Backspace →
-`*ab*`). A deletion that would leave a setext heading without content first turns it into an empty ATX heading of
-the same level (`T‸⏎---` Backspace → `##‸`, never `⏎---`, which is an HR) (F17).
+object atom is selected by the first press and deleted (its outer range, with the spans it was all of:
+`x **![i](a.png)‸** y` → `x ‸ y`, a linked badge leaves no `[](u)`) by the second. A block atom deleted by the second
+press goes with its lines - all the blocks of an HTML block drawn as several; a `<details>` summary with its whole
+group and the line of its closing `</details>` (refused when that line is not found right after the group) - and with
+exactly the blank lines that keep its neighbours apart: a blank line on one side only stays; with blank lines on both
+sides the one after goes; at the document's end the one before goes; with text right above and right below, the
+atom's lines become one blank line (`abc⏎⏎---⏎def` → `abc⏎⏎def`, `abc⏎***⏎def` → `abc⏎⏎def`: two paragraphs stay two).
+A span emptied by the deletion loses its delimiters (`****`, `[]()`, ``` `` ```); §7.5 normalisation and merge run
+(`*a* ‸*b*` Backspace → `*ab*`). A deletion that would leave a setext heading without content first turns it into an
+empty ATX heading of the same level (`T‸⏎---` Backspace → `##‸`, never `⏎---`, which is an HR) (F17).
 
 **Backspace at the start of block B** (first matching row wins; P = the previous block in source order):
 
@@ -1422,7 +1469,11 @@ Indentation is counted in columns with tab stops of 4 from the line start; inser
 `OpReplaceSelection(text)` (typing or paste over a selection, F13): the enterable spans that cover the first selected
 character become a pending format, the selection is deleted as above, and `text` is inserted with that format through
 §7.5 (merging with the surviving pieces). The first block's prefix always stays. `**⟦bold⟧** text` + `strong` →
-`**strong‸** text`; `# ⟦Title⟧` + `New` → `# New‸`.
+`**strong‸** text`; `# ⟦Title⟧` + `New` → `# New‸`. Until §7.5 arrives (3a) the cut's own delimiters do it: those of
+the enterable spans holding the first selected character that the cut took go around the typed text (`**⟦bo⟧ld**` +
+`y` → `**y‸ld**`), the closers of spans that began before the cut follow it (`**ab⟦c** de⟧f` + `x` → `**abx‸**f`), the
+openers of spans that go on after it come last; a selection over a span's whole text takes both of its delimiters
+(`pre ⟦text **bold**⟧` Delete → `pre ‸`, never `****`).
 
 ### 7.10 Tables (F20, UX-10)
 - A typed `|` in a cell is written `\|`; pasted line ends become `<br>` and pasted `|` becomes `\|`.
@@ -1791,8 +1842,8 @@ saves; `FASTMD_AUTOSAVE_MS` overrides; autosave off arms no timer.
 |---|---|---|
 | TRANSIENT (BUSY) | sharing/lock violation, `ERROR_CLOUD_FILE_*`, `ERROR_NETNAME_DELETED`, `ERROR_BAD_NETPATH`, `ERROR_UNEXP_NET_ERR`, `ERROR_SEM_TIMEOUT`, `ERROR_PATH_NOT_FOUND` on a mapped or network drive | `TIMER_EDIT_RETRY` at 0.5, 1, 2, 4, 8 s, then every 15 s while dirty; one toast per class per session «Файл занят — сохраню, как только он освободится» / "The file is busy — it will be saved as soon as it is free" |
 | UNKNOWN | short read, size changed during the read | same backoff; never adopted, never overwritten |
-| DENIED / READONLY | `ERROR_ACCESS_DENIED`, `ERROR_WRITE_PROTECT`, a failed write probe | READONLY strip; autosave stops (no Controlled Folder Access notification per save); re-probed on watcher events and `WM_ACTIVATE`; writable again → PENDING and a save |
-| MISSING | file not found while its folder exists | MISSING strip; re-checked on every watcher event, retry tick and `WM_ACTIVATE`; a reappearing file goes through §10.7 |
+| DENIED / READONLY | `ERROR_ACCESS_DENIED`, `ERROR_WRITE_PROTECT`, a failed write probe | READONLY strip; autosave stops (no Controlled Folder Access notification per save); re-probed on watcher events and `WM_ACTIVATE` (not inside a modal loop - after it -, at most every 2 s, never for a remote file); writable again → PENDING and, with autosave on, a save |
+| MISSING | file not found while its folder exists | MISSING strip; re-checked on every watcher event, retry tick and `WM_ACTIVATE` (as above); a reappearing file goes through §10.7 and, with autosave on, is saved at once |
 | CONFLICT | disk text ≠ baseline | CONFLICT strip, autosave paused, journal armed |
 | UNENCODABLE / BOM_LOOKALIKE | encoder | ENCODING strip, autosave paused |
 | FAILED | anything else | status + tooltip; backoff as TRANSIENT, at most every 15 s |
@@ -1816,7 +1867,10 @@ characters as one undo step. Autosave stays paused until one is chosen; the moda
   or, between flushes, at the next flushed save or flush point, §10.3 step 4), so a leftover means "a save was
   interrupted" — or a crash between flushes.
 - A source with `FILE_ATTRIBUTE_ENCRYPTED` gets an encrypted recovery file; files older than 14 days are purged at edit
-  entry (D22). BitLocker To Go / VeraCrypt cannot be detected (README).
+  entry (D22) - except those of the file being entered (`<vol>-<index>-*`: the strip may be offering them). BitLocker
+  To Go / VeraCrypt cannot be detected (README).
+- While a leftover of the file waits on the strip, edit mode is refused (§2.1): the file may be torn, and edits on a
+  torn baseline would meet a Restore as a conflict and could write the torn text back.
 - After the first frame of an open (never on the startup path), `recovery\<vol>-<index>-*` is listed for the opened
   file's identity, keeping files whose header names this path (case-insensitive: FAT gives a new file a deleted one's
   index) and whose header and saved bytes check out, and skipping those of another FastMD process that still runs (pid
@@ -1826,12 +1880,14 @@ characters as one undo step. Autosave stays paused until one is chosen; the moda
   FAT) → **torn**; anything else → **changed**. A leftover shows the RECOVERY strip «Прошлое сохранение прервалось»
   (changed: «…, а файл с тех пор изменён», without [Восстановить]): [Открыть копию] rebuilds the previous file
   (current bytes `[0, pb)` + the saved ones, + the current ones after `pe` for a save in place) as
-  `%TEMP%\FastMD\<name> (восстановлено).md` and opens it in a new window; [Восстановить] (torn only, checked again
+  `%TEMP%\FastMD\<name> (восстановлено).md` - `… (2).md`, `… (3).md` when that exists, created with `CREATE_NEW`: an
+  earlier copy may be open and edited in another window, and is never written over - and opens it in a new window;
+  [Восстановить] (torn only, checked again
   under an exclusive handle) first writes the bytes it replaces to a recovery file of its own, then writes the saved
   bytes back at `pb`, restores the old length, flushes, deletes its own and reloads; [Удалить] deletes the recovery
   file.
 - «Перезаписать файл моими правками» keeps the overwritten external version as `<id>.theirs` until the document is
-  closed.
+  closed (deleted at the next load, at the window's close and at session end).
 - Edit mode is refused when `DataDir()` is empty (§2.1).
 
 ### 10.6 Journal of unsaved edits (D10)
@@ -1841,8 +1897,11 @@ characters as one undo step. Autosave stays paused until one is chosen; the moda
   REPLACE_EXISTING)`; local only; encrypted like recovery files.
 - Deleted on a successful save and on a discard.
 - On the next open of that file identity: RECOVERY strip «Есть несохранённые правки от <время>»: [Открыть копию]
-  (the journal text as a temp .md in a new window), [Восстановить] (only when the journal's disk hash equals the
-  current file text: enters edit mode and replaces `g.src` with the journal text as one ADOPT step), [Удалить].
+  (the journal text as a temp .md in a new window, named as §10.5's copies), [Восстановить] (only when the journal's
+  disk hash equals the current file text - decided when asked, not at the open: when the strip is drawn, and again
+  when Restore runs after edit mode has read the file, since a save, an adoption or another journal dealt with
+  meanwhile changes the answer; it enters edit mode and replaces `g.src` with the journal text as one ADOPT step, the
+  minimal middle that differs, never cutting a pair or a CRLF, through `ReplaceAll`), [Удалить].
 - The crash handler stays allocation-free (crash.cpp:24) and writes no journal; the 3 s journal covers crashes.
 
 ### 10.7 External changes (D4, D5, D13, D16, UX-17)
@@ -1871,9 +1930,12 @@ when its call returns instead of running on for the next document.
    «Файл изменён другой программой — загружена новая версия» / "The file was changed by another program — the new
    version is loaded" (UX-17, D4);
 6. dirty → **CONFLICT** strip with both sizes; autosave paused; journal armed. [Загрузить версию с диска] replaces
-   `g.src` with the disk text as one ADOPT step (Ctrl+Z brings the edits back); [Перезаписать файл моими правками]
-   keeps the disk bytes as `.theirs`, takes them as the baseline (explicit consent) and saves at once;
-7. a file that reappears after MISSING goes through 4–6.
+   `g.src` with the disk text as one ADOPT step (Ctrl+Z brings the edits back) - or, for bytes edit mode cannot hold
+   (another encoding, binary), leaves edit mode for reading mode's load of them after writing the edits to the journal
+   (named for the file as it is now), which that load's open offers - no undo reaches across a reload; if the journal
+   cannot be written, the conflict stays; [Перезаписать файл моими правками] keeps the disk bytes as `.theirs`, takes
+   them as the baseline (explicit consent) and saves at once;
+7. a file that reappears after MISSING goes through 4–6 (saved at once with autosave on only).
 
 **Save As** (`CMD_SAVE_AS`, D16): `GetSaveFileNameW` (`OFN_OVERWRITEPROMPT`; `FASTMD_SAVE_AS` in tests; modal scope).
 When the folder differs and the document has relative links or pictures, MessageBox «Относительные ссылки и
@@ -1912,8 +1974,8 @@ rename by file ID is out of scope.
 ### 10.9 Close and session end
 - `WM_CLOSE`: `if (!PrepareToClose()) return 0;` before `g.closing = true`. `PrepareToClose` = inside a modal →
   remember the close and return false (re-posted when the modal ends); else `EditPopupCommit` and, when editing,
-  `CanLeaveDocument` (Отмена → false). `SaveAll` then saves the reading position after the edits (positions.bin gets
-  the new stamp).
+  `CanLeaveDocument` (Отмена → false); then the `.theirs` copy goes. `SaveAll` then saves the reading position after
+  the edits (positions.bin gets the new stamp).
 - `WM_QUERYENDSESSION` (new): when dirty — `EditPopupCommit`, the journal written synchronously,
   `ShutdownBlockReasonCreate(«FastMD сохраняет правки» / "FastMD is saving edits")`, the real save on the save worker
   waited for at most 3 s, `ShutdownBlockReasonDestroy`; always returns TRUE, shows no UI; the same inside a modal
@@ -1927,8 +1989,10 @@ rename by file ID is out of scope.
 - While it is above zero: `TIMER_RELOAD`, `TIMER_EDIT_SAVE`, `TIMER_EDIT_RETRY`, `TIMER_EDIT_REPARSE`,
   `TIMER_EDIT_POPUP` and `TIMER_EDIT_IDLE` re-arm for 250 ms instead of acting; `WM_APP_EDITINPUT`, `WM_APP_PREVIEW`,
   `WM_APP_IMAGES`, `WM_APP_SAVED` and `WM_APP_FILECHANGED` go to a deferred queue (payload kept); `WM_CLOSE` sets
-  `closePending`. When the depth returns to zero, `WM_APP_REPLAY` is posted: the queue replays in order, then a pending
-  close is re-posted. `EditReparse` therefore never runs inside a menu, a dialog or a print job.
+  `closePending`; a theme change's re-parse, an entry the full parse brought (§2.1) and `WM_ACTIVATE`'s look at a
+  read-only or missing file (Windows activates the window while a message box closes, still inside its scope) are
+  flagged. When the depth returns to zero, `WM_APP_REPLAY` is posted: the queue replays in order, then the flagged
+  ones, then a pending close is re-posted. `EditReparse` therefore never runs inside a menu, a dialog or a print job.
 - No UI is ever shown while the file handle is open: questions come before a save starts, and the save restarts from
   step 1 afterwards.
 - Printing: `StartDocW` inside a modal scope; paper has no edit inset, no caret, no popups, no phantom row.
@@ -1942,7 +2006,8 @@ At entry, `CreateMutexW(L"Local\\FastMD.edit.<volSerial>-<fileIndex>")`; `ERROR_
 OTHER WINDOW strip. [Перейти к нему] calls `AllowSetForegroundWindow(ASFW_ANY)`, enumerates top-level windows of
 class `FastMD.Document` and sends each (`SendMessageTimeoutW`, 200 ms) the registered message `FastMD.EditOwner` with
 the file identity; the owner answers 1 and brings itself to the foreground. The mutex is released by `EditExit`.
-Recovery and journal names carry the pid.
+Recovery and journal names carry the pid. Save As onto a file another window edits (its mutex exists, the file is not
+this window's own) is refused with the toast «Файл уже редактируется в другом окне FastMD.» and writes nothing.
 
 ### 10.12 Privacy (D22)
 While editing or dirty, `crash.cpp` writes dumps without `MiniDumpWithIndirectlyReferencedMemory |
@@ -1986,6 +2051,9 @@ after 14 days; the README says what is stored where.
   not move at all; one scrolled `y < 44 u` moves down by `44 u − y` (at the very top, by the whole bar height). Leaving
   reverses it.
 - After the slide, `RevealCaret()` scrolls minimally if the caret ended under the bar.
+- The bar and a strip are sized in screen DIP: a zoom change while they are shown scales `g.barComp` and `maxComp` by
+  old / new zoom and resizes the strip (`EditZoomChanged`, called by `SetZoom`), so leaving still puts the page back
+  exactly and a scrolled frame repairs the strip at its real size.
 - `EditRevealTop() = EditInset() + g.stripH + (findOpen ? 52 : 0) + 8`; bottom margin 48. `RevealCaret()` scrolls by
   the overflow only (never re-centres) and passes the caret's block and cell (R8); paging, `ScrollToBlock`,
   `TocCurrent` and the `KeySelect` start probe use `EditRevealTop()`.
@@ -1996,6 +2064,11 @@ after 14 days; the README says what is stored where.
 ### 12.2 The caret (R8, R17, UX-23, T17)
 - Width `max(2, SPI_GETCARETWIDTH × dpi / 96)` device px, `P_TEXT`, the height of the line box; in trailing blanks
   moved right by `trailCols` space advances; in a phantom at `phantomX`.
+- `lineAff` (`g.caretAff`): the end of a line that wraps and the start of the next one are one text position. With
+  `lineAff = −1` the caret is drawn at the trailing edge of the character before it - the end of the upper line - and
+  ↑/↓/Home/End start from that line. Set when the reader aimed at the upper line: End (pressing it again stays),
+  a click or a drag point right of a line's end, ↑/↓ onto such a position; every other move and every edit resets it.
+  Never after a hard line break (`\n` in the text).
 - Drawn by `DrawDocumentBand` only when the caret's block is cached and `[Y, Y + H]` meets the band; the paint path
   never lays out; clipped to the block box ∩ `[DocLeft, ViewW − kPadX]` (R17); `TrimCache` keeps the caret's block.
 - Blink: `TIMER_CARET` = `GetCaretBlinkTime()` (`INFINITE` = steady); the visible phase restarts on every key, click
@@ -2019,7 +2092,8 @@ after 14 days; the README says what is stored where.
 Mouse down and hover, first hit wins: popup frame (its EDIT is a child window) → popover → strip buttons → link bubble
 → toolbar → find bar → outline (docked panel, drawer, toggle) → pencil and gear (reading) → scrollbars → document
 (selected atom, object atoms, text, phantom row, the area below the last block). `WM_MOUSELEAVE` resets every hover
-part. Cursor: §2.8.
+part. Cursor: §2.8. A right click follows the same order: on the bar or a strip its menu never moves the caret into the
+text they hide (and "Edit here" of reading mode's menu opened on a strip enters at the caret).
 
 ### 12.5 Keyboard routing (T5, T15, UX-12)
 - `OnKeyDown`: start screen → `HomeKey`; **editing → `EditKey(vk, ctrl, shift, alt)`** first (chords via `EditChord`,
@@ -2153,7 +2227,7 @@ button runs its id through `Command`, so tests and UIA drive exactly what a clic
 | 60 | `Q_EDIT_ENC` | `cp \| headerBytes << 24` |
 | 61 | `Q_EDIT_EOL` | `g.eol`: 0 LF, 1 CRLF, 2 CR |
 | 62 | `Q_EDIT_ACTIVE` | bits 0–4 `FMT_*` at the caret (pending included); 8 bullet item, 9 numbered, 10 task, 11 quote, 12 table cell, 13 code block, 14 atom selected, 15 phantom, 16 footnote, 17 link; bits 24–31 style: 0 text, 1–6 heading, 7 code, 8 table, 9 atom, 10 footnote, 11 raw leaf |
-| 63 | `Q_LAST_PROMPT` | lp 0 kind of the last prompt (0 none, 1 LEAVE, 2 LEAVE2, 3 RELLINKS, 4 SAVEAS dialog, 5 OPENIMG dialog); lp 1 prompt count |
+| 63 | `Q_LAST_PROMPT` | lp 0 kind of the last prompt (0 none, 1 LEAVE, 2 LEAVE2, 3 RELLINKS, 4 SAVEAS dialog, 5 OPENIMG dialog); lp 1 prompt count; lp 2 FNV-1a-32 (as `Q_SRC_HASH`) of the last toast's text (which reason a refusal gave) |
 | 64 | `Q_RELAYOUT_ALL` | **changes state**: `ClearLayoutCache`, `UpdateColumns`, `InitGeometry`, `RecomputeY`, keeping `scrollY`, then a full repaint (T7) |
 | 65 | `Q_FRAME_STATS` | lp 0 partial (scrolled) frames since the last lp 0 query, lp 1 full frames since the last lp 1 query |
 | 66 | `Q_RENDERS` | formula/diagram renders + picture decodes started since start (both workers) |
@@ -2210,7 +2284,10 @@ results. Registered message `FastMD.EditOwner` (D18). `WM_COPYDATA` carries test
   T18).
 - Edit tests run with `FASTMD_CARET_STEADY=1`, `FASTMD_EDIT_SELFCHECK=1`, `FASTMD_TEST_ANSWER=leave:cancel` (an
   unexpected prompt fails the test instead of hanging it), each on its own file (never `features.md`); the close helper
-  asserts `Q_MAP_SELFCHECK` lp 1 == 0.
+  asserts `Q_MAP_SELFCHECK` lp 1 == 0 and that the window closes within 5 s, without a question (`Q_LAST_PROMPT` lp 1)
+  and with exit code 0; a window closed or killed another way reports its self-check first; the run fails on any crash
+  dump left in the test profile. A frame the app produced by scrolling is captured from the window's DC
+  (`shot(paint=False)`): `PrintWindow` makes the app render a full frame of its own, so it can never show a partial one.
 
 ---
 
@@ -2299,6 +2376,11 @@ strided to a few thousand stops and offsets per input) — a failure writes `out
 | 2a | `test_edit_debounced` (`DEBOUNCE_CHARS=0`) | "ab" after an emoji, End, "c" → exact file text; `Q_EDIT_BUSY` bit 1 set right after typing and clear within 300 ms |
 | 2a | `test_settings_autosave` | hit ids 1200/1201 switch the setting; with autosave off nothing is saved until `CMD_SAVE` or leaving |
 | 2a | `test_basics` (updated, T24) | double-click → `Q_EDITING == 1` → Esc → 0; file hash unchanged, `Q_SAVES == 0` (the word-selection check moves to `test_edit_selection`) |
+| 2a review | `test_edit_review_keys` | End on a wrapped line stays on it (and again), Home back; ↓ after typing keeps the typed column; Backspace selects the rule before a paragraph and → goes to that paragraph; F2 on a selected atom leaves; folding a `<details>` moves the caret onto its summary; a right click on the bar moves nothing; a drag over the bar autoscrolls and stays in sight; the pencil far below the old caret enters where the reader looks; an outline jump lands below the bar |
+| 2a review | `test_edit_review_doc` | the outline stays docked while the only heading goes; an emptied document takes typing; the typing fallbacks in the app (`**API**.s`, `the $E$ x is`); a hard break under End and →; one swap per blank and per letter after it at a paragraph's end; Ctrl+Shift+A |
+| 2a review | `test_edit_chrome_zoom` | a READONLY strip at 80 %: scrolled frames (down and up, `shot(paint=False)`) equal full ones; leaving after the zoom change does not move the page; at 50 % a click on the lower half of the strip's button runs it |
+| 2a review | `test_edit_modal` (`TEST_HOOKS`) | inside a modal loop the autosave and a WM_CLOSE wait; after it the close saves and exits with 0 |
+| 2a review | `test_edit_recovery_guards` | no entry while a torn save waits on the strip, Restore gives the original; a journal is not restorable after the file was saved past it; "Open the copy" twice makes two copies; the entry's purge keeps the strip's journal; a journal starting inside an emoji restores; Discard with a worker save in flight; undecodable disk bytes: reading mode and the journal; autosave off: no write when the file comes back or becomes writable |
 | 2b | edit-tests goldens | §6.5–§7.11 |
 | 2b | `test_edit_structure` | Enter at a paragraph end → `Q_EDIT_PHANTOM ≥ 0`, file unchanged; typing materialises it; Enter in a list; Backspace at a heading start; Tab in a list; Up/Down stop on an empty item and empty cells; Down at the end of a document ending with a table → phantom; a click below the last block → phantom; in a mixed-EOL file Enter writes the line's own ending |
 | 2b | `test_edit_selection` | double-click selects a word, triple-click the paragraph; typing over a bold selection stays bold; deleting across two paragraphs keeps a reference definition between them |
@@ -2564,3 +2646,50 @@ the per-finding verdicts and evidence are in the phase report.
 | Watcher outliving `StopWatcher` runs on forever | §10.7 | a stop event per watcher |
 | A tick during a big document's measuring: 4× slower | §5.4 | reading mode splits many unknown heights over the threads |
 | Exe size over budget | §15.1 item 8 | deferred: the preview DLL compiles the map out (`FASTMD_PREVIEW_DLL`); moving edit mode into a delay-loaded DLL is a decision for before 2a |
+
+### Phase 2a notes (the review of 2a)
+
+Five lenses (data safety, mapping, architecture, UX, testability) reviewed 2a. What changed in the design with the
+fixes; the per-finding verdicts and evidence are in the phase report `2a-review-fixes.md`.
+
+| Finding | Resolved in | Note |
+|---|---|---|
+| Edits on a torn file, and Restore writing the torn text back | §2.1, §10.5 | no entry while a leftover waits on the strip (a toast says so) |
+| Journal restorability fixed at the open | §10.6 | decided when asked (drawing, and again when Restore runs); restore through `ReplaceAll` |
+| "Open the copy" overwrote a copy another window edits | §10.5, §10.6 | a name of its own, `CREATE_NEW` |
+| Discard while a worker save is in flight | §2.2 | Discard and leaving wait for it; no save lands after edit mode was left |
+| The entry's purge deleted what the strip offered | §10.5 | this file's identity is kept |
+| Undecodable "disk version": the edits gone without undo | §10.7 | journal first, then reading mode; else the conflict stays |
+| Autosave off still wrote on reappearance / activation | §10.4, §10.7 | only with autosave on |
+| Activation saving inside a message box's modal loop; theme re-parse and a pending entry inside modal loops | §10.10 | flagged, run by `WM_APP_REPLAY`; activation rate-limited, never for remote files |
+| `.theirs` left after close | §10.5, §10.9 | deleted at close and session end |
+| Save As onto a file another window edits | §10.11 | refused |
+| Ctrl+Shift+E / Ctrl+Shift+A fell through to reading mode | §2.7 | edit chords with Shift too |
+| Selection cut with the inner modes (`****`, `[](u)`) | §7.9 | outer modes as written; typing over it keeps the first character's enterable spans |
+| Blank after a closer at a line's end ended up after the next text | §6.5 | trailing blanks counted after the closers of the spans ending the line |
+| Blank typed in a soft break's blanks made a hard break | §6.6 | it goes over the break |
+| Hard-break blanks taken for trailing blanks | §6.6 | they are the break: edges only; End/→ stop before it; Delete takes it whole |
+| Blank at the end of bold made `**bold **` | §7.3 | after the closers (the sticky mark is 3a's) |
+| Deleting a block atom merged its neighbours; inline pictures left their spans; `<details>` left its body | §7.7 | the blank-line rule, emptied spans, the whole group |
+| Emptied document refused every key | §7.3 | typing starts it again (2b's phantom replaces this) |
+| Arrows / Esc after an atom was selected by Backspace started from the old caret | §6.2 | the caret stands on the atom |
+| `\` before a backslash break destroyed it | §6.6 | written `\\` |
+| wantX kept by edits | §2.7, §12.2 | edits reset it (and `lineAff`) |
+| Deferred typing: unsanitised history; Backspace by code point | §5.7 | sanitised; by cluster |
+| Deferral refused at every line end (a parse per keystroke when appending) | §5.7 | only a blank before a line end needs the model |
+| Two swaps per blank and per letter after trailing blanks | §7.3 | no typing check for them |
+| Strip drawn and hit at the old zoom; the bar's scroll make-up too | §2.5, §12.1 | `EditZoomChanged` |
+| Outline and anchor jumps under the bar | §12.1 | `ScrollToBlock` / `TocCurrent` use `EditRevealTop()` (as written) |
+| Triple click selected the paragraph above; the hint used up | §2.1 | the double click's reading position; the hint waits |
+| Right click on the bar / a strip moved the caret | §2.8, §12.4 | the menu, no move |
+| Folding a `<details>` left the caret in hidden text | §2.8 | onto the summary |
+| Drag selection ignored the bar | §2.8 | autoscroll and clamp at the bar's and strip's bottom |
+| `TocAvailable()` not frozen | §12.7 | frozen at entry (as written) |
+| A double click on a link entered where the link led; a link found at the end of the block above | §2.1 | a click that opened a link or jumped never starts a double click; the character under the point |
+| End put the caret at the next visual line | §12.2 | `lineAff` |
+| The pencil jumped back to the old caret | §2.1 | only a caret in sight |
+| Status texts always cut | §2.3 | grow to the left |
+| The atom hint offered Enter; F2 on an atom did nothing | §2.7, §2.10 | until 3b: no Enter in the hint, F2 leaves |
+| Reading strips covered the corner buttons | §2.5 | between them |
+| The conflict strip cut its sizes | §2.5 | the whole text in the tooltip pill |
+| Tests: partial frames compared two full ones; hidden prompts, hangs and crashes at close; toasts told apart by ink only | §13.2, §13.6, §14.3 | `shot(paint=False)`; the close helper's checks; `Q_LAST_PROMPT` lp 2 |
