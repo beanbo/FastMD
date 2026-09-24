@@ -2523,13 +2523,18 @@ def test_edit_enter_leave():
         post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
         ok &= check("edit 2a: Esc closes the find bar first, then leaves edit mode", find_first and q(hwnd, "EDITING") == 0,
                     f"find opened {opened}, then editing {q(hwnd, 'EDITING')}")
+        # "Edit here" of the menu a right click opened: at that point (T8)
+        post(hwnd, 0x0204, 2, lp(x0 + 75, y1), 0.05)  # WM_RBUTTONDOWN
+        post(hwnd, 0x0205, 0, lp(x0 + 75, y1), 0.5)   # WM_RBUTTONUP: the context menu
+        u32.SendMessageW(hwnd, 0x001F, 0, 0)          # WM_CANCELMODE: the menu goes
+        time.sleep(0.2)
         cmd(hwnd, "EDIT_HERE", 0.5)
-        here = q(hwnd, "EDITING") == 1
+        here = q(hwnd, "EDITING") == 1 and q(hwnd, "EDIT_CARET_SRC") == para + pos1 - pos0
         for _ in range(3):
             post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.15)
         time.sleep(0.5)
-        ok &= check("edit 2a: \"Edit here\" enters; three Esc presses leave edit mode and keep the window",
-                    here and proc.poll() is None and q(hwnd, "EDITING") == 0)
+        ok &= check("edit 2a: \"Edit here\" enters at the right-click point; three Esc presses leave edit mode and keep the "
+                    "window", here and proc.poll() is None and q(hwnd, "EDITING") == 0)
         time.sleep(1.1)
         # a triple click: its third press right after the double click that entered cancels the entry (UX-5)
         x, y = q(hwnd, "TEXT_LEFT") + 30, q(hwnd, "BLOCK_Y", q(hwnd, "BLOCK_COUNT") - 1) + 12  # «Последний абзац.»
@@ -3502,6 +3507,11 @@ def test_edit_debounced():
         ok &= check("edit 2a review: a lone low surrogate typed in a burst: U+FFFD, and undo takes it back (history kept)",
                     typed and q(hwnd, "SRC_HASH", 0) == src_hash(want) and q(hwnd, "UNDO_DEPTH", 0) == depth,
                     f'typed {typed}, depth {depth} → {q(hwnd, "UNDO_DEPTH", 0)}')
+        # a deferred Backspace takes the cluster typed in the burst, a letter with its combining accent (§5.7)
+        type_text(hwnd, "é", 0.0, gap=0.005)
+        post(hwnd, WM_KEYDOWN, VK["back"], 0, 0.4)
+        ok &= check("edit 2a review: a deferred Backspace takes a whole cluster (e + combining acute)",
+                    q(hwnd, "SRC_HASH", 0) == src_hash(want))
         cmd(hwnd, "SAVE", 0.4)
         post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
     finally:
@@ -3743,6 +3753,38 @@ def test_edit_review_doc():
         want = "**API**.s и формула\n\nthe $E$ x is\n"
         ok &= check("edit 2a review: typing's fallbacks in the app: after a closer (**API**.s), a blank beside a formula",
                     doc.read_bytes() == want.encode("utf-8"), f"file {doc.read_bytes().decode('utf-8')!r}")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+    # a hard break of two blanks: End stops at its left edge, → crosses it in one press, typing keeps it (§6.6);
+    # at a paragraph's end a blank and the letter after it cost one swap each (no typing check for them)
+    doc = OUT / "edit-hard-break.md"
+    doc.write_bytes(b"abc  \ndef\n\nend of it\n")
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        enter_edit(hwnd, 0, dx=1)
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.2)
+        type_text(hwnd, "x", 0.2)
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        for _ in range(5):  # a, b, c, x - then over the break
+            post(hwnd, WM_KEYDOWN, VK["right"], 0, 0.05)
+        type_text(hwnd, "y", 0.2)
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 1, q(hwnd, "BLOCK_Y", 1) + 10, 0.3)
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.2)
+        swaps = []
+        for s in (" ", "z"):
+            n0 = q(hwnd, "EDIT_STATS", 3)
+            type_text(hwnd, s, 0.3)
+            swaps.append(q(hwnd, "EDIT_STATS", 3) - n0)
+        cmd(hwnd, "SAVE", 0.4)
+        ok &= check("edit 2a review: a hard break: End stops before it, → crosses it at once, the break stays; a blank and "
+                    "a letter at a paragraph's end: one swap each", doc.read_bytes() == b"abcx  \nydef\n\nend of it z\n" and
+                    swaps == [1, 1], f"file {doc.read_bytes()!r}, swaps {swaps}")
+        # Ctrl+Shift+A is edit mode's select all (not reading mode's, which the source caret would not follow)
+        keys(hwnd, [ord("A")], shift=True, ctrl=True, wait=0.3)
+        ok &= check("edit 2a review: Ctrl+Shift+A selects all in edit mode",
+                    q(hwnd, "EDIT_ANCHOR_SRC") == 0 and q(hwnd, "EDIT_CARET_SRC") == len("abcx  \nydef\n\nend of it z"),
+                    f'{q(hwnd, "EDIT_ANCHOR_SRC")}..{q(hwnd, "EDIT_CARET_SRC")}')
         post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
     finally:
         close_edit(proc, hwnd)
