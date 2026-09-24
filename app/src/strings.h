@@ -58,6 +58,8 @@ enum StrId : uint16_t {
     // context menus (§2.9), the settings row (§2.12), sizes
     S_MENU_EDIT_HERE, S_ED_MENU_UNDO, S_ED_MENU_REDO, S_ED_MENU_CUT, S_ED_MENU_PASTE, S_ED_MENU_OPEN_LINK,
     S_ED_MENU_SAVE, S_ED_MENU_SAVE_AS, S_ED_MENU_EXIT, S_SET_AUTOSAVE, S_ED_SIZE_B, S_ED_SIZE_KB, S_ED_SIZE_MB,
+    // the review of 2a: entry waits for the recovery strip's decision (§10.5)
+    S_ED_RECOVERY_FIRST,
     S_COUNT
 };
 

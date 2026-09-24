@@ -57,6 +57,7 @@ struct Layout {
     Item items[std::size(kDefs)];
     std::vector<float> dividers;  // x of each group divider
     int level = 0;
+    float leftEnd = 0;            // where the left-hand buttons end (the status text may grow left up to here)
 };
 
 int g_hot = -1;          // hovered button (index into kDefs)
@@ -147,6 +148,7 @@ Layout Compute(int level) {
         lastGroup = d.group;
     }
     float leftEnd = x;
+    L.leftEnd = leftEnd;
     // from the right: ✕ where the gear is in reading mode, a divider, then "…" and the status left of it
     float r = ViewW() - kRight * u;
     L.items[kClose] = Item{r - btn, r, true};
@@ -286,23 +288,31 @@ void DrawBar() {
         if (!it.shown) continue;
         const Def& d = kDefs[k];
         bool en = Enabled(k), act = Active(k), hot = k == g_hot;
+        if (k == kStatus && L.level < 1) {
+            // The status text: the slot is as wide as its short states; a longer one (why a save failed) grows to the
+            // left into the free space - the slot's right edge and every button stay where they are - and is cut with
+            // "…" only where that space ends (the tooltip has it whole, §2.6)
+            SaveState st = EditStatusShown();
+            std::wstring text = Tr(StatusText(st));
+            const float textR = it.r - 4.f * u;
+            float x = std::max(L.leftEnd + 8.f * u, std::min(it.l + 8.f * u, textR - TextW(text, 12.5f * u)));
+            DrawButtonBack(std::min(it.l, x - 8.f * u), bt, it.r, bb, hot, act, en);
+            DrawText1(text, x, bt, kBtn * u, textR - x, 12.5f * u,
+                      st >= SS_BUSY && st != SS_OFF ? P_ALERT_CAUTION : hot ? P_TEXT : P_MUTED);
+            continue;
+        }
         DrawButtonBack(it.l, bt, it.r, bb, hot, act, en);
         uint8_t pal = GlyphPal(hot, act, en);
         if (k == kStyle && L.level < 4) {  // the style of the caret's block, and a chevron
             DrawText1(StyleLabel(EditStyleId()), it.l + 8.f * u, bt, kBtn * u, it.r - it.l - 30.f * u, 13.f * u, pal);
             DrawIcon(0xE70D, it.r - 22.f * u - 2.f * u, bt, 22.f * u, 9.f * u, pal);
-        } else if (k == kStatus) {
+        } else if (k == kStatus) {  // collapsed to its icon (level >= 1)
             SaveState st = EditStatusShown();
             uint8_t sp;
             wchar_t icon = StatusIcon(st, &sp);
             if (hot) sp = st >= SS_BUSY && st != SS_OFF ? P_ALERT_CAUTION : P_TEXT;
-            if (L.level >= 1) {
-                if (icon) DrawIcon(icon, it.l, bt, it.r - it.l, 14.f * u, sp);
-                else g.canvas->FillCircle((it.l + it.r) * 0.5f, (bt + bb) * 0.5f, 3.f * u, P_ACCENT);
-            } else {
-                DrawText1(Tr(StatusText(st)), it.l + 8.f * u, bt, kBtn * u, it.r - it.l - 12.f * u, 12.5f * u,
-                          st >= SS_BUSY && st != SS_OFF ? P_ALERT_CAUTION : hot ? P_TEXT : P_MUTED);
-            }
+            if (icon) DrawIcon(icon, it.l, bt, it.r - it.l, 14.f * u, sp);
+            else g.canvas->FillCircle((it.l + it.r) * 0.5f, (bt + bb) * 0.5f, 3.f * u, P_ACCENT);
         } else if (d.cmd == CMD_LIST_NUMBER) {  // "1." in the UI font, semibold
             IDWriteTextLayout* T = UiText(L"1.", 13.f * u, true);
             if (T) {
@@ -415,14 +425,28 @@ void Describe(int kind, std::wstring* text, uint8_t* accent, std::vector<StripBu
     }
 }
 
-// the buttons, right-aligned where the gear sits in reading mode (client DIP)
+// A strip spans the bar's width. In reading mode it leaves the corner buttons free - the outline button at the left,
+// the pencil and the gear at the right - so they stay in sight and take their clicks while it is shown.
+void StripSpan(float* l, float* r) {
+    *l = DocLeft();
+    *r = ViewW();
+    if (g.barT > 0) return;
+    float bl, bt, br, bb;
+    if (TocButtonRect(&bl, &bt, &br, &bb)) *l = std::max(*l, br + 6.f);
+    if (PencilRect(&bl, &bt, &br, &bb)) *r = std::min(*r, bl - 6.f);
+    if (SettingsButtonRect(&bl, &bt, &br, &bb)) *r = std::min(*r, bl - 6.f);
+}
+
+// the buttons, right-aligned at the strip's end (client DIP)
 std::vector<StripButton> Buttons(int kind) {
     std::wstring text;
     uint8_t accent;
     std::vector<StripButton> b;
     Describe(kind, &text, &accent, &b);
     const float u = U(), top = StripTop();
-    float x = ViewW() - kSPad * u, t = top + (kStripH - kSBtnH) * 0.5f * u;
+    float sl, sr;
+    StripSpan(&sl, &sr);
+    float x = sr - kSPad * u, t = top + (kStripH - kSBtnH) * 0.5f * u;
     for (size_t k = b.size(); k-- > 0;) {
         float w = TextW(Tr(b[k].label), 13.f * u) + 28.f * u;
         b[k].l = x - w;
@@ -450,7 +474,9 @@ void DrawStrip() {
     std::vector<StripButton> unused;
     Describe(kind, &text, &accent, &unused);
     std::vector<StripButton> b = Buttons(kind);
-    const float u = U(), top = StripTop(), h = kStripH * u, l = DocLeft(), r = ViewW();
+    const float u = U(), top = StripTop(), h = kStripH * u;
+    float l, r;
+    StripSpan(&l, &r);
     bool hc = HighContrast();
     g.canvas->FillRect(l, top, r, top + h, P_OVERLAY_BG);
     g.canvas->FillRect(l, top + h - 1.f * u, r, top + h, hc ? P_OVERLAY_TEXT : P_OVERLAY_BORDER);
@@ -490,6 +516,28 @@ void StripHideEditing() {
     for (int k : {STRIP_CONFLICT, STRIP_ENCODING, STRIP_LEAVE, STRIP_READONLY, STRIP_MISSING}) StripHide(k);
 }
 
+void StripRelayout() {
+    SetStripH();
+    BarChanged();
+}
+
+// The strip's text, whole, while the pointer is over it and it did not fit beside the buttons (the conflict strip's
+// sizes at 1000 px): shown in the tooltip pill, as the status slot's full text is (§2.5, §2.6)
+std::wstring StripTipAt(float x, float y) {
+    int kind = TopStrip();
+    float top = StripTop(), l, r;
+    StripSpan(&l, &r);
+    if (!kind || g.firstFrame || x < l || x >= r || y < top || y >= top + g.stripH) return L"";
+    std::wstring text;
+    uint8_t accent;
+    std::vector<StripButton> unused;
+    Describe(kind, &text, &accent, &unused);
+    std::vector<StripButton> b = Buttons(kind);
+    const float u = U(), textL = l + kSPad * u, textR = b.empty() ? r - kSPad * u : b.front().l - kSGap * u;
+    if (x >= textR || TextW(text, 13.f * u) <= textR - textL) return L"";
+    return text;
+}
+
 int StripKind() { return TopStrip(); }
 
 float StripTop() { return g.barT > 0 ? EditInset() : 0.f; }
@@ -505,8 +553,9 @@ LRESULT StripButtonCenter(UINT cmd) {
 
 bool StripMouse(float x, float y, bool click) {
     int kind = TopStrip();
-    float top = StripTop();
-    if (!kind || g.firstFrame || x < DocLeft() || y < top || y >= top + g.stripH) {
+    float top = StripTop(), l, r;
+    StripSpan(&l, &r);
+    if (!kind || g.firstFrame || x < l || x >= r || y < top || y >= top + g.stripH) {
         if (g_sHot >= 0) { g_sHot = -1; BarChanged(); }
         return false;
     }
@@ -617,8 +666,9 @@ int EditChromeRects(float (*rc)[4], int max) {
         if (n < max && r > l && b > t) { rc[n][0] = l; rc[n][1] = t; rc[n][2] = r; rc[n][3] = b; n++; }
     };
     if (BarShown()) add(DocLeft(), 0, ViewW(), BarTop() + kBarH * U());
-    if (TopStrip() != STRIP_NONE && !g.firstFrame) add(DocLeft(), StripTop(), ViewW(), StripTop() + g.stripH);
     float l, t, r, b;
+    StripSpan(&l, &r);
+    if (TopStrip() != STRIP_NONE && !g.firstFrame) add(l, StripTop(), r, StripTop() + g.stripH);
     if (PencilRect(&l, &t, &r, &b)) add(l, t, r, b);
     return n;
 }

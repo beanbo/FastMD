@@ -225,7 +225,7 @@ const Pair kStr[] = {
     {L"Файл изменён другой программой — загружена новая версия",
      L"The file was changed by another program — the new version is loaded"},
     {L"История правок сброшена: текст изменился", L"Undo history reset: the text changed"},
-    {L"Enter — изменить · Delete — удалить · ←/→ — выйти", L"Enter — edit · Delete — delete · ←/→ — leave"},
+    {L"Delete — удалить · ←/→ — выйти", L"Delete — delete · ←/→ — leave"},  // (Enter opens the source from 3b on)
     // strips
     {L"Файл изменён другой программой (на диске: %s, у вас: %s).",
      L"The file was changed by another program (on disk: %s, yours: %s)."},
@@ -273,6 +273,9 @@ const Pair kStr[] = {
     {L"%u Б", L"%u B"},
     {L"%.1f КБ", L"%.1f KB"},
     {L"%.1f МБ", L"%.1f MB"},
+    // the review of 2a
+    {L"Сначала решите, что делать с прерванным сохранением (полоса сверху)",
+     L"First decide what to do with the interrupted save (the strip above)"},
 };
 static_assert(std::size(kStr) == S_COUNT, "one entry per StrId");
 UiLang g_lang = UL_RU;

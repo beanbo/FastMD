@@ -991,7 +991,7 @@ bool RecoveryRebuild(const RecoveryInfo& r, const wchar_t* current, const wchar_
     bytes.resize((size_t)r.pb);
     bytes += tail;
     bytes += rest;
-    HANDLE f = CreateFileW(out, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE f = CreateFileW(out, GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) return false;
     bool ok = WriteAllAt(f, 0, bytes.data(), bytes.size(), &e);
     CloseHandle(f);
@@ -1021,7 +1021,7 @@ SaveState WriteProbe(const wchar_t* path, DWORD* err) {
     return SS_SAVED;
 }
 
-bool WriteNewFile(const wchar_t* path, const std::string& bytes, DWORD* err) {
+bool WriteNewFile(const wchar_t* path, const std::string& bytes, DWORD* err, bool replace) {
     *err = 0;
     std::wstring tmp = std::wstring(path) + L".fastmd-tmp";
     HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -1029,7 +1029,7 @@ bool WriteNewFile(const wchar_t* path, const std::string& bytes, DWORD* err) {
     bool ok = WriteAllAt(f, 0, bytes.data(), bytes.size(), err);
     if (ok && !FlushFileBuffers(f)) { *err = GetLastError(); ok = false; }
     CloseHandle(f);
-    if (ok && !MoveFileExW(tmp.c_str(), path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    if (ok && !MoveFileExW(tmp.c_str(), path, (replace ? MOVEFILE_REPLACE_EXISTING : 0) | MOVEFILE_WRITE_THROUGH)) {
         *err = GetLastError();
         ok = false;
     }
@@ -1131,7 +1131,13 @@ std::vector<JournalInfo> FindJournals(const std::wstring& dir, uint32_t volume, 
     return out;
 }
 
-void PurgeRecovery(const std::wstring& dir, uint32_t days) {
+std::wstring RecoveryPrefix(uint32_t volume, uint64_t index) {
+    wchar_t b[48];
+    swprintf_s(b, L"%08x-%016llx-", volume, (unsigned long long)index);
+    return b;
+}
+
+void PurgeRecovery(const std::wstring& dir, uint32_t days, const std::wstring& keep) {
     std::wstring d = dir;
     if (d.empty()) return;
     if (d.back() != L'\\') d += L'\\';
@@ -1141,6 +1147,7 @@ void PurgeRecovery(const std::wstring& dir, uint32_t days) {
     if (h == INVALID_HANDLE_VALUE) return;
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (!keep.empty() && !_wcsnicmp(fd.cFileName, keep.c_str(), keep.size())) continue;
         bool ours = EndsWithI(fd.cFileName, L".rec") || EndsWithI(fd.cFileName, L".unsaved") || EndsWithI(fd.cFileName, L".theirs");
         if (ours && U64(fd.ftLastWriteTime.dwHighDateTime, fd.ftLastWriteTime.dwLowDateTime) < limit)
             DeleteFileW((d + fd.cFileName).c_str());

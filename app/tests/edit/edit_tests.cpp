@@ -710,10 +710,13 @@ bool DoOp(OpRun& r, const std::string& op, const std::string& what) {
     for (const Splice& sp : res.splices)
         Check(!SpliceSplits(s, sp.at, (uint32_t)sp.removed.size()), "%s %s: a splice cuts a pair or a CRLF", what.c_str(), op.c_str());
     if (!Check(ApplySplices(s, res.splices, false, &why), "%s %s: %s", what.c_str(), op.c_str(), why.c_str())) return false;
-    // §7.3 step 5: an ordinary character must render as itself at the caret; else the fallbacks, in order
-    if (!typed.empty() && NeedsTypeCheck(typed) && res.splices.size() == 1 && res.splices[0].removed.empty()) {
-        uint16_t tr = 0;
-        uint32_t t0 = TextOfSrc(p.d, p.src, r.st.focus, 1, &tr).t;
+    // §7.3 step 5: an ordinary character must render as itself at the caret; else the fallbacks, in order. As the glue
+    // does, not for blanks (OpType places them) nor after trailing blanks (they render as nothing until text follows).
+    uint16_t tr = 0;
+    uint32_t t0 = TextOfSrc(p.d, p.src, r.st.focus, 1, &tr).t;
+    bool blanks = std::all_of(typed.begin(), typed.end(), [](wchar_t ch) { return ch == L' ' || ch == L'\t'; });
+    if (!typed.empty() && !blanks && !tr && NeedsTypeCheck(typed) && res.splices.size() == 1 && res.splices[0].removed.empty() &&
+        r.st.anchor == r.st.focus) {
         Parsed q;
         ParseMap(q, s);
         if (!TypedOk(p.d, t0, q.d, typed)) {
@@ -742,7 +745,7 @@ bool DoOp(OpRun& r, const std::string& op, const std::string& what) {
     SelfCheck(n, what + " after " + op);
     uint16_t trail = 0;
     TextPos t = TextOfSrc(n.d, n.src, r.st.focus, r.dir, &trail);
-    if (r.st.atom < 0 && r.st.anchor == r.st.focus) {
+    if (r.st.atom < 0 && r.st.anchor == r.st.focus && !n.d.blocks.empty()) {  // (an emptied document has no stop)
         Check(CaretStop(n.d, t), "%s %s: the caret (t%u b%d) is not a stop", what.c_str(), op.c_str(), t.t, t.block);
         if (!trail) {  // normalised as the glue does: to where typed text would go
             uint32_t k = SrcOfText(n.d, n.src, t, MAP_CARET);
@@ -906,7 +909,7 @@ void UnitTests() {
         {'8', 1, 1, 163}, {'9', 1, 1, 165}, {'Q', 1, 1, 166}, {'K', 1, 1, 167}, {'T', 1, 0, 169}, {'M', 1, 0, 170},
         {'M', 1, 1, 171}, {VK_RETURN, 1, 0, 175}, {'A', 1, 0, 101}, {'C', 1, 0, 100}, {VK_INSERT, 1, 0, 100},
         {'C', 1, 1, 137}, {'X', 1, 0, 146}, {'V', 1, 0, 147}, {VK_DELETE, 0, 1, 146}, {VK_INSERT, 0, 1, 147},
-        {VK_F2, 0, 0, 141}, {VK_F5, 0, 0, 103}, {'E', 1, 0, 104}, {'R', 1, 0, 103},
+        {VK_F2, 0, 0, 141}, {VK_F5, 0, 0, 103}, {'E', 1, 0, 104}, {'E', 1, 1, 104}, {'A', 1, 1, 101}, {'R', 1, 0, 103},
         {'A', 0, 0, 0}, {VK_BACK, 0, 0, 0}, {VK_DELETE, 0, 0, 0}, {VK_RETURN, 0, 0, 0}, {'7', 1, 0, 0}, {'Y', 1, 1, 0},
     };
     for (auto& c : chords)

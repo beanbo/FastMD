@@ -92,7 +92,8 @@ RecoveryVerdict ClassifyRecovery(const RecoveryInfo& r, const std::string& bytes
 // length is restored, and it is flushed.
 bool RecoveryRestore(const RecoveryInfo& r, const wchar_t* target, const std::wstring& recoveryDir, DWORD* err);
 // [Открыть копию]: the previous file rebuilt beside it as `out` - the current bytes up to pb, then the saved ones (and,
-// for a save in place, the current ones after pe).
+// for a save in place, the current ones after pe). `out` must not exist yet: a copy made earlier may be open (and
+// edited) in another window, so it is never written over.
 bool RecoveryRebuild(const RecoveryInfo& r, const wchar_t* current, const wchar_t* out);
 // A flush point with a recovery file held between flushes (SaveResult::pending): the target is flushed, then the
 // recovery file deleted. false = the flush failed and the recovery file stays.
@@ -134,8 +135,9 @@ SaveResult SaveSource(const SaveRequest& rq);
 // class (SS_DENIED for a read-only file, a denied ACL, Controlled Folder Access - which says so once, before any typing).
 SaveState WriteProbe(const wchar_t* path, DWORD* err);
 // A file written whole under a temporary name beside it, flushed, then moved over the target (Save As: a new file, so
-// the in-place rule does not apply). false = nothing was replaced.
-bool WriteNewFile(const wchar_t* path, const std::string& bytes, DWORD* err);
+// the in-place rule does not apply). false = nothing was replaced. replace = false: an existing target is left alone
+// (ERROR_ALREADY_EXISTS) - the recovery strip's copies.
+bool WriteNewFile(const wchar_t* path, const std::string& bytes, DWORD* err, bool replace = true);
 // The journal of unsaved edits (§10.6): recovery\<volume>-<index>-<pid>.unsaved, the whole source as UTF-16 after a
 // header (FMDJRN1: the document's path, when, a hash of the text the disk held then, its code page, the writer). Written
 // under a temporary name, flushed, moved into place; local files only.
@@ -152,8 +154,10 @@ bool WriteJournal(const std::wstring& dir, uint32_t volume, uint64_t index, bool
 // journals left for this file identity by processes that are gone (and this one's own), newest first
 std::vector<JournalInfo> FindJournals(const std::wstring& dir, uint32_t volume, uint64_t index, const std::wstring& path);
 uint64_t TextHash(const std::wstring& t);  // Fnv64 of the UTF-16 units: what a journal compares the disk text with
-// Recovery files, journals and kept disk versions older than 14 days go at edit entry (D22).
-void PurgeRecovery(const std::wstring& dir, uint32_t days);
+// Recovery files, journals and kept disk versions older than 14 days go at edit entry (D22) - except those of the file
+// being entered (names starting `keep`, its identity): the strip may be offering them right now.
+void PurgeRecovery(const std::wstring& dir, uint32_t days, const std::wstring& keep);
+std::wstring RecoveryPrefix(uint32_t volume, uint64_t index);  // "<volume>-<index>-", what every name for the file starts with
 // "Overwrite the file with my edits": the disk's version is kept beside the recovery files until the document closes.
 bool WriteTheirs(const std::wstring& dir, uint32_t volume, uint64_t index, const std::string& bytes, std::wstring* file);
 std::wstring EditMutexName(uint32_t volume, uint64_t index);  // Local\FastMD.edit.<volume>-<index> (§10.11)

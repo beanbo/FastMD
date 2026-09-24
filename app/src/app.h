@@ -219,6 +219,7 @@ struct App {
     bool barSliding = false;       // the slide is paced by the message loop's animation branch
     int32_t caretBlock = -1, caretCell = -1;  // the edit caret's block and cell (its text offset is selFocus)
     uint16_t caretTrail = 0;       // columns of trailing blanks the caret stands right of its text position (§6.5)
+    int8_t caretAff = 0;           // -1: at a soft-wrap boundary the caret is drawn at the end of the upper line (§12.2)
     bool caretVisible = false;     // edit mode: the blink phase is on and the document has the keyboard
     int32_t selAtomBlock = -1, selAtomImage = -1;  // the selected object atom: drawn with an outline, no caret
     uint32_t framesPartial = 0, framesFull = 0;    // scrolled and full frames (Q_FRAME_STATS)
@@ -456,7 +457,8 @@ void FindFocusInput();
 HWND FindEditHwnd();                          // the box's EDIT (tests type into it)
 
 // ------------------------------------------------------------------------------------------------ toc.cpp
-bool TocAvailable();                 // the document has headings
+bool TocAvailable();                 // the document has headings (while editing: whether it had them at entry)
+void TocFreeze(bool on);             // edit mode's entry and exit: the panel neither docks nor undocks meanwhile (§12.7)
 bool TocWideEnough();                // the window can keep the column beside the panel
 bool TocDocked();                    // open and the window is wide enough to keep the column beside it
 bool TocOverlayOpen();               // shown as a drawer over the text (narrow window)
@@ -656,6 +658,8 @@ bool EditPendingReplay();            // something waits for the end of the modal
 bool EditEscGuard();                 // within 1 s of the Esc that left edit mode: an Esc never closes the window (UX-6)
 void EditAutosaveChanged();          // the setting was switched: arm or stop the autosave of the open edits
 void EditSetContextPoint(float x, float y);  // where the reading menu was opened: "Edit here" enters there
+void EditZoomChanged(float from);    // after a zoom change: the bar's scroll make-up and the strip follow the new unit
+void EditDetailsToggled(uint32_t summary);  // a <details> folded in edit mode: the caret leaves what it hid
 std::wstring EditSelectionSource();  // copy as Markdown in edit mode: the source of the selection
 // what the bar shows (editbar.cpp)
 SaveState EditSaveState();           // Q_EDIT_SAVE_STATE
@@ -672,6 +676,8 @@ enum StripId : int { STRIP_NONE, STRIP_CONFLICT, STRIP_ENCODING, STRIP_LEAVE, ST
 void StripShow(int kind);            // that condition holds: the strip of the highest priority is shown
 void StripHide(int kind);            // that condition is over
 void StripHideEditing();             // leaving edit mode: its strips go (the reading-mode ones stay)
+void StripRelayout();                // the zoom changed: the strip's height in canvas units follows
+std::wstring StripTipAt(float x, float y);  // the strip's whole text under the pointer when it was cut short ("" = none)
 int StripKind();                     // the strip shown, STRIP_NONE = none
 float StripTop();                    // under the bar in edit mode, at the top of the document in reading mode
 LRESULT StripButtonCenter(UINT cmd); // Q_EDIT_TOOL: client px MAKELONG(x, y), -1 = not shown

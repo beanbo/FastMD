@@ -944,6 +944,7 @@ struct FrameKey {
     uint32_t chrome = 0, editSerial = 0;
     int32_t caretBlock = -1, caretCell = -1, atomBlock = -1, atomImage = -1;
     uint16_t caretTrail = 0;
+    int8_t caretAff = 0;
     float stripH = 0;
     bool operator==(const FrameKey&) const = default;
 };
@@ -998,6 +999,7 @@ FrameKey CurrentKey() {
     k.caretBlock = g.caretBlock;
     k.caretCell = g.caretCell;
     k.caretTrail = g.caretTrail;
+    k.caretAff = g.caretAff;
     k.atomBlock = g.selAtomBlock;
     k.atomImage = g.selAtomImage;
     k.stripH = g.stripH;
@@ -1401,7 +1403,12 @@ bool CaretGeomAt(uint32_t pos, int32_t block, int32_t cellIdx, float* cx, float*
     }
     FLOAT px = 0, py = 0;
     DWRITE_HIT_TEST_METRICS m{};
-    if (FAILED(tl->HitTestTextPosition(pos >= off ? pos - off : 0, FALSE, &px, &py, &m))) return false;
+    uint32_t rel = pos >= off ? pos - off : 0;
+    // edit mode's caret with the upper line's affinity (End, a click right of a wrapped line): at the end of that line,
+    // after the character before it - its own position is the start of the next line (§12.2)
+    bool aff = g.caretAff < 0 && g.editing && rel > 0 && pos == g.selFocus && (int32_t)bi == g.caretBlock &&
+               cellIdx == g.caretCell;
+    if (FAILED(tl->HitTestTextPosition(aff ? rel - 1 : rel, aff ? TRUE : FALSE, &px, &py, &m))) return false;
     *cx = lx + px;
     *docY = g.Y[bi] + ly + py;
     *h = m.height > 1.f ? m.height : 16.f;
@@ -1625,7 +1632,7 @@ void ScrollToBlock(uint32_t i, bool animate) {
     // lay out the target neighbourhood so its position is exact relative to what will be drawn
     EnsureLayout(i);
     RecomputeY();
-    ScrollTo(g.Y[i] - 16.f, animate);
+    ScrollTo(g.Y[i] - (g.editing ? std::max(16.f, EditRevealTop()) : 16.f), animate);  // (below edit mode's bar, §12.1)
 }
 
 // make a text position visible: vertically (keeps a margin, or centres it) and inside a horizontally scrolled block

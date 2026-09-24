@@ -28,7 +28,15 @@ void DrawButton() {
 }
 }  // namespace
 
-bool TocAvailable() { return !g.path.empty() && !g.doc.headings.empty(); }
+static int g_frozen = -1;  // while editing: whether the document had headings at entry (-1 = not frozen)
+
+bool TocAvailable() { return g_frozen >= 0 ? g_frozen != 0 : !g.path.empty() && !g.doc.headings.empty(); }
+// An edit that adds or removes the only heading must not dock or undock the panel under the reader: the column would
+// move and every layout go (§12.7, R21). Leaving lets it follow the headings again (EditExit's re-parse re-lays out).
+void TocFreeze(bool on) {
+    g_frozen = -1;
+    if (on) g_frozen = TocAvailable() ? 1 : 0;
+}
 bool TocWideEnough() { return ViewW() >= kPanelW + kMinDocW + 2 * Metrics::kPadX; }
 bool TocDocked() { return Visible() && TocWideEnough(); }
 // on screen over the text; "open" alone is not enough: with no headings (start screen, a document without them) the
@@ -71,7 +79,7 @@ void TocSetOpen(bool open) {
 int TocCurrent() {
     auto& hs = g.doc.headings;
     if (hs.empty() || g.Y.size() != g.doc.blocks.size()) return -1;
-    float line = g.scrollY + 48.f;
+    float line = g.scrollY + std::max(48.f, g.editing ? EditRevealTop() + 4.f : 0.f);  // (under edit mode's bar, §12.1)
     bool atEnd = g.scrollY >= MaxScroll() - 1.f && MaxScroll() > 0;
     if (atEnd) line = g.scrollY + ViewH() * 0.5f;  // the last sections never reach the top
     int cur = 0;
@@ -84,8 +92,8 @@ int TocCurrent() {
 
 void DrawToc() {
     // icons (Segoe Fluent Icons) stay out of the first frame: the font is loaded right after it (AfterFirstFrame repaints)
-    if (!Visible()) {  // edit mode's bar has its own outline button; a strip covers this corner (and takes the click)
-        if (TocAvailable() && !g.firstFrame && g.barT <= 0 && g.stripH <= 0) DrawButton();
+    if (!Visible()) {  // edit mode's bar has its own outline button; a reading-mode strip leaves this corner free
+        if (TocAvailable() && !g.firstFrame && g.barT <= 0) DrawButton();
         return;
     }
     TocSync();

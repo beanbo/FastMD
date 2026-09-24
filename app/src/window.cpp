@@ -241,9 +241,11 @@ void UserScrollTo(float y, bool animate) {
 static void SetZoom(float z) {
     z = std::clamp(z, kZoomSteps[0], kZoomSteps[std::size(kZoomSteps) - 1]);
     if (std::fabs(z - g.cfg.zoom) < 0.001f) return;
+    float from = g.cfg.zoom;
     g.cfg.zoom = z;
     g.canvas->SetScale(Scale());
     Relayout();
+    EditZoomChanged(from);  // edit mode's bar and strip are sized in screen DIP: their canvas size follows
     FindRelayoutInput();
     ShowToast(std::to_wstring((int)std::lround(z * 100)) + L" %", 900);
 }
@@ -551,6 +553,10 @@ static float ThumbTop(float* th) {  // the track starts under edit mode's bar an
     return top + (trackH - *th) * (MaxScroll() > 0 ? g.scrollY / MaxScroll() : 0);
 }
 
+// where a drag selection counts as having left the text at the top: the window's edge, or in edit mode the bottom of the
+// bar and a strip (the text under them is hidden, and dragging there scrolls instead)
+static float SelectTop() { return g.editing ? EditInset() + g.stripH : 0.f; }
+
 static void UpdateSelectionTo(float x, float y) {
     if (g.editing) {  // edit mode's selection lives in the source
         EditMouseDrag(x, y);
@@ -605,13 +611,14 @@ static void OnMouseMove(int mx, int my) {
         return;
     }
     if (g.selecting) {
-        bool outside = y < 0 || y > ViewH();
+        float top = SelectTop();  // edit mode's bar and strip cover the text above this line
+        bool outside = y < top || y > ViewH();
         float vx, vw, cw;
         int hb = (int)BlockOfPos(g.selFocus);
         if (!outside && HScrollInfo(hb, &vx, &vw, &cw)) outside = x < vx || x > vx + vw;
         if (outside) SetTimer(g.hwnd, TIMER_AUTOSCROLL, 16, nullptr);
         else KillTimer(g.hwnd, TIMER_AUTOSCROLL);
-        UpdateSelectionTo(x, std::clamp(y, 0.f, ViewH()));
+        UpdateSelectionTo(x, std::clamp(y, top, ViewH()));
         return;
     }
     TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, g.hwnd, 0};
@@ -625,9 +632,10 @@ static void OnMouseMove(int mx, int my) {
     bool onBar = fpart == FP_NONE && !drawer && !onStrip && BarMouse(x, y, false);
     if (!onBar) BarMouse(-1.f, -1.f, false);  // leaves the bar's hover
     if (onStrip || onBar) {
-        if (g.hoverLink >= 0 || g.hoverTask >= 0 || g.hoverHeading >= 0 || g.hoverCode >= 0 || !g.tip.empty()) {
+        std::wstring tip = onStrip ? StripTipAt(x, y) : std::wstring();  // a strip's text it had to cut short, whole
+        if (g.hoverLink >= 0 || g.hoverTask >= 0 || g.hoverHeading >= 0 || g.hoverCode >= 0 || tip != g.tip) {
             g.hoverLink = g.hoverTask = g.hoverHeading = g.hoverCode = -1;
-            g.tip.clear();
+            g.tip = tip;
             Invalidate();
         }
         return;
@@ -747,6 +755,7 @@ static void OnLButtonDown(int mx, int my, WPARAM keys) {
     int summary = SummaryAt(x, y);  // <details>: the summary line folds it open or shut
     if (summary >= 0) {
         ToggleDetails((uint32_t)summary);
+        EditDetailsToggled((uint32_t)summary);  // (edit mode: the caret leaves what was folded away)
         return;
     }
     bool onAnchor = false;  // the link icon beside a heading: its own address, copied and jumped to
@@ -757,6 +766,7 @@ static void OnLButtonDown(int mx, int my, WPARAM keys) {
             CopyToClipboard(FileNameOf(g.path) + L"#" + slug);
             ScrollToBlock((uint32_t)heading, true);
             ShowToast(Tr(S_LINK_COPIED), 900);
+            g.lastClickTime = 0;  // the view moved: the next press starts a click of its own, never a double click
             return;
         }
     }
@@ -832,7 +842,13 @@ static void OnLButtonUp(int mx, int my) {
         int li = LinkAt(mx / Scale(), my / Scale());
         g.selAnchor = g.selFocus;  // a click is not a selection
         g.downOnLink = false;
-        if (li >= 0) OpenLink(li);
+        if (li >= 0) {
+            OpenLink(li);
+            // It went somewhere - another document, or a jump in this one: a second press right after is a click on
+            // what is there now, never the double click that enters edit mode where the link was (§2.1)
+            g.lastClickTime = 0;
+            g.clickCount = 0;
+        }
         Invalidate();
         return;
     }
@@ -1218,8 +1234,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             POINT p;
             GetCursorPos(&p);
             ScreenToClient(hwnd, &p);
-            float x = p.x / Scale(), y = p.y / Scale();
-            float d = y < 0 ? y : y > ViewH() ? y - ViewH() : 0;
+            float x = p.x / Scale(), y = p.y / Scale(), top = SelectTop();
+            float d = y < top ? y - top : y > ViewH() ? y - ViewH() : 0;
             if (d != 0) ScrollTo(g.scrollY + std::clamp(d * 0.5f, -60.f, 60.f), false);
             uint32_t hb = BlockOfPos(g.selFocus);  // selecting inside a wide block: scroll it sideways
             float vx, vw, cw;
@@ -1227,7 +1243,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 float dx = x < vx ? x - vx : x > vx + vw ? x - (vx + vw) : 0;
                 if (dx != 0) HScrollSet(hb, HScrollOf(hb) + std::clamp(dx * 0.5f, -40.f, 40.f));
             }
-            UpdateSelectionTo(x, std::clamp(y, 0.f, ViewH()));
+            UpdateSelectionTo(x, std::clamp(y, top, ViewH()));
         }
         return 0;
     case WM_SETTINGCHANGE:
