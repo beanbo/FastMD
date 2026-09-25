@@ -1,7 +1,8 @@
 # FastMD 1.2.0
 
 *Release notes as published on 23.09.2026: <https://github.com/beanbo/FastMD/releases/tag/v1.2.0>. Release
-commands are at the end of `docs/RELEASE-1.0.0.md` (substitute the version). По-русски — ниже.*
+commands are at the end of `docs/RELEASE-1.0.0.md` (substitute the version); the next release is
+[1.3.0](RELEASE-1.3.0.md). По-русски — ниже.*
 
 ---
 
