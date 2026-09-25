@@ -14,7 +14,7 @@ enum Pal : uint8_t {
     // GitHub alerts: NOTE, TIP, IMPORTANT, WARNING, CAUTION (index = P_ALERT_NOTE + Alert - 1)
     P_ALERT_NOTE, P_ALERT_TIP, P_ALERT_IMPORTANT, P_ALERT_WARNING, P_ALERT_CAUTION,
     // syntax ("prettylights")
-    P_KEYWORD, P_STRING, P_COMMENT, P_CONST, P_FUNC, P_TYPE, P_VAR,
+    P_KEYWORD, P_STRING, P_COMMENT, P_CONST, P_FUNC, P_TYPE, P_VAR, P_TAG,
     P_COUNT
 };
 

@@ -39,6 +39,7 @@ const uint32_t kLight[] = {
     0x6639ba,  // P_FUNC
     0x953800,  // P_TYPE
     0x953800,  // P_VAR
+    0x0550ae,  // P_TAG (entity-tag: the constant colour in the light theme)
 };
 const uint32_t kDark[] = {
     0xf0f6fc,  // P_DEFAULT (unused)
@@ -77,6 +78,7 @@ const uint32_t kDark[] = {
     0xd2a8ff,  // P_FUNC
     0xffa657,  // P_TYPE
     0xffa657,  // P_VAR
+    0x7ee787,  // P_TAG
 };
 static_assert(std::size(kLight) == P_COUNT && std::size(kDark) == P_COUNT, "one colour per Pal");
 bool g_dark = false;

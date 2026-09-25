@@ -156,7 +156,7 @@ The detailed plan of every remaining step is in [../docs/PLAN.md](../docs/PLAN.m
 | `src/strings.cpp` | the interface strings in Russian and English |
 | `src/parse.cpp` | md4c (master, at a pinned commit) → a flat block model; footnotes linked both ways, alerts, front matter, heading slugs, emoji shortcodes |
 | `src/html.cpp` | parsing the tags and entities of raw HTML (the mini-DOM lives in `parse.cpp`) |
-| `src/highlight.cpp` | highlighting inside fenced code blocks: a single-pass highlighter with no grammar (comments, strings, numbers, keywords, capitalized types, calls, `$vars`) in GitHub's light colours |
+| `src/highlight.cpp` | highlighting inside fenced code blocks: a single-pass highlighter with no grammar (comments, strings, numbers, keywords, capitalized types, calls, `$vars`) in GitHub's colours; HTML, XML, SVG and XAML get a small lexer of their own that colours tags, attributes, values, comments and entities, leaves the text between tags plain and hands `<script>` / `<style>` to the JavaScript and CSS rules; YAML gets one too (keys, values as strings unless they are numbers, booleans or null, comments, anchors, tags, `|` / `>` blocks); in shell, batch, Dockerfile, Makefile, CMake, INI/TOML, conf/.env and TeX a Capitalized word is not a type |
 | `src/net.cpp` | downloading images from the network through WinHTTP, and the disk cache |
 | `src/svg.cpp` | the lazy load of `fastmd-svg.dll` and the calls into it |
 | `src/formulas.cpp` | the lazy load of `fastmd-tex.dll` and `fastmd-mermaid.dll`: formulas and diagrams → SVG |
