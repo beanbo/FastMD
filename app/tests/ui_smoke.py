@@ -5346,13 +5346,20 @@ def test_edit_popups():
         pic = popup_open(hwnd) and popup_text(hwnd, 0) == "кот" and popup_text(hwnd, 1) == "img/diagram0.png"
         shot(hwnd, "134-edit-popup-image")
         shot_dark(hwnd, "134-edit-popup-image-dark")
-        popup_set(hwnd, "собака", 0)
+        # the path alone first: its change is pending (state 3, Q_EDIT_BUSY 256) until it is in the source, which it is
+        # before the popup closes (the final gate: only the first field used to count)
         popup_set(hwnd, "img/Новая картинка.png", 1)
+        pending = q(hwnd, "EDIT_POPUP_STATE") == POPUP["PENDING"] and q(hwnd, "EDIT_BUSY") & 256
+        popup_settled(hwnd)
+        live = q(hwnd, "SRC_HASH", 0) == src_hash(text.replace("(img/diagram0.png)", "(<img/Новая картинка.png>)", 1))
+        popup_set(hwnd, "собака", 0)
         popup_settled(hwnd)
         cmd(hwnd, "POPUP_DONE", 0.4)
         text = text.replace("![кот](img/diagram0.png)", "![собака](<img/Новая картинка.png>)", 1)
-        ok &= check("edit 3b: a picture's popup edits its alt text and its path (a path with blanks in <…>)",
-                    pic and q(hwnd, "SRC_HASH", 0) == src_hash(text), f"pic {pic}, len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
+        ok &= check("edit 3b: a picture's popup edits its alt text and its path (a path with blanks in <…>); a change of the "
+                    "path is pending, then in the source while the popup is open", pic and pending and live and
+                    q(hwnd, "SRC_HASH", 0) == src_hash(text),
+                    f"pic {pic}, pending {bool(pending)}, live {live}, len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
         cmd(hwnd, "UNDO", 0.4)
         text = text.replace("![собака](<img/Новая картинка.png>)", "![кот](img/diagram0.png)", 1)
         # the HTML block's popup

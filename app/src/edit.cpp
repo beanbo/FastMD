@@ -2716,6 +2716,17 @@ void PopupApply() {
     BarChanged();
 }
 
+// a field's text not in the source yet (the 120 ms after the typing) - any field: a picture's path too (Q_EDIT_BUSY 256)
+bool PopupTextPending() {
+    if (!SourcePopup()) return false;
+    for (int f = 0; f < pop.view.fields; f++) {
+        std::wstring t;
+        PopupFieldText(f, &t);
+        if (t != pop.applied[f] && !(f == 1 && pop.view.fixed1)) return true;
+    }
+    return false;
+}
+
 void NewPhantomAt(int32_t b, bool before, int depth);
 // After a popup: the caret after its object (a view scrolled away from it stays where it is). After an object of its
 // own just put in, or one that is the last block, that is a new paragraph after it: the next words go there - not into
@@ -4899,12 +4910,9 @@ bool EditQuery(UINT q, LPARAM lp, LRESULT* out) {
     }
     case Q_UNDO_DEPTH: *out = (LRESULT)(lp ? s.undo.RedoDepth() : s.undo.Depth()); return true;
     case Q_EDIT_POPUP: *out = PopupOn() ? (LRESULT)PopupFieldHwnd((int)lp) : 0; return true;
-    case Q_EDIT_POPUP_STATE: {  // 0 none, 1 ok, 2 an error, 3 its text or its picture on the way
-        std::wstring t;
-        PopupFieldText(0, &t);
-        *out = !PopupOn() ? 0 : !pop.view.error.empty() ? 2 : pop.previewSeq > pop.previewDone || (SourcePopup() && t != pop.applied[0]) ? 3 : 1;
+    case Q_EDIT_POPUP_STATE:  // 0 none, 1 ok, 2 an error, 3 its text or its picture on the way
+        *out = !PopupOn() ? 0 : !pop.view.error.empty() ? 2 : pop.previewSeq > pop.previewDone || PopupTextPending() ? 3 : 1;
         return true;
-    }
     case Q_EDIT_BUBBLE: {
         float box[4];
         std::wstring dest;
@@ -4968,11 +4976,7 @@ bool EditQuery(UINT q, LPARAM lp, LRESULT* out) {
         if (pop.previewSeq > pop.previewDone) b |= 16;
         if (g.barSliding) b |= 64;
         if (g.animating) b |= 128;
-        if (SourcePopup()) {  // the popup's text not written into the source yet
-            std::wstring t;
-            PopupFieldText(0, &t);
-            if (t != pop.applied[0]) b |= 256;
-        }
+        if (PopupTextPending()) b |= 256;
         if (s.retryArmed) b |= 512;
         if (s.journalArmed) b |= 1024;
         if (!s.deferred.empty()) b |= 2048;
