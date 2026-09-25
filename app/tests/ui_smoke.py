@@ -4853,6 +4853,7 @@ def test_edit_commands():
         cmd(hwnd, "BLOCK_H2", 0.4)
         h2 = q(hwnd, "EDIT_ACTIVE") >> 24 == 2 and q(hwnd, "SRC_HASH", 0) == src_hash(text.replace("Первый", "## Первый", 1))
         shot(hwnd, "120-edit-heading2")
+        shot_dark(hwnd, "120-edit-heading2-dark")
         cmd(hwnd, "BLOCK_H2", 0.4)
         ok &= check("edit 3a: heading 2 and back (the same level again returns to text)",
                     h2 and q(hwnd, "EDIT_ACTIVE") >> 24 == 0 and q(hwnd, "SRC_HASH", 0) == src_hash(text),
@@ -4864,6 +4865,7 @@ def test_edit_commands():
             on = active(hwnd, bit) and q(hwnd, "SRC_HASH", 0) == src_hash(text.replace("Первый", prefix + "Первый", 1))
             if name == "LIST_TASK":
                 shot(hwnd, "121-edit-active-task")
+                shot_dark(hwnd, "121-edit-active-task-dark")
             cmd(hwnd, name, 0.4)
             ok &= check(f"edit 3a: {name} writes «{prefix.strip()}», shows it active, and off again",
                         on and not active(hwnd, bit) and q(hwnd, "SRC_HASH", 0) == src_hash(text),
@@ -4923,7 +4925,7 @@ def test_edit_commands():
     return ok
 
 
-TABLE_DOC = "# Таблицы\n\nАбзац перед таблицей.\n\nАбзац после.\n"
+TABLE_INS_DOC = "# Таблицы\n\nАбзац перед таблицей.\n\nАбзац после.\n"
 
 
 def test_edit_table():
@@ -4931,11 +4933,11 @@ def test_edit_table():
     table the actions popover, and every CMD_TABLE_* on the bytes; the popovers in light and dark"""
     ok = True
     doc = OUT / "edit-table.md"
-    doc.write_bytes(TABLE_DOC.encode("utf-8"))
+    doc.write_bytes(TABLE_INS_DOC.encode("utf-8"))
     set_reg("EditHintShown", 1)
     proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_TEST_HOOKS": "1"})
     try:
-        text = TABLE_DOC
+        text = TABLE_INS_DOC
         enter_edit(hwnd, 1, dx=1)
         cmd_arg(hwnd, "INS_TABLE", 2 << 4 | 3)  # 2 rows (the header's included), 3 columns
         t23 = "|  |  |  |\n| --- | --- | --- |\n|  |  |  |\n"
@@ -4999,7 +5001,7 @@ def test_edit_table():
         cmd(hwnd, "TABLE_DEL", 0.5)
         s1 = saved_text(hwnd, doc)
         ok &= check("edit 3a: delete table takes all its lines, the paragraphs around stay apart",
-                    s1 == TABLE_DOC and not active(hwnd, 12), f"{s1!r}")
+                    s1 == TABLE_INS_DOC and not active(hwnd, 12), f"{s1!r}")
         post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
     finally:
         close_edit(proc, hwnd)
@@ -5029,6 +5031,7 @@ def test_edit_hr():
                     q(hwnd, "BLOCK_COUNT") == blocks + 1, f"phantom {q(hwnd, 'EDIT_PHANTOM', 0)}, blocks "
                     f"{q(hwnd, 'BLOCK_COUNT')}")
         shot(hwnd, "126-edit-hr-phantom")
+        shot_dark(hwnd, "126-edit-hr-phantom-dark")
         type_text(hwnd, "После линии", 0.4)
         text = text.replace("Абзац.\n", "Абзац.\n\n---\n\nПосле линии\n", 1)
         ok &= check("edit 3a: typing in the phantom after the rule writes a paragraph after it",
@@ -5040,12 +5043,17 @@ def test_edit_hr():
         styled = q(hwnd, "EDIT_PHANTOM", 2) == 2 and q(hwnd, "EDIT_ACTIVE") >> 24 == 2
         shot(hwnd, "127-edit-phantom-heading")
         shot_dark(hwnd, "127-edit-phantom-heading-dark")
+        cmd(hwnd, "QUOTE", 0.4)
+        quoted = q(hwnd, "EDIT_PHANTOM", 2) == 10 and active(hwnd, 11)  # (style 10: the quote, §6.7)
+        shot(hwnd, "127-edit-phantom-quote")
+        shot_dark(hwnd, "127-edit-phantom-quote-dark")
         cmd(hwnd, "LIST_TASK", 0.4)
         shot(hwnd, "127-edit-phantom-task")
+        shot_dark(hwnd, "127-edit-phantom-task-dark")
         type_text(hwnd, "дело", 0.4)
         text = text.replace("После линии\n", "После линии\n\n- [ ] дело\n", 1)
-        ok &= check("edit 3a: a phantom takes a style (heading 2, then a task) and typing writes it",
-                    styled and q(hwnd, "SRC_HASH", 0) == src_hash(text), f"styled {styled}")
+        ok &= check("edit 3a: a phantom takes a style (heading 2, a quote, then a task) and typing writes it",
+                    styled and quoted and q(hwnd, "SRC_HASH", 0) == src_hash(text), f"styled {styled}, quoted {quoted}")
         # the formula popover; an inline formula at the caret
         click(hwnd, q(hwnd, "TEXT_LEFT") + 4, q(hwnd, "BLOCK_Y", 1) + 10, 0.3)
         post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.1)
