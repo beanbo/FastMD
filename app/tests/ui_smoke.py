@@ -1270,11 +1270,15 @@ def test_tasks():
             ok &= check("tasks: a file changed on disk is reloaded, not written",
                         doc.read_bytes() == changed and q(hwnd, "RELOADS") > reloads and q(hwnd, "TASK", 4) == 0,
                         f'reloads {reloads} → {q(hwnd, "RELOADS")}')
+            reloads, saves = q(hwnd, "RELOADS"), q(hwnd, "SAVES")
             click(hwnd, box[0], box[1], 0.5)  # and after the reload the same click works
+            got = doc.read_bytes()
             ok &= check("tasks: after the reload the box can be ticked",
-                        doc.read_bytes() == changed.replace("[ ] Нумерованная".encode("utf-8"),
-                                                            "[x] Нумерованная".encode("utf-8"))
-                        and q(hwnd, "TASK", 4) == 1)
+                        got == changed.replace("[ ] Нумерованная".encode("utf-8"), "[x] Нумерованная".encode("utf-8"))
+                        and q(hwnd, "TASK", 4) == 1,
+                        f'reloads {reloads} → {q(hwnd, "RELOADS")}, saves {saves} → {q(hwnd, "SAVES")}, box '
+                        f'{q(hwnd, "TASK", 4)}, file {"as changed" if got == changed else "other"}, toast '
+                        f'{q(hwnd, "LAST_PROMPT", 2) & 0xFFFFFFFF:#x}')
             shot(hwnd, "60-tasks-light")
             cmd(hwnd, "THEME_DARK", 0.5)
             shot(hwnd, "61-tasks-dark")
@@ -6203,6 +6207,64 @@ def test_review4_reading():
     return ok
 
 
+def test_edit_phantom_kept():
+    """§6.7 (the final gate): Ctrl+Enter leaves a phantom row after a block and ↑ takes the caret back into the block;
+    then the block's length changes by something else than the core's typing - a popup's text, an inline formula
+    emptied in it, the code toggle, the code language, typing in a big document (DEBOUNCE_CHARS=0). The caret back in
+    the row, a letter typed there starts a paragraph after the block - before the fix it went where the block's text
+    used to end: into the text, the code, the closing fence"""
+    ok = True
+
+    def popup(hwnd, text):
+        atom_after(hwnd, 1, 9)
+        cmd(hwnd, "ATOM_EDIT", 0.4)
+        popup_open(hwnd)
+        popup_set(hwnd, text)
+        if text:
+            popup_settled(hwnd)
+        else:
+            time.sleep(0.3)
+        cmd(hwnd, "POPUP_DONE", 0.5)
+
+    def lang(hwnd):
+        cmd(hwnd, "CODE_LANG", 0.5)
+        popup_open(hwnd)
+        popup_set(hwnd, "js")
+        cmd(hwnd, "POPUP_DONE", 0.5)
+
+    formula = "# Строка\n\nФормула $a$ тут.\n"
+    cases = [("a popup's text", formula, lambda h: popup(h, "a+b+c"), "# Строка\n\nФормула $a+b+c$ тут.\n\nz\n", {}),
+             ("an inline formula emptied", formula, lambda h: popup(h, ""), "# Строка\n\nФормула тут.\n\nz\n", {}),
+             ("the code toggle", "# Код\n\nабв где\n", lambda h: cmd(h, "CODEBLOCK", 0.5), "# Код\n\n```\nабв где\n```\n\nz\n", {}),
+             ("the code language", "# Код\n\n```\ncode\n```\n", lang, "# Код\n\n```js\ncode\n```\n\nz\n", {}),
+             ("typing in a big document", "# Большой\n\nабв\n", lambda h: type_text(h, "гд", 0.6), "# Большой\n\nабвгд\n\nz\n",
+              {"FASTMD_EDIT_DEBOUNCE_CHARS": "0"})]
+    for k, (what, text, change, want, extra) in enumerate(cases):
+        doc = OUT / f"edit-phantom-kept-{k}.md"
+        doc.write_bytes(text.encode("utf-8"))
+        proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_TEST_HOOKS": "1", **extra})
+        try:
+            enter_edit(hwnd, 1, dx=1)
+            cmd(hwnd, "NEW_PARAGRAPH", 0.4)
+            made = q(hwnd, "EDIT_PHANTOM", 0) == 1 and active(hwnd, 15)
+            testkey(hwnd, VK["up"])  # (the keys with no modifier, whatever the keyboard holds)
+            back = q(hwnd, "EDIT_PHANTOM", 0) == 1 and not active(hwnd, 15)
+            change(hwnd)
+            settle(hwnd)
+            testkey(hwnd, VK["end"])
+            testkey(hwnd, VK["down"])
+            type_text(hwnd, "z", 0.5)
+            settle(hwnd)
+            got = saved_text(hwnd, doc)
+            ok &= check(f"edit 4 (final gate): a phantom row stays after its block through {what}: the letter typed into "
+                        "it starts a paragraph after the block", made and back and got == want,
+                        f"phantom {made}, back in the block {back}, got {got!r}")
+            post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.3)
+        finally:
+            close_edit(proc, hwnd)
+    return ok
+
+
 def main():
     OUT.mkdir(exist_ok=True)
     reset_profile()
@@ -6247,7 +6309,8 @@ def main():
              ("edit_paste_private", test_edit_paste_private), ("edit_bindings", test_edit_bindings),
              ("edit_race_images", test_edit_race_images), ("edit_bubble", test_edit_bubble),
              ("edit_review4_data", test_edit_review4_data), ("edit_review4_typing", test_edit_review4_typing),
-             ("edit_review4_preview", test_edit_review4_preview), ("review4_reading", test_review4_reading)]
+             ("edit_review4_preview", test_edit_review4_preview), ("review4_reading", test_review4_reading),
+             ("edit_phantom_kept", test_edit_phantom_kept)]
     only = [n for n in os.environ.get("FASTMD_ONLY", "").split(",") if n]  # e.g. FASTMD_ONLY=update,settings
     for name, t in tests:
         if not only or name in only:

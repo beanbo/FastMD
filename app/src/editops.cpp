@@ -796,7 +796,7 @@ EditResult OpTypePlain(const EditCtx& c, const EditState& st, std::wstring_view 
     r.after.focus = r.after.anchor = s + (uint32_t)t.size();
     r.after.pendOn &= ~FMT_STICKY;
     if (!(r.after.pendOn & 0xFF)) r.after.pendOn = 0;
-    return r;
+    return Carry(std::move(r));  // (as OpType's: a phantom after the block moves with text typed at its end)
 }
 
 // §8.2: with a selection the format is added to every piece that lacks it - or, when every character has it already,
@@ -1376,7 +1376,7 @@ EditResult OpCodeBlock(const EditCtx& c, const EditState& st) {
         r.after.focus = r.after.anchor = at + caret;
         r.after.pendOn = r.after.pendOff = 0;
         SetShape(r, f.block, f.block, (int32_t)paras.size() - 1, false);
-        return r;
+        return Carry(std::move(r));
     }
     if (fs.flags & BS_FOOTNOTE) return Refuse(st, "context");
     std::vector<int32_t> bl = TextBlocks(c, st);
@@ -1430,7 +1430,7 @@ EditResult OpCodeBlock(const EditCtx& c, const EditState& st) {
     r.after.atom = -1;
     r.after.pendOn = r.after.pendOff = 0;
     SetShape(r, bl.front(), bl.back(), 1 - (int32_t)bl.size(), false);  // they become one block; nothing else changes
-    return r;
+    return Carry(std::move(r));  // (a phantom after them: after the fence - the final gate)
 }
 
 // The code language (§8.7): the opening fence's info string; an indented block becomes a fenced one
@@ -1471,7 +1471,7 @@ EditResult OpCodeLang(const EditCtx& c, const EditState& st, std::wstring_view i
     }
     r.after.focus = MapThrough(r.splices, st.focus, true);
     r.after.anchor = MapThrough(r.splices, st.anchor, true);
-    return r;
+    return Carry(std::move(r), true);  // (a phantom after the block stays after its closing fence - the final gate)
 }
 
 // ------------------------------------------------------------------------------------------------ inserts (§8.8)
@@ -2192,7 +2192,7 @@ EditResult OpAtomSource(const EditCtx& c, const EditState& st, int atom, int fie
     if (sp.removed != sp.inserted) r.splices.push_back(std::move(sp));
     r.after.focus = MapThrough(r.splices, st.focus, false);
     r.after.anchor = MapThrough(r.splices, st.anchor, false);
-    return r;
+    return Carry(std::move(r), true);  // (a phantom stays beside its block: the final gate's fuzz walk)
 }
 
 // ------------------------------------------------------------------------------------------------ picture files (§8.8)

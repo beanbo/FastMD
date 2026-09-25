@@ -228,6 +228,19 @@ src: ‸a ![cat](c.png) b
 do: AtomSource(0,0,"big]cat")
 want: ‸a ![big\]cat](c.png) b
 
+=== atom_source_keeps_phantom (§6.7, the final gate: a phantom the caret is in stays beside its block while an object before it is rewritten - the fuzz's walk typed into its old place)
+src: a $x$ b\n\nla‸st\n
+tex: on
+do: C-Enter; AtomSource(0,0,"y+1"); type "z"
+want: a $y+1$ b\n\nlast\n\nz‸\n
+
+=== atom_source_keeps_phantom_beside (§6.7, §9.2, the final gate: the object in the phantom's own block, the caret back in it, as when a popup is open)
+src: a $x$ b‸\n
+tex: on
+flags: nolist
+do: Enter; Back; AtomSource(0,0,"y+1"); Phantom; type "z"
+want: a $y+1$ b\n\nz‸\n
+
 === image_several (§8.8: several pictures, one after the other)
 src: a ‸b
 do: Image("x.png\ny.png","x\ny")

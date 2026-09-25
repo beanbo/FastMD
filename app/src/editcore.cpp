@@ -1827,10 +1827,13 @@ namespace ec {
 EditResult CutRange(const EditCtx& c, const EditState& st, std::wstring ins, EditKind kind);
 
 // A phantom the caret is not in stays next to its block through an operation's splices, as the caret does (§6.7): one
-// after a block moves with text typed at its end, one before it does not.
-EditResult Carry(EditResult r) {
+// after a block moves with text typed at its end, one before it does not. `always`: the one the caret is in too - for
+// an operation that never makes a phantom (a popup's text, the code toggle and language: the final gate found them
+// leaving it where the text had been, and the next letter typed into it went there)
+EditResult Carry(EditResult r, bool always) {
     Phantom& ph = r.after.phantom;
-    if (ph.kind != PH_NONE && !ph.in && r.refused.empty()) ph.anchorSrc = MapThrough(r.splices, ph.anchorSrc, ph.kind != PH_BEFORE);
+    if (ph.kind != PH_NONE && (always || !ph.in) && r.refused.empty())
+        ph.anchorSrc = MapThrough(r.splices, ph.anchorSrc, ph.kind != PH_BEFORE);
     return r;
 }
 

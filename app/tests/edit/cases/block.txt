@@ -316,3 +316,19 @@ src: para\n\n    co‸de\n
 flags: nolist
 do: Lang("js")
 want: para\n\n```js\n‸code\n```\n
+
+=== fence_keeps_phantom (§6.7, §8.7, the final gate: a phantom after a paragraph stays after the fence it becomes - left where the text ended, the letter typed into it went into the code)
+src: abc de‸\n
+flags: nolist
+do: Enter; Back; Fence; Phantom; type "z"
+want: ```\nabc de\n```\n\nz‸\n
+
+=== unfence_keeps_phantom (§6.7, §8.7, the final gate: code unwrapped, the phantom after it stays after the last paragraph)
+src: ```\nab\n\ncd‸\n```\n
+do: C-Enter; Back; Fence; Phantom; type "z"
+want: ab\n\ncd\n\nz‸\n
+
+=== lang_keeps_phantom (§6.7, §8.7, the final gate: a phantom after code stays after its closing fence - left inside it, the letter typed into it broke the fence)
+src: ```\nco‸de\n```\n
+do: C-Enter; Back; Lang("js"); Phantom; type "z"
+want: ```js\ncode\n```\n\nz‸\n

@@ -15,7 +15,8 @@
 //   flags: noquote nolist nocrlf - skip the automatic variants
 //   do:    caret - the ‸ of src is a source offset; TextOfSrc then SrcOfText(MAP_CARET) must land on want's ‸
 //          or the operations, `;`-separated: type "x", BS, C-BS, Del, C-Del, Enter, S-Enter, C-Enter, Tab, S-Tab,
-//          Paste("…"), Cut, Phantom (the caret into the phantom row), click(t,b[,c]) (the caret at a text position),
+//          Paste("…"), Cut, Phantom (the caret into the phantom row), Back (out of it into its block, the phantom kept),
+//          click(t,b[,c]) (the caret at a text position),
 //          TaskToggle(n); the commands of §8: Bold, Italic, Strike, Code, P, H1…H6, Bullet, Number, Task, Quote,
 //          Fence, Lang("…"), Table(r,c), Table.<RowAbove|RowBelow|ColLeft|ColRight|DelRow|DelCol|AlignL|AlignC|AlignR|
 //          Del>, Formula, FormulaBlock, Diagram(n), Image("dest","alt"), Hr; Phase 3b's Link("url") (Link!("url"): a
@@ -736,6 +737,15 @@ bool DoOp(OpRun& r, const std::string& op, const std::string& what) {
         if (!Check(r.st.phantom.kind != PH_NONE, "%s: Phantom: there is none", what.c_str())) return false;
         r.st.phantom.in = 1;
         r.st.focus = r.st.anchor = r.st.phantom.anchorSrc;
+        return true;
+    } else if (op == "Back") {  // out of the phantom row to its block's near edge, the phantom kept (↑ / ↓ out of it)
+        const int32_t b = PhantomBlock(p.d, p.src, r.st.phantom);
+        if (!Check(InPhantom(r.st) && b >= 0, "%s: Back: the caret is in no phantom row", what.c_str())) return false;
+        const Block& bl = p.d.blocks[b];
+        uint32_t s = SrcOfText(p.d, p.src, TextPos{bl.textOff + (r.st.phantom.kind == PH_BEFORE ? 0 : bl.textLen), b, -1}, MAP_CARET);
+        if (!Check(s != UINT32_MAX, "%s: Back: block %d's edge maps nowhere", what.c_str(), b)) return false;
+        r.st.phantom.in = 0;
+        r.st.focus = r.st.anchor = s;
         return true;
     } else if (op.rfind("click(", 0) == 0) {  // click(t,b[,c]): the caret at a text position
         int t = 0, b = -1, cl = -1;

@@ -1950,6 +1950,15 @@ bool ApplyRaw(const std::vector<Splice>& sps) {  // all or nothing, through the 
 void Revert(const std::vector<Splice>& sps) {
     for (size_t k = sps.size(); k-- > 0;) g.src.replace(sps[k].at, sps[k].inserted.size(), sps[k].removed);
 }
+// A phantom beside the caret's block stays beside it through a splice made here, not by the core's operations (Carry
+// does it for those): a popup's text, typing in a big document. Left at its old offset, the next letter typed into it
+// went where the text had been (the final gate).
+void CarryPhantom(uint32_t at, uint32_t removed, uint32_t inserted) {
+    Phantom& ph = s.st.phantom;
+    if (ph.kind == PH_NONE) return;
+    const std::vector<Splice> sp{Splice{at, std::wstring(removed, L' '), std::wstring(inserted, L' ')}};  // (the lengths)
+    ph.anchorSrc = MapThrough(sp, ph.anchorSrc, ph.kind != PH_BEFORE);
+}
 
 // ---- raw-while-typing (§6.9)
 uint32_t SrcLineStart(uint32_t s) {
@@ -2188,6 +2197,7 @@ bool TryDeferredType(const std::wstring& text) {
         at = r.splices[0].at;
     }
     if (!EditSplice(at, 0, text)) return true;
+    CarryPhantom(at, 0, (uint32_t)text.size());
     if (s.st.burstBeg == UINT32_MAX) {
         s.st.burstBeg = at;
         if (g.hwnd) SetTimer(g.hwnd, TIMER_EDIT_REPARSE, 150, nullptr);  // later keystrokes do not re-arm it
@@ -2216,6 +2226,7 @@ bool TryDeferredBackspace() {
     std::wstring removed = g.src.substr(at, s.st.focus - at);
     EditState before = s.st;
     if (!EditSplice(at, (uint32_t)removed.size(), L"")) return true;
+    CarryPhantom(at, (uint32_t)removed.size(), 0);
     s.st.focus = s.st.anchor = at;
     s.st.wantX = -1;
     EditStep step;
@@ -2705,6 +2716,7 @@ void PopupApply() {
             PopupClose(1);
             return;
         }
+        CarryPhantom(sp.at, (uint32_t)sp.removed.size(), (uint32_t)sp.inserted.size());
         pop.lineEnd = (uint32_t)(pop.lineEnd + sp.inserted.size() - sp.removed.size());
         pop.linesNow = g.src.substr(pop.lineBeg, pop.lineEnd - pop.lineBeg);
         s.st.focus = s.st.anchor = pop.bind.outerBeg;
@@ -2770,6 +2782,7 @@ void PopupClose(int how) {
             if (e < t.size() && t[e] == L' ' && (a == 0 || t[a - 1] == L' ' || t[a - 1] == L'\n' || t[a - 1] == L'\r')) e++;
             else if (a > 0 && t[a - 1] == L' ' && (e >= t.size() || t[e] == L'\n' || t[e] == L'\r')) a--;
             if (EditSplice(a, e - a, L"")) {
+                CarryPhantom(a, e - a, 0);
                 end -= e - a;
                 s.st.atom = -1;
                 s.st.focus = s.st.anchor = a;

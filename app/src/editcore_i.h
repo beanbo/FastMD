@@ -95,7 +95,7 @@ EditResult Goto(const EditCtx& c, const EditState& st, int32_t b, bool end);
 std::wstring StylePrefix(uint8_t style);
 EditResult NewPhantom(const EditCtx& c, const EditState& st, PhantomKind k, int32_t b, int depth, uint32_t at, bool in);
 EditResult After(const EditCtx& c, const EditState& st, int32_t b);
-EditResult Carry(EditResult r);
+EditResult Carry(EditResult r, bool always = false);
 // the check after the re-parse of a structural step (EditResult::Shape, Phase 4 notes)
 void SetShape(EditResult& r, int32_t b0, int32_t b1, int32_t delta, bool same);
 // the line starting at l belongs to a paragraph (not a heading): text under or over it would run into it
