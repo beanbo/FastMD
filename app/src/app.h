@@ -150,8 +150,8 @@ struct RenderEntry {
     float ascent = 0;
     std::shared_ptr<const Scaled> sc;        // the last display-size copy made from pix
     std::wstring cachePath;                  // a remote picture: its file in the download cache
-    FILETIME failTime{};                     // a local picture that failed: its file's stamp then (retried when it
-    uint64_t failSize = 0;                   // changes)
+    FILETIME fileTime{};                     // a local picture: its file's stamp when it was read - a failure is tried
+    uint64_t fileSize = 0;                   // again, a picture read again, when it changes
     std::string error;
     uint64_t lastUse = 0;                    // for evicting what the document no longer shows
 };
@@ -164,8 +164,8 @@ struct RenderResult {
     int w = 0, h = 0;
     float ascent = 0;
     std::wstring cachePath;
-    FILETIME failTime{};
-    uint64_t failSize = 0;
+    FILETIME fileTime{};
+    uint64_t fileSize = 0;
     std::string error;
     bool keep = false;                       // the preview worker's (§9.4): a failure keeps the last good picture shown
 };
@@ -514,7 +514,11 @@ uint32_t MathContext();              // the render context of formulas and diagr
 // a formula (kind 1, 2) or a diagram (3) as pixels at `scale` per DIP (any thread); r: its size in DIP, ok
 bool RenderMath(uint8_t kind, const std::string& src, float fontPx, uint32_t rgb, bool dark, float scale, Pixels& pix,
                 RenderResult& r);
-void RetryChangedPictures();         // the window was activated: retry pictures whose failed file has changed since
+// a formula or a diagram rendered on the picture worker (a preview job another one displaced before it began)
+void QueueMathRender(const std::wstring& key, uint32_t ctx, uint32_t loadGen, uint8_t kind, const std::string& src, float fontPx,
+                     uint32_t rgb, bool dark);
+void RetryChangedPictures();         // the window was activated: pictures whose file has changed since are read again
+void PicturesMayHaveChanged();       // the document was rewritten with the same text: the same, at once
 bool RemoteImagesAllowed();          // the privacy setting, plus a one-off allowance for this document
 bool DocHasRemoteImages();           // something is waiting to be fetched
 void LoadRemoteImages();             // allow them for this document and start fetching
@@ -652,6 +656,8 @@ bool EditLeave();                    // Esc, ✕, F2: flush and leave; false = t
 void EditExit(bool silent);          // leave with nothing left to save; silent: no slide (another document follows)
 bool CanLeaveDocument();             // §10.8: before the document goes - flushed, or the reader chose; false = stay
 bool EditBeforeClose();              // PrepareToClose's part: false = stay open (or the close waits for a modal loop)
+void EditRestartLater();             // the update's restart asked for inside a modal loop: UpdateRestart once it is over
+void EditPresented();                // a frame is on screen: the typed character's cost from WM_CHAR is taken (§5.8)
 void EditQueryEndSession();          // §10.9: journal, then the save, no UI
 void EditEndSession();
 // input in edit mode (§2.7, §2.8)
@@ -719,7 +725,8 @@ bool EditPopupCommit();              // §9.2's commit points: what the popup ho
 struct PreviewResult;
 void EditOnPreview(PreviewResult* r);    // WM_APP_PREVIEW
 bool EditPreviewClaim(const Image& im, const std::wstring& key);  // StartImages: the popup's formula goes to the preview worker
-bool EditPopupHolds(const Image& im);  // a formula or a diagram in the lines a source popup edits
+void EditPreviewKnown(const Image& im, const std::wstring& key, uint8_t state);  // ... or the table knows it already
+bool EditPopupHolds(const Image& im);  // the formula or the diagram a source popup edits (not the others on its lines)
 bool EditDropFiles(HANDLE drop);     // WM_DROPFILES in edit mode: pictures go in at the drop point (false: not editing)
 // the link bubble (§2.11): the caret's link, its box (client DIP) and address; false = not shown
 bool EditBubble(float box[4], std::wstring* dest);
@@ -799,8 +806,10 @@ HWND PopupFieldHwnd(int field);                  // Q_EDIT_POPUP; 0 until the in
 uint32_t PopupFieldText(int field, std::wstring* text);  // the buffer: the field's latest text (lines "\n"), change count
 // the preview worker (§9.4): one detached thread, the latest job only - a newer one replaces a job not begun yet
 struct PreviewResult { uint32_t seq = 0; RenderResult r; std::string good; };  // good: the source, when it rendered
-// good: the popup's last source that rendered - drawn in its place, for the context of now, when this one does not
-void PreviewRequest(uint32_t seq, const std::wstring& key, const Image& im, const std::string& good);
+// good: the popup's last source that rendered - drawn in its place, for the context of now, when this one does not.
+// A job not begun yet that this one replaces goes to the picture worker, unless its key is `drop` (the popup's own last
+// one): true then, and its table entry is the caller's to forget
+bool PreviewRequest(uint32_t seq, const std::wstring& key, const Image& im, const std::string& good, const std::wstring& drop);
 void PreviewWarm(int what);                      // 1 TeX, 2 Mermaid: loaded on the worker, once per process
 
 // ------------------------------------------------------------------------------------------------ settings_ui.cpp

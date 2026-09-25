@@ -96,9 +96,20 @@ std::wstring StylePrefix(uint8_t style);
 EditResult NewPhantom(const EditCtx& c, const EditState& st, PhantomKind k, int32_t b, int depth, uint32_t at, bool in);
 EditResult After(const EditCtx& c, const EditState& st, int32_t b);
 EditResult Carry(EditResult r);
+// the check after the re-parse of a structural step (EditResult::Shape, Phase 4 notes)
+void SetShape(EditResult& r, int32_t b0, int32_t b1, int32_t delta, bool same);
+// the line starting at l belongs to a paragraph (not a heading): text under or over it would run into it
+bool ParaLine(const Doc& d, uint32_t l);
+int32_t OwnerOf(const Doc& d, uint32_t l);
+bool OpensContainer(const Doc& d, int32_t b);
+// Block b made a paragraph (a heading's markers gone, §7.7 / §8.4) would run into the paragraph line right above it -
+// or, below its last line (ending at lastEnd), into the one under it: a blank line keeps each apart (Phase 4 notes)
+bool RunsIntoAbove(const Doc& d, const std::wstring& src, int32_t b);
+bool RunsIntoBelow(const Doc& d, const std::wstring& src, uint32_t lastEnd);
 
 // ---- §7.4 escaping, §7.5 / §7.9 the delimiters written back where a cut goes through spans
 int Trigger(const std::wstring& l, bool first, uint32_t* drop);
+bool HardLine(const std::wstring& src, uint32_t l, uint32_t le);
 void Escape(EditResult& r, const std::wstring& l, uint32_t at, bool first);
 uint32_t LineContent(const Doc& d, const std::wstring& src, int32_t b, uint32_t t, bool* first);
 struct Delim { uint32_t at; uint8_t type; std::wstring text; };
@@ -108,6 +119,8 @@ std::wstring Joined(const std::vector<Delim>& v);
 EditResult DropLines(const EditCtx& c, const EditState& st, int32_t b, uint32_t a, uint32_t e);
 Splice WholeLines(const Doc& d, const std::wstring& src, int32_t b);
 EditResult CutRange(const EditCtx& c, const EditState& st, std::wstring ins, EditKind kind);
+// an edit of [s0, s1) inside a collapsed or shortcut reference link's text: its closer names the old label (Phase 4)
+void RefCloser(const EditCtx& c, const TextPos& p, TRange rg, uint32_t s0, uint32_t s1, std::vector<Splice>& out);
 // text at the caret: typed (with §7.3's transforms) or put in as it is (pasted, inserted); over a selection it replaces it
 EditResult Insert(const EditCtx& c, const EditState& st, std::wstring_view text, bool typing, EditKind kind);
 
@@ -124,5 +137,5 @@ void Coalesce(std::vector<Splice>& v);
 EditResult TypePending(const EditCtx& c, const EditState& st, std::wstring_view text);
 // the enterable spans a blank typed at text position p (their end) leaves behind: they stay "sticky" (§7.3), and the
 // next non-blank character extends them over the blanks
-uint16_t StickyAt(const Doc& d, const TextPos& p);
+uint16_t StickyAt(const Doc& d, const TextPos& p, uint32_t caret);  // caret: its source offset (past a closer: none)
 }  // namespace ec

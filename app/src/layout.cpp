@@ -418,6 +418,15 @@ static TableLayout* LayoutTable(const Doc& d, const Typography& t, const Table& 
             tl->cells[r * tb.cols + c] = L;
         }
     }
+    // While editing (only edit mode parses with a map), a column with nothing in it yet - a table just put in - gets room
+    // for its header's placeholder and the first words: at its reading width it is a sliver a caret can hardly be put
+    // into (Phase 4 notes)
+    if (d.hasMap)
+        for (uint32_t c = 0; c < tb.cols; c++) {
+            bool empty = true;
+            for (uint32_t r = 0; r < tb.rows && empty; r++) empty = !d.cells[tb.cellOff + r * tb.cols + c].textLen;
+            if (empty) colNat[c] = colMin[c] = std::max(colNat[c], std::ceil(4.f * t.lineH[R_BODY]) + padX);
+        }
     float sumNat = 0, sumMin = 0;
     for (uint32_t c = 0; c < tb.cols; c++) { sumNat += colNat[c]; sumMin += colMin[c]; }
     tl->colW.resize(tb.cols);

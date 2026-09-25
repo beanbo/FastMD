@@ -842,6 +842,13 @@ bool DoOp(OpRun& r, const std::string& op, const std::string& what) {
     }
     Parsed n;
     ParseMap(n, s);
+    // a join that failed its check is tried once more with a blank between the two texts (Phase 4 notes)
+    if (!Verified(p.d, n.d, res) && res.blankRetry) {
+        BlankRetry(res);
+        s = r.src;
+        if (!Check(ApplySplices(s, res.splices, false, &why), "%s %s: orElse: %s", what.c_str(), op.c_str(), why.c_str())) return false;
+        ParseMap(n, s);
+    }
     // §7.5 step 5: a step that wrote delimiters must render the old text around the change and put the formatting where
     // it asked; else it is taken back - typed text with a pending format goes in plain then, the format still pending
     if (!Verified(p.d, n.d, res)) {
@@ -860,6 +867,9 @@ bool DoOp(OpRun& r, const std::string& op, const std::string& what) {
     r.src = s;
     r.st = res.after;
     r.dir = res.kind == EK_DEL_BACK ? -1 : 1;
+    // (as the glue does: typing that closed a span leaves the caret after its closer, the format pending off)
+    if (!typed.empty() && r.st.anchor == r.st.focus && r.st.phantom.kind == PH_NONE)
+        if (uint16_t f = ClosedAt(n.d, n.src, r.st.focus)) r.st.pendOff |= f;
     SelfCheck(n, what + " after " + op);
     if (res.selA.block >= 0 && res.selB.block >= 0) {  // a formatting command's selection, found again by its text
         uint32_t lo = SrcOfText(n.d, n.src, res.selA, MAP_INNER_START), hi = SrcOfText(n.d, n.src, res.selB, MAP_INNER_END);
@@ -1370,7 +1380,7 @@ void RecoveryTests(FileFixture& fx) {
     r = fx.Save(ticked, d);
     pend = r.pending;
     Check(RecoveryFlushPending(pend, fx.path.c_str()) && fx.RecoveryList().empty(), "pending: the flush point removes it");
-    SetFlushPolicyForTests(0);
+    SetFlushPolicyForTests(2);  // (back to every save flushed: EditFileTests' policy)
 
     // A leftover is put back only over the torn file it was made for (the reviewer's harness case): written again by
     // another program since, or only touched later than the save, it is "changed" - Restore refuses, the file stays.
@@ -1432,6 +1442,10 @@ void RecoveryTests(FileFixture& fx) {
 void EditFileTests() {
     FileFixture fx;
     DiskState d;
+    // Every save flushed, as on a quick disk: the policy the first three flushes measure would, on a machine busy with a
+    // scan or a build, leave the recovery files of unflushed saves that the checks below count as left over (the flaky
+    // failures of 3a and Phase 4). The unflushed case has its own tests (RecoveryTests, policy 1).
+    SetFlushPolicyForTests(2);
     const std::wstring ru = L"# Привет\n\nТекст и ещё строка.\n";
     // ---- the byte-exact entry check (§10.1, D1, D14)
     Check(fx.Baseline(EncodeAs(1251, ru), 65001, d) == DR_LOSSY, "entry: a CP1251 file under FASTMD_ACP=65001 is refused");
@@ -1585,6 +1599,7 @@ void EditFileTests() {
     std::sort(ms.begin(), ms.end());
     Check(ms.size() == 9, "flush: every save at a flush point flushes (%zu)", ms.size());
     if (!ms.empty()) printf("  local flush (temp folder): median %.2f ms, max %.2f ms over %zu saves\n", ms[ms.size() / 2], ms.back(), ms.size());
+    SetFlushPolicyForTests(0);
 }
 }  // namespace
 

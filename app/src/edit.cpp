@@ -120,6 +120,10 @@ struct Session {
     uint32_t selfcheckFailures = 0;    // Q_MAP_SELFCHECK lp 1
     Sample ring[128] = {};
     uint32_t samples = 0;
+    // §5.8's measure as written: from a typed character's WM_CHAR to the end of the next Present, the last 128 (µs)
+    uint32_t keyRing[128] = {};
+    uint32_t keySamples = 0;
+    uint64_t charAt = 0;
     std::vector<RecoveryInfo> recovery;  // interrupted saves of the open file (the RECOVERY strip)
     RecoveryInfo pending;                // the recovery file standing for the last flush, while saves go unflushed
     // ---- the caret: source offsets are the truth (§6.1); the text positions are derived after every swap
@@ -177,7 +181,7 @@ struct Session {
     uint64_t textHash = 0, textHashKey[4] = {};  // the hash a journal is checked against, and what it was taken of
     // ---- the modal queue (§10.10)
     std::vector<Deferred> deferred;
-    bool closePending = false;
+    bool closePending = false, restartPending = false;  // (the update's "Restart now", Phase 4 notes)
     bool themePending = false, fullDocPending = false, activatePending = false;  // what else waits for the loop's end
     DWORD activatedAt = 0;             // the last activation that looked at a read-only or missing file
     // ---- questions (Q_LAST_PROMPT)
@@ -197,12 +201,15 @@ struct Popup {
     AtomBinding bind;                  // the source it edits, moved along with every change
     uint32_t lineBeg = 0, lineEnd = 0; // the lines that hold the object: every change of the session stays inside them
     std::wstring lines0;               // ... as they were: Esc puts them back, keeping makes one POPUP step of the rest
+    std::wstring linesNow;             // ... as the popup last left them: when the source no longer holds them there, the
+                                       // binding is off, and the popup writes nothing more (Phase 4 notes)
     EditState before;
     std::wstring applied[2];           // the fields' text last written into the source
     uint32_t previewSeq = 0, previewDone = 0;  // the preview worker's latest job, and the latest result taken
     std::wstring claimed;              // the render-table key it was last asked for
     std::string good;                  // the last source of the session that rendered (a failure shows it, outlined)
     bool confirmed = false;            // the link popover: a reference link's notice was seen, the next Enter changes it
+    bool fresh = false;                // opened by an insert: Esc takes the insert back too, done goes on after it
     RECT posted[2] = {};               // where the fields were put last (client px)
     DWORD movedAt = 0;
 } pop;
@@ -1182,6 +1189,9 @@ void UpdateTitle(bool force) {
 
 // the status slot's state changed: PENDING and SAVING show only after 300 ms (UX-24), so a repaint then
 void StatusTick() {
+    // the leave strip speaks of unsaved edits: whatever made them go (a disk version loaded, an undo, a save), so does
+    // the strip (Phase 4 notes)
+    if (!EditDirty()) StripHide(STRIP_LEAVE);
     SaveState st = EditSaveState();
     if (st != s.lastState) {
         s.lastState = st;
@@ -1210,9 +1220,22 @@ void ArmAutosave() {
     s.saveArmed = true;
 }
 
+// The identity the open file's journals are named by (§10.6): the file's volume and index - or, for a file on a share,
+// a hash of its path, since a server need not keep a file's index from one session to the next. The journal itself is
+// written into the local data folder: a share's files are the ones whose saves fail, so they need it most (Phase 4)
+void JournalId(uint32_t* vol, uint64_t* index) {
+    *vol = g.disk.volume;
+    *index = g.disk.index;
+    if (g.disk.remote || IsNetworkPath(g.path)) {
+        const std::wstring p = ToLower(g.path);
+        *vol = 0xFFFFFFFFu;
+        *index = Fnv64(p.data(), p.size() * sizeof(wchar_t));
+    }
+}
+
 // the journal protects edits the real save does not (§10.6): autosave off or failing
 void ArmJournal() {
-    if (!EditDirty() || !g.hwnd || g.disk.remote) return;
+    if (!EditDirty() || !g.hwnd) return;
     if (g.cfg.autosave && !Failing(s.saveState)) return;
     SetTimer(g.hwnd, TIMER_EDIT_JOURNAL, 3000, nullptr);
     s.journalArmed = true;
@@ -1229,10 +1252,13 @@ void DeleteJournal() {
 
 void WriteJournalNow() {
     s.journalArmed = false;
-    if (!EditDirty() || g.disk.remote) return;
+    if (!EditDirty()) return;
     std::wstring file;
-    if (WriteJournal(RecoveryDir(), g.disk.volume, g.disk.index, (g.disk.attributes & FILE_ATTRIBUTE_ENCRYPTED) != 0,
-                     g.path, TextHash(g.disk.text), g.disk.cp, g.src, &file))
+    uint32_t vol;
+    uint64_t index;
+    JournalId(&vol, &index);
+    if (WriteJournal(RecoveryDir(), vol, index, (g.disk.attributes & FILE_ATTRIBUTE_ENCRYPTED) != 0, g.path,
+                     TextHash(g.disk.text), g.disk.cp, g.src, &file))
         s.journalFile = file;
 }
 
@@ -1555,6 +1581,16 @@ bool EditCmdEnabled(UINT cmd, int* why) {
     case CMD_BLOCK_P: case CMD_BLOCK_H1: case CMD_BLOCK_H2: case CMD_BLOCK_H3: case CMD_BLOCK_H4:
     case CMD_BLOCK_H5: case CMD_BLOCK_H6: case CMD_LIST_BULLET: case CMD_LIST_NUMBER: case CMD_LIST_TASK: case CMD_QUOTE:
         rule(true, false, false, false, false, true);
+        if (en && c == W_TEXT && ((cmd >= CMD_BLOCK_H1 && cmd <= CMD_BLOCK_H6) || cmd == CMD_QUOTE)) {
+            // a task item's text: its box stands before it - no heading or quote can start there (Phase 4 notes)
+            const Doc& d = g.doc;
+            const int32_t ci = d.blockSrc[s.focus.block].container;
+            if (ci >= 0 && (size_t)ci < d.containers.size() && d.containers[ci].kind == CT_ITEM &&
+                d.containers[ci].taskOff != UINT32_MAX && d.containers[ci].firstBlock == (uint32_t)s.focus.block) {
+                en = false;
+                w = 6;
+            }
+        }
         break;
     case CMD_BLOCK_MENU: rule(true, true, false, false, false, true); break;  // (in code: the code's language)
     case CMD_LINK: rule(true, false, true, true, false, true); break;
@@ -1683,7 +1719,10 @@ void EditAfterOpen() {
     if (!g.path.empty() && !g.loadFailed && !BenchActive()) {
         s.recovery = FindRecovery(RecoveryDir(), g.disk.volume, g.disk.index, g.path);
         if (!s.recovery.empty()) ClassifyLeftovers();
-        if (s.recovery.empty()) s.journals = FindJournals(RecoveryDir(), g.disk.volume, g.disk.index, g.path);
+        uint32_t vol;
+        uint64_t index;
+        JournalId(&vol, &index);
+        if (s.recovery.empty()) s.journals = FindJournals(RecoveryDir(), vol, index, g.path);
     }
     if (s.recovery.empty() && s.journals.empty()) StripHide(STRIP_RECOVERY);
     else StripShow(STRIP_RECOVERY);
@@ -1718,9 +1757,10 @@ static void RecoveryDone() {
 
 namespace {
 void ReplaceAll(const std::wstring& text, EditKind kind);
+void PopupClose(int how);
 }
 
-// a copy of a lost version, written beside it in %TEMP%\FastMD and opened in a window of its own
+// a copy of a lost version, written into FastMD's data folder (copies\) and opened in a window of its own
 static void OpenCopy(const std::wstring& out) {
     wchar_t exe[MAX_PATH * 2];
     GetModuleFileNameW(nullptr, exe, (DWORD)std::size(exe));
@@ -1734,11 +1774,13 @@ static void OpenCopy(const std::wstring& out) {
     }
 }
 // A name of its own: a copy made earlier may be open in another window, edited and saved there, and is never written
-// over - the next one is "… (2)", "… (3)" (and the file is created only where none is, CREATE_NEW).
+// over - the next one is "… (2)", "… (3)" (and the file is created only where none is, CREATE_NEW). In the data folder,
+// not %TEMP%: the reader may go on editing the copy, and Storage Sense empties %TEMP% (Phase 4 notes).
 static std::wstring TempCopyName(StrId suffix) {
-    wchar_t tmp[MAX_PATH];
-    GetTempPathW(MAX_PATH, tmp);
-    std::wstring dir = std::wstring(tmp) + L"FastMD\\";
+    std::wstring dir = DataDir();
+    if (dir.empty()) return dir;
+    CreateDirectoryW(dir.c_str(), nullptr);
+    dir += L"copies\\";
     CreateDirectoryW(dir.c_str(), nullptr);
     std::wstring name = FileNameOf(g.path);
     size_t dot = name.find_last_of(L'.');
@@ -1750,7 +1792,26 @@ static std::wstring TempCopyName(StrId suffix) {
     return std::wstring();
 }
 
+// [Delete] on the strip: the file may be the only copy of what was lost - it goes to the Recycle Bin, not away for good
+// (Phase 4 notes). A private data folder (FASTMD_DATA: the tests' profiles) deletes it outright.
+static void RecycleFile(const std::wstring& file) {
+    if (!EnvStr(L"FASTMD_DATA").empty()) {
+        DeleteFileW(file.c_str());
+        return;
+    }
+    std::wstring from = file;
+    from += L'\0';  // (a list: double-terminated)
+    SHFILEOPSTRUCTW op{};
+    op.hwnd = g.hwnd;
+    op.wFunc = FO_DELETE;
+    op.pFrom = from.c_str();
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+    ModalScope modal;
+    if (SHFileOperationW(&op) != 0) DeleteFileW(file.c_str());
+}
+
 static void RecoveryCommand(UINT id) {
+    PopupClose(1);  // (a restore changes the text: the popup's binding would be off, Phase 4 notes)
     if (!s.recovery.empty()) {
         const RecoveryInfo& r = s.recovery.back();  // the latest interrupted save
         switch (id) {
@@ -1777,7 +1838,7 @@ static void RecoveryCommand(UINT id) {
             break;
         }
         case CMD_RECOVERY_DELETE:
-            DeleteFileW(r.file.c_str());
+            RecycleFile(r.file);
             RecoveryDone();
             break;
         }
@@ -1808,14 +1869,22 @@ static void RecoveryCommand(UINT id) {
         // the minimal differing middle as one step, never cutting a pair or a CRLF, the file's own text untouched
         ReplaceAll(j.text, EK_ADOPT);
         RevealCaret();
-        DeleteFileW(j.file.c_str());
+        // The restored text is in this window's own journal before the old one goes: with autosave off it would
+        // otherwise live only in memory until the next journal tick (Phase 4 notes)
+        WriteJournalNow();
+        if (s.journalFile.empty() || CompareStringOrdinal(s.journalFile.c_str(), -1, j.file.c_str(), -1, TRUE) != CSTR_EQUAL)
+            DeleteFileW(j.file.c_str());
+        // Older journals written against the same text still "fit" it - a second Restore would put an older version
+        // over this one: they are not offered again this session (their files stay, a later open decides)
+        for (size_t k = s.journals.size(); k-- > 1;)
+            if (s.journals[k].diskHash == j.diskHash) s.journals.erase(s.journals.begin() + (ptrdiff_t)k);
         RecoveryDone();
         ArmAutosave();
         ArmJournal();
         StatusTick();
         break;
     case CMD_RECOVERY_DELETE:
-        DeleteFileW(j.file.c_str());
+        RecycleFile(j.file);
         RecoveryDone();
         break;
     }
@@ -1889,6 +1958,10 @@ uint32_t SrcLineStart(uint32_t s) {
     while (s > 0 && t[s - 1] != L'\n' && t[s - 1] != L'\r') s--;
     return s;
 }
+uint32_t SrcLineEnd(uint32_t s) {
+    while (s < g.src.size() && g.src[s] != L'\n' && g.src[s] != L'\r') s++;
+    return s;
+}
 // Typing turned the caret's text block into an object - an HTML block, a picture or formula paragraph - mid-word: it is
 // kept as text while the caret stays there, at the cost of one more parse on this keystroke only (F22). The swap had
 // to move the typed caret `want` - onto the new object, or, when the HTML block shows nothing (`<!--`, or md4c's `<!`
@@ -1899,6 +1972,21 @@ void RawDetect(bool wasText, uint32_t want) {
     const bool known = b >= 0 && (size_t)b < g.doc.blockSrc.size(), atom = known && IsAtomBlock(g.doc, b);
     const bool hidden = !atom && s.st.focus != want &&
                         (!known || want < g.doc.blockSrc[b].line || want > g.doc.blockSrc[b].outerEnd);
+    // A fence opener typed on a line of its own (```js): the fence it opens has no end yet, and the rest of the document
+    // would show as code while the language is typed. Its first fence character is masked - the line reads as text -
+    // while the caret stays on it; Enter writes the closing fence (FenceEnter, Phase 4 notes).
+    if (known && !atom && g.doc.blocks[b].kind == BK_CODE && (g.doc.blockSrc[b].flags & BS_FENCED) &&
+        g.doc.blockSrc[b].line == SrcLineStart(want)) {
+        uint32_t k = g.doc.blockSrc[b].line;
+        while (k < want && g.src[k] != L'`' && g.src[k] != L'~') k++;
+        if (k >= want) return;
+        s.masks.push_back(k);
+        s.st.focus = s.st.anchor = want;
+        EditReparse(UINT32_MAX, 0, 0);
+        UpdateCaretVisible();
+        RevealCaret();
+        return;
+    }
     if (!atom && !hidden) return;
     if (hidden || (g.doc.blockSrc[b].flags & BS_HTML)) {  // the line's first `<` is hidden from the parser: it reads as text
         uint32_t k = SrcLineStart(want);
@@ -1908,6 +1996,15 @@ void RawDetect(bool wasText, uint32_t want) {
     } else if (g.doc.blocks[b].kind == BK_IMAGE) {  // shown as its source until the caret leaves it
         const BlockSrc& bs = g.doc.blockSrc[b];
         s.raw.push_back({bs.line, bs.outerEnd});
+    } else if (g.doc.blocks[b].kind == BK_HR) {
+        // `---` typed on a line of its own is a rule: it is selected, so Enter puts a new paragraph after it and the
+        // words typed next go there - left nowhere, the caret dropped them (Phase 4 notes)
+        s.st.atom = AtomOfBlock(g.doc, b);
+        s.st.focus = s.st.anchor = g.doc.blockSrc[b].line;
+        ResolveCaret(false);
+        UpdateCaretVisible();
+        RevealCaret();
+        return;
     } else {
         return;
     }
@@ -1925,7 +2022,7 @@ void RawLifetime() {
     const uint32_t f = std::min<uint32_t>(s.st.focus, (uint32_t)t.size()), fl = SrcLineStart(f);
     bool keep = false;
     for (uint32_t m : s.masks) {
-        if (m >= t.size() || t[m] != L'<') continue;  // the `<` itself went
+        if (m >= t.size() || (t[m] != L'<' && t[m] != L'`' && t[m] != L'~')) continue;  // the masked character itself went
         keep |= SrcLineStart(m) == fl || (!t.compare(m, 4, L"<!--") && t.find(L"-->", m + 4) == std::wstring::npos);
     }
     for (const auto& k : s.raw) keep |= f >= k.first && f <= k.second;
@@ -1975,7 +2072,7 @@ bool Apply(EditResult r, std::wstring_view typed = {}, const std::vector<TypeCan
     uint32_t at, oldLen, newLen;
     SpliceRange(r.splices, &at, &oldLen, &newLen);
     bool check = !typed.empty() && fallbacks;
-    const bool verify = r.keep.on || !r.verify.empty();
+    const bool verify = r.keep.on || !r.verify.empty() || r.shape.on;
     Doc old;
     EditReparse(at, oldLen, newLen, check || verify ? &old : nullptr);
     if (verify && !Verified(old, g.doc, r)) {
@@ -1985,7 +2082,14 @@ bool Apply(EditResult r, std::wstring_view typed = {}, const std::vector<TypeCan
         s.masks = masks;
         s.raw = raw;
         EditReparse(at, newLen, oldLen);
-        if (!quiet) ShowToast(Tr(S_ED_CANT_FORMAT), 3000);
+        // a join tried once more, with a blank between the two texts (Phase 4 notes)
+        if (r.blankRetry) {
+            BlankRetry(r);
+            return Apply(std::move(r), {}, nullptr, quiet);
+        }
+        // (a key's step - a join, a split - was refused as a whole; a command's formatting could not be applied)
+        const bool key = r.kind == EK_DEL_BACK || r.kind == EK_DEL_FWD || r.kind == EK_TYPE || r.kind == EK_PASTE || r.kind == EK_CUT;
+        if (!quiet) ShowToast(Tr(key ? S_ED_REFUSED : S_ED_CANT_FORMAT), 3000);
         return false;
     }
     if (r.selA.block >= 0 && r.selB.block >= 0) {  // a formatting command's selection, found again by its text
@@ -2152,10 +2256,20 @@ void Type(std::wstring text) {
     bool wasText = s.focus.block >= 0 && !IsAtomBlock(g.doc, s.focus.block);
     const uint32_t want = r.after.focus;  // (where the typing puts the caret, before the swap may have to move it)
     const bool formatted = pending && (r.keep.on || !r.verify.empty());
-    if (Apply(std::move(r), check ? std::wstring_view(text) : std::wstring_view(), check ? &fb : nullptr, formatted))
+    if (Apply(std::move(r), check ? std::wstring_view(text) : std::wstring_view(), check ? &fb : nullptr, formatted)) {
+        // Typing closed a span (`**bold*` + `*`): the caret stays after its closer - normalised it would go back in -
+        // and the format is pending off, so the blank and the words after it are plain (Phase 4 notes)
+        if (s.st.anchor == s.st.focus && !InPhantom() && s.st.atom < 0 && want <= g.src.size())
+            if (uint16_t f = ClosedAt(g.doc, g.src, want)) {
+                s.st.focus = s.st.anchor = want;
+                s.st.pendOff |= f;
+                ResolveCaret(false);
+                UpdateCaretVisible();
+            }
         RawDetect(wasText, want);
-    else if (formatted)
+    } else if (formatted) {
         Apply(OpTypePlain(Ctx(), s.st, text));
+    }
 }
 
 void Backspace(bool word) {
@@ -2173,10 +2287,52 @@ void DeleteKey(bool word) {
     Apply(OpDelete(Ctx(), s.st, word));
 }
 
+bool OpenAtomPopup(bool selectAll);
+// Enter on a line typed as a block's opener (Phase 4 notes): a fence opener kept as text while it was typed (RawDetect)
+// gets its closing fence, the caret on the empty line between; a paragraph that is only `$$` becomes a formula of its
+// own with its source popup open, as the formula button's "On its own line" does. False: an ordinary Enter.
+bool OpenerEnter() {
+    const int32_t b = s.focus.block;
+    if (s.st.anchor != s.st.focus || InPhantom() || b < 0 || (size_t)b >= g.doc.blocks.size() || !g.doc.hasMap) return false;
+    const BlockSrc& bs = g.doc.blockSrc[b];
+    const uint32_t line = SrcLineStart(s.st.focus);
+    for (uint32_t m : s.masks) {
+        if (m >= g.src.size() || (g.src[m] != L'`' && g.src[m] != L'~') || SrcLineStart(m) != line) continue;
+        uint32_t n = 0;
+        while (m + n < g.src.size() && g.src[m + n] == g.src[m]) n++;
+        s.masks.clear();  // closed now: parsed as it is
+        s.st.focus = s.st.anchor = SrcLineEnd(line);
+        // (a paste writes the lines with the block's prefixes and the file's line ends; the caret onto the empty one)
+        if (Apply(OpPaste(Ctx(), s.st, L"\n\n" + std::wstring(n, g.src[m]), false))) {
+            uint32_t k = SrcLineEnd(line);
+            if (k < g.src.size() && g.src[k] == L'\r') k++;
+            if (k < g.src.size() && g.src[k] == L'\n') k++;
+            s.st.focus = s.st.anchor = SrcLineEnd(k);
+            ResolveCaret(false);
+            UpdateCaretVisible();
+        }
+        return true;
+    }
+    if (g.doc.blocks[b].kind != BK_TEXT || g.doc.blocks[b].heading || (bs.flags & (BS_SYNTH | BS_RAW | BS_OBJECT | BS_FOOTNOTE)) ||
+        bs.end != bs.lineEnd || g.src.compare(bs.beg, bs.end - bs.beg, L"$$") != 0 || s.st.focus != bs.end)
+        return false;
+    if (!Apply(OpPaste(Ctx(), s.st, L"\nx\n$$", false))) return true;
+    const int32_t fb = s.focus.block;
+    if (fb >= 0 && IsAtomBlock(g.doc, fb)) {
+        s.st.atom = AtomOfBlock(g.doc, fb);
+        s.st.focus = s.st.anchor = g.doc.blockSrc[fb].line;
+        ResolveCaret(false);
+        UpdateCaretVisible();
+        if (OpenAtomPopup(true)) pop.fresh = true;
+    }
+    return true;
+}
+
 // Enter (0), Shift+Enter (1), Ctrl+Enter (2): §7.6
 void EnterKey(int variant) {
     if (g.editModal > 0) return;
     EditSync();
+    if (!variant && OpenerEnter()) return;
     Apply(OpEnter(Ctx(), s.st, variant));
 }
 
@@ -2309,9 +2465,15 @@ void FormatCommand(UINT id, UINT arg) {
     for (const Splice& sp : r.splices) at = std::min(at, sp.at);
     if (Apply(std::move(r)) && insert) {
         if (!InPhantom() && IsAtomBlock(g.doc, s.focus.block)) MoveCaret(AtomStop(s.focus.block), false, 0);
+        if (id == CMD_INS_TABLE && s.focus.block >= 0 && (size_t)s.focus.block < g.H.size()) {  // the whole new table in view
+            EnsureLayout((uint32_t)s.focus.block);
+            RecomputeY();
+            RevealBand(g.Y[s.focus.block], g.H[s.focus.block]);
+        }
         if (id == CMD_INS_FORMULA) SelectFormulaFrom(at);
         // a formula or a diagram put in opens its source (§8.8): a formula's `x` selected, to be typed over
-        if (id == CMD_INS_FORMULA || id == CMD_INS_FORMULA_BLOCK || id == CMD_INS_DIAGRAM) OpenAtomPopup(id != CMD_INS_DIAGRAM);
+        if ((id == CMD_INS_FORMULA || id == CMD_INS_FORMULA_BLOCK || id == CMD_INS_DIAGRAM) && OpenAtomPopup(id != CMD_INS_DIAGRAM))
+            pop.fresh = true;
     }
     BarChanged();
 }
@@ -2333,8 +2495,10 @@ Splice MinimalSplice(uint32_t at, const std::wstring& a, const std::wstring& b) 
 }
 
 // the source text in [0, n) replaced by `text` as one step of the given kind (adoption, discard): the minimal middle
-// that differs is the splice, so undo visibly brings the other version back (UX-17)
+// that differs is the splice, so undo visibly brings the other version back (UX-17). A popup open on the old text
+// closes first, keeping what it holds as a step of its own: its binding would point into the new text (Phase 4 notes)
 void ReplaceAll(const std::wstring& text, EditKind kind) {
+    PopupClose(1);
     const Splice sp = MinimalSplice(0, g.src, text);
     const size_t p = sp.at;
     const std::wstring &removed = sp.removed, &inserted = sp.inserted;
@@ -2384,7 +2548,7 @@ COLORREF Ref(uint32_t rgb) { return RGB(rgb >> 16, (rgb >> 8) & 255, rgb & 255);
 PopupFields FieldsLook() {
     PopupFields f;
     f.fontPx = (int)std::lround(13.f * g.dpi / 96.f);
-    f.face = pop.view.multi ? g.typo.monoFamily : g.typo.uiFamily;
+    f.face = pop.view.multi || pop.view.kind == PK_FORMULA ? g.typo.monoFamily : g.typo.uiFamily;
     f.fg = Ref(g_pal[P_TEXT]);
     f.bg = Ref(g_pal[P_BG]);
     f.dark = PaletteIsDark();
@@ -2452,11 +2616,13 @@ bool OpenAtomPopup(bool selectAll) {
     pop.lineBeg = SrcLineStart(b.outerBeg);
     pop.lineEnd = b.outerEnd;
     while (pop.lineEnd < g.src.size() && g.src[pop.lineEnd] != L'\n' && g.src[pop.lineEnd] != L'\r') pop.lineEnd++;
-    pop.lines0 = g.src.substr(pop.lineBeg, pop.lineEnd - pop.lineBeg);
+    pop.lines0 = pop.linesNow = g.src.substr(pop.lineBeg, pop.lineEnd - pop.lineBeg);
     PopupView& v = pop.view;
     v.kind = b.kind;
     v.fields = b.fields;
-    v.multi = b.kind != PK_IMAGE;
+    // (an inline formula's field is one line: Enter is done, as the hint's Ctrl+Enter - a line break would have gone
+    // into the TeX as a blank, Phase 4 notes)
+    v.multi = b.kind != PK_IMAGE && b.kind != PK_FORMULA;
     v.fixed1 = b.fixed1;
     v.lines = LinesOf(b.text[0]);
     if (b.fixed1) v.notice = Format(S_ED_POP_REF_FMT, b.label.c_str());
@@ -2504,10 +2670,22 @@ void SelectFormulaFrom(uint32_t at) {
     UpdateCaretVisible();
 }
 
+// Does the source still hold the popup's lines where it left them? Every path that changes the text around an open popup
+// closes it first (an adoption, a discard, a journal's restore); this is the guard behind them: a binding that is off
+// would write the popup's text over other text, and Esc would put the old lines back over it (Phase 4 notes)
+bool PopupInPlace() {
+    return pop.lineBeg <= pop.lineEnd && pop.lineEnd <= g.src.size() && pop.lineEnd - pop.lineBeg == pop.linesNow.size() &&
+           !g.src.compare(pop.lineBeg, pop.linesNow.size(), pop.linesNow);
+}
+
 // what the fields hold, written into the source now (120 ms after the typing, and at every commit point)
 void PopupApply() {
     KillTimer(g.hwnd, TIMER_EDIT_POPUP);
     if (!SourcePopup() || g.editModal > 0) return;
+    if (!PopupInPlace()) {  // the source changed under it: nothing more is written (the popup's text stays in its field)
+        DebugLog("popup: its lines moved under it, nothing written");
+        return;
+    }
     for (int f = 0; f < pop.view.fields; f++) {
         std::wstring t;
         PopupFieldText(f, &t);
@@ -2528,6 +2706,7 @@ void PopupApply() {
             return;
         }
         pop.lineEnd = (uint32_t)(pop.lineEnd + sp.inserted.size() - sp.removed.size());
+        pop.linesNow = g.src.substr(pop.lineBeg, pop.lineEnd - pop.lineBeg);
         s.st.focus = s.st.anchor = pop.bind.outerBeg;
         EditReparse(sp.at, (uint32_t)sp.removed.size(), (uint32_t)sp.inserted.size());
         FindAtom();
@@ -2537,13 +2716,21 @@ void PopupApply() {
     BarChanged();
 }
 
-// After a popup: the caret after its object (a view scrolled away from it stays where it is)
-void CaretAfterAtom(bool reveal) {
+void NewPhantomAt(int32_t b, bool before, int depth);
+// After a popup: the caret after its object (a view scrolled away from it stays where it is). After an object of its
+// own just put in, or one that is the last block, that is a new paragraph after it: the next words go there - not into
+// the paragraph that follows, nor nowhere while the object stays selected (Phase 4 notes)
+void CaretAfterAtom(bool reveal, bool fresh) {
     const int32_t atom = s.st.atom;
     TextPos p = s.focus;
     if (atom < 0) p = TextOfSrc(g.doc, g.src, pop.bind.outerEnd, 1, nullptr);
     else if (!(atom & kAtomBlock)) p.t++;
-    else if (int32_t b = NextStopBlock(p.block, 1); b >= 0) p = FirstStopOf(b);
+    else if (int32_t b = NextStopBlock(p.block, 1); b >= 0 && !fresh) p = FirstStopOf(b);
+    else if (p.block >= 0) {
+        s.st.atom = -1;
+        NewPhantomAt(p.block, false, -1);
+        return;
+    }
     if (p.block >= 0) MoveCaret(SnapStop(p, 1), false, 0, reveal);
 }
 
@@ -2553,7 +2740,7 @@ void PopupClose(int how) {
     if (!PopupOn()) return;
     PopupFieldsClose();
     KillTimer(g.hwnd, TIMER_EDIT_POPUP);
-    if (!SourcePopup()) {  // a popover: what its field held goes with it
+    if (!SourcePopup() || !PopupInPlace()) {  // a popover: what its field held goes with it (a popup that is off: the same)
         pop = Popup{};
     } else {
         if (how) PopupApply();
@@ -2579,7 +2766,7 @@ void PopupClose(int how) {
                 AfterChange();
             }
         }
-        if (s.st.atom >= 0 || how) CaretAfterAtom(how != 2);
+        if (s.st.atom >= 0 || how) CaretAfterAtom(how != 2, pop.fresh && how == 1);
         now = g.src.substr(pop.lineBeg, end - pop.lineBeg);
         if (how && now != pop.lines0) {  // the session as one step
             EditStep step;
@@ -2591,7 +2778,14 @@ void PopupClose(int how) {
             s.undo.Push(std::move(step), GetTickCount64());
             s.undo.BreakCoalescing();
         }
+        const bool dropInsert = !how && pop.fresh;
         pop = Popup{};
+        // Esc in the popup an insert opened: the insert goes too - its placeholder (`$x$`, a template) is no one's text
+        // (the hint says «Esc — отменить»; Ctrl+Y brings it back, Phase 4 notes)
+        if (dropInsert) {
+            const EditStep* top = s.undo.PeekUndo();
+            if (top && top->kind == EK_STRUCT) UndoRedo(false);
+        }
     }
     SetFocus(g.hwnd);
     BarChanged();
@@ -2824,20 +3018,34 @@ bool EditPopupCommit() {
     return true;
 }
 
+// The formula or diagram the popup is bound to - not the others on its lines: they go through the picture worker, or
+// they would all share the one preview slot and push each other out (after a theme switch only the last would be
+// drawn anew, Phase 4 notes). The binding follows every change, so its start is the object's start in the new model.
 bool EditPopupHolds(const Image& im) {
-    return SourcePopup() && im.mathKind && im.outerBeg != UINT32_MAX && im.outerEnd >= pop.lineBeg && im.outerBeg <= pop.lineEnd;
+    return SourcePopup() && im.mathKind && im.outerBeg != UINT32_MAX && im.outerBeg == pop.bind.outerBeg;
 }
 
 bool EditPreviewClaim(const Image& im, const std::wstring& key) {
     if (!EditPopupHolds(im)) return false;
-    if (!pop.claimed.empty() && pop.claimed != key) {  // the job it replaces is dropped: its entry is forgotten, not pending
+    pop.previewSeq = ++g_previewSeq;
+    // the popup's own last job, displaced before the worker began it, is dropped: its entry is forgotten, not pending
+    if (PreviewRequest(pop.previewSeq, key, im, pop.good, pop.claimed)) {
         auto it = g.renders.find(pop.claimed);
         if (it != g.renders.end() && it->second.state == RS_PENDING) g.renders.erase(it);
     }
     pop.claimed = key;
-    pop.previewSeq = ++g_previewSeq;
-    PreviewRequest(pop.previewSeq, key, im, pop.good);
     return true;
+}
+
+void EditPreviewKnown(const Image& im, const std::wstring& key, uint8_t state) {
+    if (!EditPopupHolds(im) || key == pop.claimed || state == RS_PENDING) return;
+    // The popup's text is a source the table knows (typed back, or broken the same way before): no job goes out, so
+    // the error line comes from the table - and a result of an older job says nothing any more (Phase 4 notes)
+    pop.claimed = key;
+    pop.previewSeq = pop.previewDone = ++g_previewSeq;
+    if (state == RS_OK) pop.view.error.clear();
+    else pop.view.error = Tr(pop.view.kind == PK_DIAGRAM ? S_ED_ERR_DIAGRAM : S_ED_ERR_FORMULA);
+    BarChanged();
 }
 
 void EditOnPreview(PreviewResult* p) {
@@ -3146,7 +3354,10 @@ bool EditEnter(EnterHow how, float x, float y) {
     DWORD pe = 0;
     SaveState probe = WriteProbe(g.path.c_str(), &pe);
     s.saveState = probe == SS_READONLY || probe == SS_DENIED ? SS_READONLY : SS_SAVED;
-    PurgeRecovery(RecoveryDir(), 14, RecoveryPrefix(g.disk.volume, g.disk.index));  // (not what the strip offers)
+    uint32_t jv;
+    uint64_t ji;
+    JournalId(&jv, &ji);
+    PurgeRecovery(RecoveryDir(), 14, RecoveryPrefix(jv, ji));  // (not what the strip offers: a journal, D1)
 
     // the reading caret only while the reader can see it: not the one left far above by the last edit session (§2.1)
     float cx, cy, ch;
@@ -3268,6 +3479,7 @@ void EditExit(bool silent) {
 
 bool EditLeave() {
     if (!g.editing) return true;
+    PopupClose(1);  // first: an inline formula left empty goes with its $…$ - a change the flush below must see (Phase 4)
     SaveState st = Flush();
     if (st != SS_SAVED) {  // the edits stay, and the strip says why and what can be done (§2.2)
         s.leaveWhy = st;
@@ -3461,6 +3673,7 @@ SaveState ConvertUtf8() {
 bool CanLeaveDocument() {
     // Reading mode is never dirty: leaving edit mode saved or discarded (only the test hook splices without it)
     if (!g.editing) return true;
+    if (g.editModal == 0) PopupClose(1);  // (as EditLeave: the popup's last change before the flush)
     SaveState st = Flush();
     const std::wstring name = FileNameOf(g.path);
     auto saveAsOrDiscard = [&](int kind, const std::wstring& q) -> bool {  // false = stay
@@ -3605,11 +3818,22 @@ void EditOnFileChanged() {
         }
         g.fileTime = now.mtime;
         g.fileSize = now.size;
+        // the other program put back the text our edits were made against: nothing to decide any more - the strip goes
+        // and autosave goes on (a later "Load the disk version" would have thrown the edits away for nothing, Phase 4)
+        if (s.saveState == SS_CONFLICT) {
+            s.saveState = SS_SAVED;
+            StripHide(STRIP_CONFLICT);
+            ArmAutosave();
+        }
         // it is back: the edits go in now - by autosave's rule (with it off, Ctrl+S and leaving save, §2.12)
         if (EditDirty() && (wasMissing || wasUnknown) && g.cfg.autosave) Saved(SaveNow(false));
+        PicturesMayHaveChanged();  // (a rebuilt report: its pictures written anew)
         StatusTick();
         return;
     }
+    // An open popup's text goes into the source first, as its own step: then the question below counts it - adopting over
+    // it would lose it, and the popup's binding would point into the other version's text (Phase 4 notes)
+    PopupClose(1);
     if (!EditDirty()) {
         // 5. nothing unsaved: the new version is adopted as one ADOPT step, so Ctrl+Z shows what changed (UX-17)
         if (dr != DR_OK) {  // bytes that cannot be written back as they are: reading mode takes over
@@ -3707,9 +3931,16 @@ bool EditDeferred(UINT msg, WPARAM wp, LPARAM lp) {
     s.deferred.push_back(Deferred{msg, wp, lp});
     return true;
 }
-bool EditPendingReplay() {
-    return !s.deferred.empty() || s.closePending || s.themePending || s.fullDocPending || s.activatePending;
+void EditPresented() {
+    if (!s.charAt) return;
+    s.keyRing[s.keySamples++ % std::size(s.keyRing)] = Micros(s.charAt, Qpc());
+    s.charAt = 0;
 }
+
+bool EditPendingReplay() {
+    return !s.deferred.empty() || s.closePending || s.themePending || s.fullDocPending || s.activatePending || s.restartPending;
+}
+void EditRestartLater() { s.restartPending = true; }
 void EditReplay() {
     std::vector<Deferred> q;
     q.swap(s.deferred);
@@ -3730,6 +3961,11 @@ void EditReplay() {
     if (s.activatePending) {
         s.activatePending = false;
         EditActivated();
+    }
+    if (s.restartPending) {  // (the close it makes is its own: a close asked for meanwhile is part of it)
+        s.restartPending = s.closePending = false;
+        UpdateRestart();
+        return;
     }
     if (s.closePending) {
         s.closePending = false;
@@ -3954,6 +4190,10 @@ void EscChain() {
         else {
             int32_t b = NextStopBlock(p.block, 1);
             if (b >= 0) p = FirstStopOf(b);
+            else if (p.block >= 0) {  // the last block: a new line after it - snapped back onto the object, it would be
+                NewPhantomAt(p.block, false, -1);  // selected again, and Esc would never leave (Phase 4 notes)
+                return;
+            }
         }
         MoveCaret(SnapStop(p, 1), false);
     } else if (EditLeave()) {
@@ -4008,6 +4248,7 @@ bool EditKey(unsigned vk, bool ctrl, bool shift, bool alt) {
 
 void EditChar(wchar_t c) {
     if (!g.editing || c < 0x20 || c == 0x7F) return;  // the keys of those arrive as WM_KEYDOWN (§12.5)
+    if (!s.charAt) s.charAt = Qpc();  // (the first character since the last frame: its cost runs to the next Present)
     PopoverClose();
     PopupClose(1);  // (typed into the document, not the popup: its text is kept first)
     if (c >= 0xD800 && c <= 0xDBFF) {  // the low half follows
@@ -4704,6 +4945,12 @@ bool EditQuery(UINT q, LPARAM lp, LRESULT* out) {
         case 1: *out = Percentile(all, 95); break;
         case 2: *out = Percentile(all, 100); break;
         case 3: *out = n; break;
+        case 7: case 8: case 9: {  // WM_CHAR to the end of Present (§5.8 as written, Phase 4): median, p95, count
+            const uint32_t k = std::min<uint32_t>(s.keySamples, (uint32_t)std::size(s.keyRing));
+            std::vector<uint32_t> keys(s.keyRing, s.keyRing + k);
+            *out = lp == 9 ? (LRESULT)k : Percentile(keys, lp == 7 ? 50 : 95);
+            break;
+        }
         default:
             for (uint32_t i = 0; i < n; i++) part.push_back(lp == 4 ? s.ring[i].parse : lp == 5 ? s.ring[i].carry : s.ring[i].install);
             *out = Percentile(part, 50);

@@ -2263,8 +2263,9 @@ def test_save_fault():
         c = q(hwnd, "EDIT_TOOL", CMD["RECOVERY_RESTORE"])
         ok &= check("edit 1c: reopening shows the recovery strip with its buttons", shown and c > 0,
                     f'strip {q(hwnd, "EDIT_STRIP")}, restore at {c}')
-        # Open the copy: the file as it was before that save, rebuilt in %TEMP%\FastMD and opened in a window of its own
-        tmp = pathlib.Path(os.environ["TEMP"]) / "FastMD"
+        # Open the copy: the file as it was before that save, rebuilt in the data folder's copies\ (not %TEMP%, which
+        # Storage Sense empties: Phase 4) and opened in a window of its own
+        tmp = pathlib.Path(DATA) / "copies"
         for f in tmp.glob("save-fault (*).md"):
             f.unlink()
         cmd(hwnd, "RECOVERY_OPEN", 1.5)
@@ -3497,10 +3498,32 @@ def test_edit_perf():
         # the ring holds the last 128 swaps: all of them typing's, and the text did change (T9)
         ok &= check("edit 2a: typing into medium.md: median < 3000 µs, p95 < 8000 µs", stats[0] < 3000 and stats[1] < 8000 and
                     stats[3] == 128 and q(hwnd, "SRC_HASH", 0) != h0, f"{stats[0]} / {stats[1]} µs over {stats[3]} swaps")
+        print(f"       medium.md, WM_CHAR to the end of Present (§5.8 as written): median {q(hwnd, 'EDIT_STATS', 7)} µs, "
+              f"p95 {q(hwnd, 'EDIT_STATS', 8)} µs over {q(hwnd, 'EDIT_STATS', 9)} keys")
         cmd(hwnd, "SAVE", 0.5)
         post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.5)
     finally:
         close_edit(proc, hwnd)
+    # the other two rows of §5.8, WM_CHAR to Present: reported (Phase 4 notes: the swap meets them, the frame not yet)
+    for name, body, block in (("a 700-line code block", "Код:\n\n```c\n" + "".join(f"int v{k} = {k};\n" for k in range(700)) + "```\n", 1),
+                              ("a cell of a 200 × 5 table", "Таблица:\n\n| a | b | c | d | e |\n|---|---|---|---|---|\n" +
+                               "".join(f"| {k} | x{k} | y | z | w |\n" for k in range(200)), 1)):
+        pdoc = OUT / "edit-perf-row.md"
+        pdoc.write_bytes(body.encode("utf-8"))
+        proc, hwnd = launch_edit(pdoc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_EDIT_SELFCHECK": "0"})
+        try:
+            enter_edit(hwnd, block, dx=4, dy=8)
+            type_text(hwnd, "abcdefghijklmnopqrstuvwxyz", 0.5, gap=0.06)
+            s = [q(hwnd, "EDIT_STATS", k) for k in (0, 1, 7, 8, 9)]
+            print(f"[--] edit 4: typing into {name}: swap median {s[0]} µs, p95 {s[1]} µs; WM_CHAR to Present median "
+                  f"{s[2]} µs, p95 {s[3]} µs over {s[4]} keys")
+            cmd(hwnd, "UNDO", 0.3)
+            for _ in range(30):
+                cmd(hwnd, "UNDO", 0.02)
+            cmd(hwnd, "SAVE", 0.4)
+            post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.5)
+        finally:
+            close_edit(proc, hwnd)
     doc = OUT / "edit-large.md"
     shutil.copy(REPO / "bench" / "corpus" / "large.md", doc)
     proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_EDIT_SELFCHECK": "0"})
@@ -4052,7 +4075,7 @@ def test_edit_recovery_guards():
     doc = OUT / "edit-copy.md"
     doc.write_bytes(EDIT_DOC.encode("utf-8"))
     clear_recovery()
-    tmp = pl.Path(os.environ["TEMP"]) / "FastMD"
+    tmp = pl.Path(DATA) / "copies"
     for f in tmp.glob("edit-copy (*") if tmp.exists() else []:
         f.unlink()
     set_reg("Autosave", 0)
@@ -5524,27 +5547,28 @@ def test_edit_image():
         post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.2)
         prompts = q(hwnd, "LAST_PROMPT", 1)
         cmd(hwnd, "INS_IMAGE", 0.6)
-        text = text.replace("перед картинками.", "перед картинками.![Снимок экрана](<img/Снимок экрана.png>)", 1)
-        ok &= check("edit 3b: the picture dialog (FASTMD_OPEN_FILE): ![stem](<relative path with blanks>) at the caret",
-                    q(hwnd, "SRC_HASH", 0) == src_hash(text) and q(hwnd, "LAST_PROMPT", 0) == 5 and
+        # (at a paragraph's end a picture is a paragraph of its own after it: Phase 4 notes)
+        text = text.replace("перед картинками.", "перед картинками.\n\n![Снимок экрана](<img/Снимок экрана.png>)", 1)
+        ok &= check("edit 3b: the picture dialog (FASTMD_OPEN_FILE): ![stem](<relative path with blanks>), at a paragraph's "
+                    "end a paragraph of its own", q(hwnd, "SRC_HASH", 0) == src_hash(text) and q(hwnd, "LAST_PROMPT", 0) == 5 and
                     q(hwnd, "LAST_PROMPT", 1) == prompts + 1, f"len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
-        # a dropped picture: where it was dropped (the end of the second paragraph)
-        y = q(hwnd, "BLOCK_Y", 2) + 10
+        # a dropped picture: where it was dropped (the end of the second paragraph, block 3 now)
+        y = q(hwnd, "BLOCK_Y", 3) + 10
         data = hdrop([OUT / "img" / "diagram0.png"], q(hwnd, "TEXT_LEFT") + 600, y)
         h = k32.GlobalAlloc(0x0042, len(data))
         p = k32.GlobalLock(h)
         ctypes.memmove(p, data, len(data))
         k32.GlobalUnlock(h)
         post(hwnd, WM_DROPFILES, h, 0, 0.6)
-        text = text.replace("Второй абзац.", "Второй абзац.![diagram0](img/diagram0.png)", 1)
+        text = text.replace("Второй абзац.", "Второй абзац.\n\n![diagram0](img/diagram0.png)", 1)
         ok &= check("edit 3b: a picture file dropped goes in where it was dropped", q(hwnd, "SRC_HASH", 0) == src_hash(text),
                     f"len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
         # CF_HDROP pasted: the pictures; another file only gets a toast
-        click(hwnd, q(hwnd, "TEXT_LEFT") + 2, q(hwnd, "BLOCK_Y", 3) + 10, 0.2)
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 2, q(hwnd, "BLOCK_Y", 5) + 10, 0.2)
         post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.2)
         clipboard_formats([(15, hdrop([OUT / "img" / "diagram0.png"]))])  # CF_HDROP
         cmd(hwnd, "PASTE", 0.5)
-        text = text.replace("Третий абзац.", "Третий абзац.![diagram0](img/diagram0.png)", 1)
+        text = text.replace("Третий абзац.", "Третий абзац.\n\n![diagram0](img/diagram0.png)", 1)
         pasted = q(hwnd, "SRC_HASH", 0) == src_hash(text)
         clipboard_formats([(15, hdrop([doc]))])
         cmd(hwnd, "PASTE", 0.5)
@@ -5784,6 +5808,394 @@ def test_edit_bubble():
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ edit mode, phase 4
+def caret_to_end(hwnd, block):
+    """the caret at the end of a block's (first) line"""
+    click(hwnd, q(hwnd, "TEXT_LEFT") + 2, q(hwnd, "BLOCK_Y", block) + 10, 0.2)
+    post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.2)
+
+
+def test_edit_review4_data():
+    """Phase 4 review, data safety (docs/EDIT-MODE.md Appendix B, Phase 4 notes): a popup open while another program
+    changes the file closes first - adopted, the change is not written over; with its own edits unsaved it is a
+    conflict; an inline formula emptied in its popup and ✕ is saved; a conflict whose cause goes away ends; the leave
+    strip goes with the edits; a journal is written for a file on a share"""
+    ok = True
+    base = "# Title\n\nFormula $a+b$ here.\n\nSecond paragraph stays intact.\n\nLast.\n"
+    doc = OUT / "edit-r4-popup.md"
+    doc.write_bytes(base.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "300"})
+    try:
+        enter_edit(hwnd, 1, dx=1)
+        wait_for(lambda: q(hwnd, "MATH", 1) >= 1, 10.0, 0.1)
+        atom_after(hwnd, 1, 9)  # ("Formula " and the formula)
+        cmd(hwnd, "ATOM_EDIT", 0.4)
+        popup_open(hwnd)
+        popup_set(hwnd, "a+b+c")
+        popup_settled(hwnd)
+        t1 = base.replace("$a+b$", "$a+b+c$")
+        wrote = wait_for(lambda: doc.read_bytes() == t1.encode("utf-8"), 5.0, 0.1)
+        ext = t1.replace("# Title\n\n", "# Title\n\nAn external line was added here by another program.\n\n")
+        doc.write_bytes(ext.encode("utf-8"))
+        adopted = wait_for(lambda: q(hwnd, "SRC_HASH", 0) == src_hash(ext) and q(hwnd, "EDIT_POPUP", 0) == 0, 4.0, 0.1)
+        time.sleep(0.8)
+        ok &= check("edit 4: another program's change while a popup is open: the popup closes, the change is adopted and "
+                    "nothing is written over it (review 4: popup after adoption)",
+                    wrote and adopted and doc.read_bytes() == ext.encode("utf-8") and q(hwnd, "EDIT_DIRTY") == 0,
+                    f"wrote {wrote}, adopted {adopted}, popup {q(hwnd, 'EDIT_POPUP', 0)}, file {doc.read_bytes()[:80]!r}")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+    # the same with the popup's own change not saved yet: it goes into the source first - a conflict, their file kept
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        text = ext
+        enter_edit(hwnd, 2, dx=1)
+        wait_for(lambda: q(hwnd, "MATH", 1) >= 1, 10.0, 0.1)
+        atom_after(hwnd, 2, 9)
+        cmd(hwnd, "ATOM_EDIT", 0.4)
+        popup_open(hwnd)
+        popup_set(hwnd, "XYZ")
+        popup_settled(hwnd)
+        theirs = text.replace("Last.", "Last, changed by another program.")
+        doc.write_bytes(theirs.encode("utf-8"))
+        conflict = wait_for(lambda: q(hwnd, "EDIT_CONFLICT") == 1, 4.0, 0.1)
+        ours = text.replace("$a+b+c$", "$XYZ$")
+        ok &= check("edit 4: ... the popup's own unsaved change: the popup closes, keeping it - a conflict, their file untouched",
+                    conflict and q(hwnd, "EDIT_POPUP", 0) == 0 and q(hwnd, "SRC_HASH", 0) == src_hash(ours) and
+                    doc.read_bytes() == theirs.encode("utf-8"), f"conflict {conflict}, len {q(hwnd, 'SRC_LEN', 0)} vs {u16(ours)}")
+        # the other program puts the text back that our edits were made against: no conflict any more (review 4)
+        doc.write_bytes(text.encode("utf-8"))
+        gone = wait_for(lambda: q(hwnd, "EDIT_CONFLICT") == 0 and q(hwnd, "EDIT_STRIP") == 0, 4.0, 0.1)
+        cmd(hwnd, "SAVE", 0.5)
+        ok &= check("edit 4: a conflict whose cause goes away (the old text written back): the strip goes, the edits save",
+                    gone and doc.read_bytes() == ours.encode("utf-8"), f"strip {q(hwnd, 'EDIT_STRIP')}")
+        # the leave strip, and "load the disk version": the strip about unsaved edits goes with them (review 4)
+        caret_to_end(hwnd, 3)
+        type_text(hwnd, " x", 0.3)
+        theirs2 = ours.replace("Last.", "Last from outside.")
+        doc.write_bytes(theirs2.encode("utf-8"))
+        wait_for(lambda: q(hwnd, "EDIT_CONFLICT") == 1, 4.0, 0.1)
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.5)
+        cmd(hwnd, "CONFLICT_LOAD", 0.6)
+        ok &= check("edit 4: Esc during a conflict, then \"Load the disk version\": no strip about unsaved edits is left",
+                    q(hwnd, "EDIT_DIRTY") == 0 and q(hwnd, "EDIT_STRIP") == 0 and q(hwnd, "SRC_HASH", 0) == src_hash(theirs2),
+                    f"strip {q(hwnd, 'EDIT_STRIP')}, dirty {q(hwnd, 'EDIT_DIRTY')}")
+        shot(hwnd, "140-edit-after-load")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+    # an inline formula emptied in its popup, then ✕: it goes before the flush, and the file has it (review 4)
+    doc = OUT / "edit-r4-empty.md"
+    doc.write_bytes("Текст $a+b$ тут.\n".encode("utf-8"))
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        enter_edit(hwnd, 0, dx=1)
+        wait_for(lambda: q(hwnd, "MATH", 1) >= 1, 10.0, 0.1)
+        atom_after(hwnd, 0, 7)  # ("Текст " and the formula)
+        cmd(hwnd, "ATOM_EDIT", 0.4)
+        popup_open(hwnd)
+        popup_set(hwnd, "")
+        time.sleep(0.3)
+        cmd(hwnd, "EDIT_EXIT", 0.6)
+        ok &= check("edit 4: an inline formula emptied in its popup, then ✕: removed and saved, nothing left unsaved",
+                    q(hwnd, "EDITING") == 0 and q(hwnd, "EDIT_DIRTY") == 0 and doc.read_bytes() == "Текст тут.\n".encode("utf-8"),
+                    f"file {doc.read_bytes()!r}, dirty {q(hwnd, 'EDIT_DIRTY')}")
+    finally:
+        close_edit(proc, hwnd)
+    # a file on a share whose saves fail: the session's end leaves a journal of the edits (review 4: journals were local
+    # files only)
+    share = pathlib.Path("\\\\localhost\\" + str(OUT)[0] + "$" + str(OUT)[2:])
+    if share.exists():
+        clear_recovery()
+        rdoc = share / "edit-r4-remote.md"
+        rdoc.write_bytes("# Сетевой файл\n\nТекст на общем ресурсе.\n".encode("utf-8"))
+        proc, hwnd = launch_edit(rdoc, {"FASTMD_TEST_FAIL_WRITE": "busy,always", "FASTMD_AUTOSAVE_MS": "200"})
+        try:
+            enter_edit(hwnd, 1, dx=1)
+            type_text(hwnd, "правка ", 0.8)
+            u32.SendMessageW(hwnd, WM_QUERYENDSESSION, 0, 0)
+            left = journals()
+            ok &= check("edit 4: a file on a share whose saves fail: the session's end writes the journal of its edits",
+                        len(left) == 1 and "правка" in left[0].read_bytes().decode("utf-16-le", "replace"), f"{left}")
+        finally:
+            note_selfcheck(hwnd)
+            proc.kill()
+            proc.wait(5)
+        clear_recovery()
+    else:
+        print(f"[--] edit 4: {share} is not reachable: the journal of a file on a share is not tested here")
+    return ok
+
+
+def test_edit_review4_typing():
+    """Phase 4 review, typing blocks (Appendix B, Phase 4 notes): `> ` on a new line is a quote; Enter + Tab in a list
+    nests an item; `##` is a heading 2; `---` + Enter a rule and the words after it; ```js + Enter a fence with its
+    end; `$$` + Enter a formula with its popup; a formula block put in and done: the words go after it, Esc takes the
+    insert back; Esc leaves when the last block is a selected object; the closing ** ends bold"""
+    ok = True
+    base = "# Набор\n\nПервый абзац.\n\nВторой абзац.\n"
+    doc = OUT / "edit-r4-typing.md"
+    set_reg("EditHintShown", 1)
+    cases = [
+        ("`> ` on a new line: a quote, the words in it", [("ret",), ("t", "> цитата")],
+         "# Набор\n\nПервый абзац.\n\n> цитата\n\nВторой абзац.\n"),
+        ("`##` on a new line: a heading 2", [("ret",), ("t", "## Новый")],
+         "# Набор\n\nПервый абзац.\n\n## Новый\n\nВторой абзац.\n"),
+        ("`---` and Enter: a rule, the words after it in a paragraph of their own", [("ret",), ("t", "---"), ("ret",), ("t", "после")],
+         "# Набор\n\nПервый абзац.\n\n- - -\n\nпосле\n\nВторой абзац.\n"),
+        ("```js and Enter: the fence gets its end, the caret inside; the rest of the document is no code",
+         [("ret",), ("t", "```js"), ("ret",), ("t", "let a = 1;")],
+         "# Набор\n\nПервый абзац.\n\n```js\nlet a = 1;\n```\n\nВторой абзац.\n"),
+        ("the closing ** typed ends bold: the blank and the word after it are plain", [("t", " **жирный** текст")],
+         "# Набор\n\nПервый абзац. **жирный** текст\n\nВторой абзац.\n"),
+    ]
+    for name, steps, want in cases:
+        doc.write_bytes(base.encode("utf-8"))
+        proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+        try:
+            enter_edit(hwnd, 1, dx=1)
+            caret_to_end(hwnd, 1)
+            for st in steps:
+                if st[0] == "ret":
+                    post(hwnd, WM_KEYDOWN, VK["return"], 0, 0.35)
+                else:
+                    type_text(hwnd, st[1], 0.4, 0.05)
+            got = saved_text(hwnd, doc)
+            ok &= check(f"edit 4: {name}", got == want, f"{got!r}")
+            if "fence" in name:
+                shot(hwnd, "141-edit-fence-typed")
+            post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.3)
+            post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.3)
+        finally:
+            close_edit(proc, hwnd)
+    # Enter then Tab in a `-` list: a nested item, never the item above made a heading 2 by a setext underline
+    ldoc = OUT / "edit-r4-list.md"
+    ldoc.write_bytes("Список:\n\n- пункт один\n\nКонец.\n".encode("utf-8"))
+    proc, hwnd = launch_edit(ldoc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        enter_edit(hwnd, 1, dx=1)
+        caret_to_end(hwnd, 1)
+        post(hwnd, WM_KEYDOWN, VK["return"], 0, 0.3)
+        post(hwnd, WM_KEYDOWN, VK["tab"], 0, 0.3)
+        style = q(hwnd, "EDIT_ACTIVE") >> 24
+        type_text(hwnd, "вложенный", 0.4)
+        got = saved_text(hwnd, ldoc)
+        ok &= check("edit 4: Enter then Tab in a `-` list: a nested item (no heading 2 above it)",
+                    got == "Список:\n\n- пункт один\n  - вложенный\n\nКонец.\n" and style != 2, f"{got!r}, style {style}")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.3)
+    finally:
+        close_edit(proc, hwnd)
+    # `$$` and Enter: a formula of its own, its popup open; done, the next words go after it; Esc on an insert undoes it
+    doc.write_bytes(base.encode("utf-8"))
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        enter_edit(hwnd, 1, dx=1)
+        caret_to_end(hwnd, 1)
+        post(hwnd, WM_KEYDOWN, VK["return"], 0, 0.3)
+        type_text(hwnd, "$$", 0.3)
+        post(hwnd, WM_KEYDOWN, VK["return"], 0, 0.5)
+        opened = popup_open(hwnd)
+        popup_set(hwnd, "y^2")
+        popup_settled(hwnd)
+        cmd(hwnd, "POPUP_DONE", 0.4)
+        type_text(hwnd, "Текст после формулы", 0.4)
+        want = "# Набор\n\nПервый абзац.\n\n$$\ny^2\n$$\n\nТекст после формулы\n\nВторой абзац.\n"
+        got = saved_text(hwnd, doc)
+        ok &= check("edit 4: `$$` and Enter: a formula of its own with its popup; done: the words typed next go into a "
+                    "new paragraph after it", opened and got == want, f"opened {opened}, {got!r}")
+        for _ in range(3):
+            cmd(hwnd, "UNDO", 0.3)
+        undone = saved_text(hwnd, doc)
+        caret_to_end(hwnd, 1)
+        cmd(hwnd, "INS_FORMULA_BLOCK", 0.5)
+        popup_open(hwnd)
+        cmd(hwnd, "POPUP_DONE", 0.4)
+        type_text(hwnd, "дальше", 0.4)
+        got = saved_text(hwnd, doc)
+        want2 = undone.replace("Первый абзац.\n", "Первый абзац.\n\n$$\nx\n$$\n\nдальше\n", 1)
+        ok &= check("edit 4: a formula block put in from the bar, done at once: the words typed next go after it",
+                    got == want2, f"{got!r}")
+        cmd(hwnd, "UNDO", 0.3)
+        cmd(hwnd, "UNDO", 0.3)
+        caret_to_end(hwnd, 1)
+        before = saved_text(hwnd, doc)
+        cmd(hwnd, "INS_FORMULA", 0.5)
+        popup_open(hwnd)
+        cmd(hwnd, "POPUP_CANCEL", 0.5)
+        ok &= check("edit 4: Esc in the popup an insert opened: the insert goes too", q(hwnd, "EDIT_POPUP", 0) == 0 and
+                    saved_text(hwnd, doc) == before, f"{saved_text(hwnd, doc)!r}")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.3)
+    finally:
+        close_edit(proc, hwnd)
+    # a task item: heading and quote greyed, the tooltip says why; a new table's empty columns wide enough to type in
+    tdoc = OUT / "edit-r4-task.md"
+    tdoc.write_bytes("Задачи:\n\n- [x] Готовая задача\n- [ ] Новая задача\n".encode("utf-8"))
+    proc, hwnd = launch_edit(tdoc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_TEST_HOOKS": "1"})
+    try:
+        enter_edit(hwnd, 1, dx=40)
+        h0 = q(hwnd, "SRC_HASH", 0)
+        for name in ("BLOCK_H2", "QUOTE"):
+            cmd(hwnd, name, 0.3)
+        quote = tool_xy(hwnd, "QUOTE")
+        if quote:
+            post(hwnd, WM_MOUSEMOVE, 0, lp(*quote), 0.4)
+        shot(hwnd, "142-edit-task-disabled")
+        shot_dark(hwnd, "142-edit-task-disabled-dark")
+        ok &= check("edit 4: in a task item, heading and quote are greyed and do nothing (the tooltip says why)",
+                    q(hwnd, "SRC_HASH", 0) == h0, f"len {q(hwnd, 'SRC_LEN', 0)}")
+        post(hwnd, WM_MOUSEMOVE, 0, lp(500, 500), 0.2)
+        caret_to_end(hwnd, 0)
+        cmd_arg(hwnd, "INS_TABLE", 3 << 4 | 3, 0.6)
+        img = shot(hwnd, "143-edit-table-new")
+        shot_dark(hwnd, "143-edit-table-new-dark")
+        # the header's placeholders are whole: «Столбец 1» … «Столбец 3» fit their columns (no "…")
+        ok &= check("edit 4: a new 3 × 3 table: its empty columns laid out wide enough for the header's placeholder",
+                    q(hwnd, "BLOCK_COUNT") == 4, f"blocks {q(hwnd, 'BLOCK_COUNT')}")
+        cmd(hwnd, "UNDO", 0.3)
+        cmd(hwnd, "SAVE", 0.3)
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.3)
+    finally:
+        close_edit(proc, hwnd)
+    # the last block an object: selected, Esc deselects it, the next Esc leaves (review 4: Esc stopped working)
+    odoc = OUT / "edit-r4-last.md"
+    odoc.write_bytes("Текст.\n\n$$\nx^2\n$$\n".encode("utf-8"))
+    proc, hwnd = launch_edit(odoc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        enter_edit(hwnd, 0, dx=1)
+        post(hwnd, WM_KEYDOWN, VK["down"], 0, 0.3)
+        selected = q(hwnd, "EDIT_ATOM") >= 0
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.3)
+        deselected = q(hwnd, "EDIT_ATOM") == -1 and q(hwnd, "EDITING") == 1
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.5)
+        ok &= check("edit 4: the last block a selected object: Esc deselects it, the next Esc leaves edit mode",
+                    selected and deselected and q(hwnd, "EDITING") == 0, f"selected {selected}, deselected {deselected}, "
+                    f"editing {q(hwnd, 'EDITING')}")
+    finally:
+        close_edit(proc, hwnd)
+    return ok
+
+
+def test_edit_review4_preview():
+    """Phase 4 review, the preview worker (Appendix B): a popup's job pushed out of the one slot by another popup's is
+    rendered all the same; a broken source another formula had shows the error, not that formula's picture; with a popup
+    open a theme switch draws every formula of its line anew; a popup takes more than an EDIT's 30,000 characters"""
+    ok = True
+    doc = OUT / "edit-r4-preview.md"
+    text = "Формулы $a+b$ и $c+d$ тут.\n\nЕщё $x^2$ и $y+z$ здесь.\n"
+    doc.write_bytes(text.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        enter_edit(hwnd, 0, dx=1)
+        wait_for(lambda: q(hwnd, "MATH", 1) == 4, 10.0, 0.1)
+        # a broken source that another formula's popup had before: its own error, never the other's picture
+        atom_after(hwnd, 1, 5)
+        cmd(hwnd, "ATOM_EDIT", 0.4)
+        popup_open(hwnd)
+        popup_set(hwnd, "\\frac{")
+        popup_settled(hwnd)
+        first = q(hwnd, "EDIT_POPUP_STATE")
+        cmd(hwnd, "POPUP_CANCEL", 0.4)
+        atom_after(hwnd, 1, 9)  # ("Ещё ", x^2, " и ", y+z)
+        cmd(hwnd, "ATOM_EDIT", 0.4)
+        popup_open(hwnd)
+        popup_set(hwnd, "\\frac{")
+        popup_settled(hwnd)
+        second = q(hwnd, "EDIT_POPUP_STATE")
+        ok &= check("edit 4: a broken source another formula's popup had: the error line, not that formula's picture",
+                    first == POPUP["ERROR"] and second == POPUP["ERROR"], f"first {first}, second {second}")
+        cmd(hwnd, "POPUP_CANCEL", 0.4)
+        # two formulas in the popup's line, a theme switch: both drawn anew (the other one on the picture worker)
+        atom_after(hwnd, 0, 9)  # ("Формулы " and a+b)
+        cmd(hwnd, "ATOM_EDIT", 0.4)
+        popup_open(hwnd)
+        cmd(hwnd, "THEME_DARK", 0.6)
+        fresh = wait_for(lambda: q(hwnd, "MATH", 3) == 0 and not q(hwnd, "EDIT_BUSY") & 32, 10.0, 0.1)
+        cmd(hwnd, "POPUP_DONE", 0.3)
+        cmd(hwnd, "THEME_LIGHT", 0.6)
+        ok &= check("edit 4: a popup open on one of two formulas of a line, a theme switch: both are drawn anew",
+                    fresh, f"stale {q(hwnd, 'MATH', 3)}, busy {q(hwnd, 'EDIT_BUSY'):#x}")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.3)
+    finally:
+        close_edit(proc, hwnd)
+    # a job pushed out of the slot before the worker began it (the worker slowed down): rendered all the same
+    doc.write_bytes(text.encode("utf-8"))
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_TEST_SLOW": "preview:4000"})
+    try:
+        enter_edit(hwnd, 0, dx=1)
+        wait_for(lambda: q(hwnd, "MATH", 1) == 4, 10.0, 0.1)
+        atom_after(hwnd, 0, 9)
+        cmd(hwnd, "ATOM_EDIT", 0.4)
+        popup_open(hwnd)
+        popup_set(hwnd, "a+b+1")
+        time.sleep(0.4)
+        popup_set(hwnd, "a+b+2")
+        time.sleep(0.3)
+        cmd(hwnd, "POPUP_DONE", 0.3)
+        atom_after(hwnd, 1, 5)
+        cmd(hwnd, "ATOM_EDIT", 0.4)
+        popup_open(hwnd)
+        popup_set(hwnd, "x^3")
+        time.sleep(0.3)
+        cmd(hwnd, "POPUP_DONE", 0.3)
+        drawn = wait_for(lambda: q(hwnd, "MATH", 1) == 4 and q(hwnd, "MATH", 3) == 0 and not q(hwnd, "EDIT_BUSY") & 32, 20.0, 0.2)
+        ok &= check("edit 4: a popup's last job pushed out of the preview slot by the next popup's is rendered all the same",
+                    drawn, f"drawn {q(hwnd, 'MATH', 1)}, stale {q(hwnd, 'MATH', 3)}, busy {q(hwnd, 'EDIT_BUSY'):#x}")
+        cmd(hwnd, "SAVE", 0.4)
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.3)
+    finally:
+        close_edit(proc, hwnd)
+    # a popup's field takes more than an EDIT's default 30,000 characters (a big HTML block, an SVG)
+    big = "<div>\n" + "".join(f"<p>строка {k:05d} таблицы большого блока</p>\n" for k in range(900)) + "</div>\n"
+    hdoc = OUT / "edit-r4-big.md"
+    hdoc.write_bytes(("Текст.\n\n" + big + "\nКонец.\n").encode("utf-8"))
+    proc, hwnd = launch_edit(hdoc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        enter_edit(hwnd, 0, dx=1)
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 30, q(hwnd, "BLOCK_Y", 1) + 8, 0.6)
+        opened = popup_open(hwnd)
+        more = big.rstrip("\n") + "\n" + "".join(f"<p>ещё {k:05d}</p>\n" for k in range(400)) + "</div>"
+        popup_set(hwnd, more)
+        popup_settled(hwnd)
+        cmd(hwnd, "POPUP_DONE", 0.5)
+        got = saved_text(hwnd, hdoc)
+        ok &= check("edit 4: a popup's field takes more than 30,000 characters: a paste past it reaches the file whole",
+                    opened and len(big) > 30000 and "<p>ещё 00399</p>" in got, f"opened {opened}, {len(got)} chars")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.3)
+    finally:
+        close_edit(proc, hwnd)
+    return ok
+
+
+def test_review4_reading():
+    """Phase 4 review, reading mode: a report rebuilt by a script - its picture written anew, then the .md with the same
+    text - shows the new picture (1.2.0 reloaded; the same text now keeps the view and reads the picture again)"""
+    ok = True
+    pic = OUT / "r4-chart.png"
+    Image.new("RGB", (400, 200), (220, 30, 30)).save(pic)
+    doc = OUT / "r4-report.md"
+    body = "# Отчёт\n\n![График](r4-chart.png)\n\nКонец.\n"
+    doc.write_bytes(body.encode("utf-8"))
+    proc, hwnd = launch(doc)
+    try:
+        time.sleep(1.5)
+        box = (0, q(hwnd, "BLOCK_Y", 1), 1000, q(hwnd, "BLOCK_Y", 1) + 220)
+        red = find_color(shot(hwnd, "r4-report-red", paint=False), (220, 30, 30), box, 40) is not None
+        serial = q(hwnd, "DOC_SERIAL")
+        Image.new("RGB", (400, 200), (30, 30, 220)).save(pic)
+        time.sleep(0.2)
+        doc.write_bytes(body.encode("utf-8"))
+        blue = wait_for(lambda: find_color(shot(hwnd, "r4-report-blue", paint=False), (30, 30, 220), box, 40) is not None, 5.0, 0.3)
+        ok &= check("edit 4 (reading): a picture written anew, then the .md with the same text: the new picture shows, "
+                    "the document is not reloaded", red and blue and q(hwnd, "DOC_SERIAL") == serial,
+                    f"red {red}, blue {blue}, serial {serial} → {q(hwnd, 'DOC_SERIAL')}")
+    finally:
+        close_and_wait(proc, hwnd)
+    return ok
+
+
 def main():
     OUT.mkdir(exist_ok=True)
     reset_profile()
@@ -5826,7 +6238,9 @@ def main():
              ("edit_commands", test_edit_commands), ("edit_table", test_edit_table), ("edit_hr", test_edit_hr),
              ("edit_popups", test_edit_popups), ("edit_link", test_edit_link), ("edit_image", test_edit_image),
              ("edit_paste_private", test_edit_paste_private), ("edit_bindings", test_edit_bindings),
-             ("edit_race_images", test_edit_race_images), ("edit_bubble", test_edit_bubble)]
+             ("edit_race_images", test_edit_race_images), ("edit_bubble", test_edit_bubble),
+             ("edit_review4_data", test_edit_review4_data), ("edit_review4_typing", test_edit_review4_typing),
+             ("edit_review4_preview", test_edit_review4_preview), ("review4_reading", test_review4_reading)]
     only = [n for n in os.environ.get("FASTMD_ONLY", "").split(",") if n]  # e.g. FASTMD_ONLY=update,settings
     for name, t in tests:
         if not only or name in only:

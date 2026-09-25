@@ -95,10 +95,10 @@ do: Enter; Hr
 want: abc\n\n---‸\n
 phantom: after 1 in
 
-=== image_inline (§8.8: a picture in the line at the caret)
-src: see ‸\n
+=== image_inline (§8.8: a picture in the line at the caret - in the middle of it; at its end: review4.txt)
+src: see ‸x\n
 do: Image("a.png","pic")
-want: see ![pic](a.png)‸\n
+want: see ![pic](a.png)‸x\n
 
 === image_after_code (§8.8: after a code block: a paragraph of its own - a picture block, the caret on it)
 src: ```\nco‸de\n```\n

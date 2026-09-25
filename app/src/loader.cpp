@@ -576,8 +576,9 @@ static bool RenderImage(const ImageJob& job, IWICImagingFactory*& wic, RenderRes
             SafeRelease(fr);
             SafeRelease(dec);
         }
-        // a file that could not be read is tried again when it changes (the window's activation looks, §5.2)
-        if (!r.ok && job.url.empty()) GetFileStamp(path.c_str(), &r.failTime, &r.failSize);
+        // a file that could not be read is tried again when it changes (the window's activation looks, §5.2) - and one
+        // that was read is read again: a script that rebuilds a report writes its pictures anew (Phase 4 notes)
+        if (job.url.empty()) GetFileStamp(path.c_str(), &r.fileTime, &r.fileSize);
     }
     if (r.ok) {
         pix->serial = NewPixelSerial();
@@ -628,10 +629,7 @@ static DWORD WINAPI PictureWorker(void*) {
     return 0;
 }
 
-static void QueueImageJobs(std::vector<ImageJob>& jobs) {
-    AcquireSRWLockExclusive(&g_jobLock);
-    for (ImageJob& j : jobs) g_jobs.push_back(std::move(j));
-    ReleaseSRWLockExclusive(&g_jobLock);
+static void WakePictureWorker() {
     if (!g_jobEvent) {
         g_jobEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         HANDLE th = g_jobEvent ? CreateThread(nullptr, 0, PictureWorker, nullptr, 0, nullptr) : nullptr;
@@ -641,6 +639,22 @@ static void QueueImageJobs(std::vector<ImageJob>& jobs) {
         }
     }
     if (g_jobEvent) SetEvent(g_jobEvent);
+}
+
+static void QueueImageJobs(std::vector<ImageJob>& jobs) {
+    AcquireSRWLockExclusive(&g_jobLock);
+    for (ImageJob& j : jobs) g_jobs.push_back(std::move(j));
+    ReleaseSRWLockExclusive(&g_jobLock);
+    WakePictureWorker();
+}
+
+// a preview job the next one pushed out of the preview worker's slot: its formula rendered here instead (Phase 4)
+void QueueMathRender(const std::wstring& key, uint32_t ctx, uint32_t loadGen, uint8_t kind, const std::string& src, float fontPx,
+                     uint32_t rgb, bool dark) {
+    AcquireSRWLockExclusive(&g_jobLock);
+    g_jobs.push_back(ImageJob{key, ctx, loadGen, kind, src, std::wstring(), std::wstring(), fontPx, rgb, dark});
+    ReleaseSRWLockExclusive(&g_jobLock);
+    WakePictureWorker();
 }
 
 // Puts what the table knows about a source on one entry of the document; true when that changes what is drawn. keep: a
@@ -836,6 +850,8 @@ void StartImages() {
                 jobs.push_back(ImageJob{keys[i], im.mathKind ? mctx : 0, g.loadGen.load(), im.mathKind, im.math, im.path,
                                         im.url, fontPx, rgb, dark});
             it = g.renders.emplace(keys[i], std::move(e)).first;
+        } else if (im.mathKind) {
+            EditPreviewKnown(im, keys[i], it->second.state);  // (a source the table knows: the popup's error line from it)
         }
         it->second.lastUse = ++g_useTick;
         if (ShowEntry(im, it->second, keys[i], im.renderFailed)) changed[i] = any = true;
@@ -871,33 +887,41 @@ void OnImagesLoaded(std::vector<RenderResult>* batch) {
         e.h = r.h;
         e.ascent = r.ascent;
         e.cachePath = std::move(r.cachePath);
-        e.failTime = r.failTime;
-        e.failSize = r.failSize;
+        e.fileTime = r.fileTime;
+        e.fileSize = r.fileSize;
         e.error = std::move(r.error);
+        // A failed preview brings the popup's last good source drawn anew: those pixels are the bound formula's alone.
+        // The table keeps the failure without them - else a later formula with the same broken source would show
+        // another formula's picture (R15, Phase 4 notes)
+        RenderEntry kept;
+        if (!r.ok && e.pix) {
+            kept = e;
+            e.pix.reset();
+        }
         for (size_t i = 0; i < keys.size(); i++)
-            if (keys[i] == r.key && ShowEntry(g.doc.images[i], e, r.key, r.keep)) changed[i] = any = true;
+            if (keys[i] == r.key && ShowEntry(g.doc.images[i], kept.pix && EditPopupHolds(g.doc.images[i]) ? kept : e, r.key, r.keep))
+                changed[i] = any = true;
     }
     delete batch;
     if (any) RefreshImageBlocks(changed);
     if (again) StartImages();
 }
 
-void RetryChangedPictures() {
-    // The looks are file-system calls on the UI thread: not inside a modal loop (a print job's pages are cut already),
-    // at most every 2 s, and never on a network drive, where an unreachable share would hang the window for its
-    // timeout on every Alt+Tab - those are tried again at the next load.
-    static ULONGLONG last = 0;
-    if (g.editModal > 0 || GetTickCount64() - last < 2000) return;
-    last = GetTickCount64();
+// The pictures whose file changed since it was read are forgotten: a failed one is tried again, a shown one read again
+// (it keeps its pixels until the new ones arrive: no flicker, no relayout). Never on a network drive, where an
+// unreachable share would hang the window for its timeout - those are read again at the next load.
+static void ForgetChangedPictures() {
     bool any = false;
     for (auto it = g.renders.begin(); it != g.renders.end();) {
         const std::wstring& k = it->first;
-        if (it->second.state == RS_FAILED && k.compare(0, 2, L"p:") == 0) {
+        const RenderEntry& e = it->second;
+        const bool stamped = e.fileTime.dwLowDateTime || e.fileTime.dwHighDateTime;
+        if ((e.state == RS_FAILED || (e.state == RS_OK && stamped)) && k.compare(0, 2, L"p:") == 0) {
             std::wstring path = k.substr(2, k.rfind(L'\x1f') - 2);
             FILETIME t{};
             uint64_t size = 0;
             if (!path.empty() && !IsNetworkPath(path) && GetFileStamp(path.c_str(), &t, &size) &&
-                (CompareFileTime(&t, &it->second.failTime) != 0 || size != it->second.failSize)) {
+                (CompareFileTime(&t, &e.fileTime) != 0 || size != e.fileSize)) {
                 it = g.renders.erase(it);
                 any = true;
                 continue;
@@ -906,6 +930,21 @@ void RetryChangedPictures() {
         ++it;
     }
     if (any) StartImages();
+}
+
+void RetryChangedPictures() {
+    // The looks are file-system calls on the UI thread: not inside a modal loop (a print job's pages are cut already),
+    // at most every 2 s, and never on a network drive (above)
+    static ULONGLONG last = 0;
+    if (g.editModal > 0 || GetTickCount64() - last < 2000) return;
+    last = GetTickCount64();
+    ForgetChangedPictures();
+}
+
+// The document was written with the same text (§10.7 takes only its stamp): a script that rebuilds a report writes its
+// pictures first - they are read again (the reload that 1.2.0 did here was what showed them, Phase 4 notes)
+void PicturesMayHaveChanged() {
+    if (g.editModal == 0) ForgetChangedPictures();
 }
 
 bool RemoteImagesAllowed() { return g.cfg.remoteImages == 0 || (g.cfg.remoteImages == 1 && g.remoteAllowedOnce); }
@@ -1241,6 +1280,7 @@ void OnFileChanged() {
     if (text == (g.disk.valid ? g.disk.text : g.src)) {
         g.fileTime = now.mtime;
         g.fileSize = now.size;
+        PicturesMayHaveChanged();
         return;
     }
     ReloadDocument();

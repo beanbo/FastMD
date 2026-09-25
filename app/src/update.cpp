@@ -311,6 +311,12 @@ void UpdateRestart() {
         ShowToast(Tr(S_UPDATE_FAILED), 3000);
         return;
     }
+    // Inside a menu's or a dialog's modal loop the close would only be deferred - and a bare close after the loop would
+    // never start the new version: the restart itself waits for the loop's end (Phase 4 notes)
+    if (g.editModal > 0) {
+        EditRestartLater();
+        return;
+    }
     if (!PrepareToClose()) return;  // unsaved edits that could not be written: stay
     SaveReadingPosition();
     std::wstring cmd = L"\"" + exe + L"\"";

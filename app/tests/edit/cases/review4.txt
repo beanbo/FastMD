@@ -1,0 +1,400 @@
+The Phase 4 review's findings (docs/EDIT-MODE.md Appendix B, Phase 4 notes): every one that the core can show, as the
+reviewer found it - src holds the caret ‸ or a selection ⟦ … ⟧, want the source afterwards. refused=keep: the step was
+taken back by the check after the re-parse (Kept, Shape: §7.5 step 5 and the Phase 4 safety net).
+
+=== codeblock_keeps_table (a table between two paragraphs: the command refuses, nothing is lost)
+src: ⟦a\n\n| x |\n|---|\n| 1 |\n\nb⟧\n
+flags: nolist noquote
+do: Fence
+state: refused=format
+want: ⟦a\n\n| x |\n|---|\n| 1 |\n\nb⟧\n
+
+=== codeblock_keeps_refdef (a reference definition in the range: refused, "Also [x]." stays a link)
+src: ⟦See [x].\n\n[x]: http://u\n\nNext⟧\n\nAlso [x].\n
+flags: nolist noquote
+do: Fence
+state: refused=format
+want: ⟦See [x].\n\n[x]: http://u\n\nNext⟧\n\nAlso [x].\n
+
+=== codeblock_keeps_code (a code block in the range: refused)
+src: ⟦a\n\n```\nx\n```\n\nb⟧\n
+flags: nolist noquote
+do: Fence
+state: refused=format
+want: ⟦a\n\n```\nx\n```\n\nb⟧\n
+
+=== codeblock_source_lines (the fence holds the source: link targets, emphasis and pictures kept)
+src: a **b** [l](http://u) ![p](p.png)‸\n
+flags: nolist noquote
+do: Fence
+want: ```\na **b** [l](http://u) ![p](p.png)‸\n```\n
+
+=== codeblock_two_paragraphs (two paragraphs, a blank line between)
+src: ⟦one\ntwo\n\nthree⟧\n
+flags: nolist noquote
+do: Fence
+want: ```\none\ntwo\n\nthree‸\n```\n
+
+=== join_back_not_into_details (Backspace after a folded <details>: the closing tag is a wall)
+src: <details>\n<summary>S</summary>\n\nab\n\n</details>\n\n‸cd\n
+flags: nolist noquote
+do: BS
+want: <details>\n<summary>S</summary>\n\nab\n\n</details>\n\n‸cd\n
+
+=== join_del_not_out_of_div (Delete before a centred div: the content stays in it, the caret goes into it)
+src: xy‸\n\n<div align="center">\n\nab\n\n</div>\n
+flags: nolist noquote
+do: Del
+want: xy\n\n<div align="center">\n\n‸ab\n\n</div>\n
+
+=== join_del_into_alert (Delete before an alert: the caret goes to its first text, the alert stays)
+src: > [!NOTE]\n> One.‸\n\n> [!TIP]\n> Two.\n
+flags: nolist noquote
+do: Del
+want: > [!NOTE]\n> One.\n\n> [!TIP]\n> ‸Two.\n
+
+=== bs_heading_keeps_next_paragraph (Backspace at a heading's start: the paragraph under it stays apart)
+src: # ‸License\nCopyright 2025\n
+flags: nolist
+do: BS
+want: ‸License\n\nCopyright 2025\n
+
+=== enter_heading_keeps_next_paragraph (Enter in a heading: its second half stays apart from the line under it)
+src: # Visual Stu‸dio\n[badge](u)\n
+flags: nolist
+do: Enter
+want: # Visual Stu\n\n‸dio\n\n[badge](u)\n
+
+=== del_joins_heading_keeps_next (Delete joining a heading into the paragraph before: the line under it stays apart)
+src: abc‸\n\n## License\nCopyright\n
+flags: nolist
+do: Del
+want: abc‸License\n\nCopyright\n
+
+=== p_heading_under_paragraph (P on a heading right under a paragraph line: kept apart, never a setext underline)
+src: text\n## ‸===\n
+flags: nolist
+do: P
+want: text\n\n‸===\n
+
+=== p_heading_over_paragraph (P on a heading right over a paragraph line)
+src: ## Ti‸tle\nnext line\n
+flags: nolist
+do: P
+want: Ti‸tle\n\nnext line\n
+
+=== bullet_off_nested_children (bullet off in a 4-space nested list: the children stay a list)
+src: * A\n    * B\n    * C‸\n        * D\n        * E\n
+flags: nolist noquote
+do: Bullet
+want: * A\n    * B\n\n    C‸\n    * D\n    * E\n
+
+=== bs_first_item_children (Backspace on a first item: its children stay a list under the new paragraph)
+src: Title\n\n* ‸A\n    * B\n    * C\n* D\n
+flags: nolist noquote
+do: BS
+want: Title\n\n‸A\n  * B\n  * C\n\n* D\n
+
+=== stab_top_item_children (Shift+Tab at the top level: the item's children stay a list)
+src: - a\n- ‸b\n    - c\n
+flags: nolist noquote
+do: S-Tab
+want: - a\n\n‸b\n  - c\n
+
+=== bs_nested_ordered_first (Backspace on the first item of a nested ordered list: the next item stays an item)
+src: - p\n  1. ‸a\n  2. b\n
+flags: nolist noquote
+do: BS
+want: - p\\\n  ‸a\n  1. b\n
+
+=== bullet_off_interrupting_list (bullet off on the first item of a list that interrupts a paragraph)
+src: Intro:\n- a‸\n- b\n
+flags: nolist noquote
+do: Bullet
+want: Intro:\n\na‸\n\n- b\n
+
+=== quote_before_alert (Quote on a paragraph right above an alert: a blank line keeps the two apart)
+src: Text‸.\n> [!NOTE]\n> Note.\n
+flags: nolist noquote
+do: Quote
+want: > Text‸.\n\n> [!NOTE]\n> Note.\n
+
+=== quote_after_quote (a paragraph line right under a quote is the quote's lazy text: Quote takes the quote off)
+src: > one\nTw‸o\n
+flags: nolist noquote
+do: Quote
+want: one\nTw‸o\n
+
+=== quote_under_quote (Quote on a paragraph a blank line under a quote: a quote of its own, apart)
+src: > one\n\nTw‸o\n
+flags: nolist noquote
+do: Quote
+want: > one\n\n> Tw‸o\n
+
+=== bullet_before_indented_code (a list on a paragraph before indented code: the code goes into the item, still code)
+src: Run thi‸s:\n\n    make all\n
+flags: nolist noquote
+do: Bullet
+want: - Run thi‸s:\n\n      make all\n
+
+=== bullet_off_heading_item (bullet off on an item holding a heading: the heading stays)
+src: - # Tit‸le\n
+flags: nolist noquote
+do: Bullet
+want: # Tit‸le\n
+
+=== number_off_heading_item_digits (… and a heading that starts with a number)
+src: 1. ## 1. Раз‸дел\n
+flags: nolist noquote
+do: Number
+want: ## 1. Раз‸дел\n
+
+=== h2_in_task_refused (a heading cannot stand in a task item)
+src: - [x] Ta‸sk\n
+flags: nolist noquote
+do: H2
+state: refused=context
+want: - [x] Ta‸sk\n
+
+=== quote_in_task_refused (nor a quote)
+src: - [x] Ta‸sk\n
+flags: nolist noquote
+do: Quote
+state: refused=context
+want: - [x] Ta‸sk\n
+
+=== join_back_emphasis_flank (Backspace joining after emphasis that ends with punctuation: a blank keeps it emphasis)
+src: *and more.*\n\n‸If x\n
+flags: nolist
+do: BS
+want: *and more.‸* If x\n
+
+=== join_back_code_runs (two code spans meeting: a blank keeps them apart)
+src: #### `tail -f`\n\n‸`bat` can\n
+flags: nolist
+do: BS
+want: #### `tail -f`‸ `bat` can\n
+
+=== join_back_bang_link (a `!` before a link would make a picture)
+src: wow!\n\n‸[x](y)\n
+flags: nolist
+do: BS
+want: wow!‸ [x](y)\n
+
+=== join_back_bracket_paren (a bracket and a parenthesis would make a link)
+src: see [foo]\n\n‸(bar)\n
+flags: nolist
+do: BS
+want: see [foo]‸ (bar)\n
+
+=== join_back_into_heading_closing (text ending in ` #` joined into a heading: escaped, not a closing sequence)
+src: # Head\n\n‸text #\n
+flags: nolist
+do: BS
+want: # Head‸text \\#\n
+
+=== sel_delete_over_item_children (a selection from a heading into an item with children: refused, nothing turns into code)
+src: ## Envi⟦ronment\n\n- `FZF`⟧\n    - Default\n
+flags: nolist noquote
+do: BS
+state: refused=keep
+want: ## Envi⟦ronment\n\n- `FZF`⟧\n    - Default\n
+
+=== del_heading_into_toc (Delete at a heading's end before a list with children: refused, the list stays a list)
+src: ## Table of Contents‸\n\n* [Installation](#installation)\n    * [Using Homebrew](#homebrew)\n    * [Linux](#linux)\n
+flags: nolist noquote
+do: Del
+state: refused=keep
+want: ## Table of Contents‸\n\n* [Installation](#installation)\n    * [Using Homebrew](#homebrew)\n    * [Linux](#linux)\n
+
+=== paste_lines_in_bold (lines pasted inside bold: it is closed before the first break and opened after the last)
+src: a **bo‸ld** c\n
+flags: nolist
+do: Paste("one\n\ntwo")
+want: a **boone**\n\n**two‸ld** c\n
+
+=== paste_lines_in_link (… inside a link's text)
+src: see [the li‸nk](u)\n
+flags: nolist
+do: Paste("one\n\ntwo")
+want: see [the lione](u)\n\n[two‸nk](u)\n
+
+=== paste_fence_in_code (a fence line pasted into fenced code: the fences grow, the code stays code)
+src: ```\nco‸de\n```\n\nafter\n
+flags: nolist noquote
+do: Paste("x\n```\ny")
+want: ````\ncox\n```\ny‸de\n````\n\nafter\n
+
+=== type_fence_in_code (typing ``` at an empty code line's start)
+src: ```\na\n‸\n```\n
+flags: nolist noquote
+do: type "`"; type "`"; type "`"
+want: ````\na\n```‸\n````\n
+
+=== type_in_collapsed_ref (typing in a collapsed reference link's text: the closer names the label)
+src: * [Work‸ing Groups][]\n\n[Working Groups]: https://x\n
+flags: nolist noquote
+do: type "x"
+want: * [Workx‸ing Groups][Working Groups]\n\n[Working Groups]: https://x\n
+
+=== del_in_shortcut_ref (deleting in a shortcut reference link's text)
+src: See [Work‸ing Groups].\n\n[Working Groups]: https://x\n
+flags: nolist noquote
+do: C-BS
+want: See ‸[ing Groups][Working Groups].\n\n[Working Groups]: https://x\n
+
+=== code_over_link_text (inline code on a link's text: the code goes inside the link, the address stays)
+src: Read the [⟦manual⟧](https://example.com/very/important/page) first.\n
+flags: nolist
+do: Code
+want: Read the [`⟦manual⟧`](https://example.com/very/important/page) first.\n
+
+=== code_over_whole_link (a selection holding a whole link: the link's text in code of its own)
+src: ⟦a [x](u) b⟧\n
+flags: nolist
+do: Code
+want: `⟦a` [`x`](u) `b⟧`\n
+
+=== formula_pipe_in_cell (a formula's | typed in a cell's popup: \vert, the row keeps its cells)
+src: | a | b |\n|---|---|\n| $‸x$ | keep this |\n
+flags: nolist noquote
+do: AtomSource(0,0,"|x|")
+want: | a | b |\n|---|---|\n| $\\vert x\\vert$‸ | keep this |\n
+
+=== alt_pipe_in_cell (a picture's alt text in a cell: \|)
+src: | a | b |\n|---|---|\n| ‸![p](p.png) | keep |\n
+flags: nolist noquote
+do: AtomSource(0,0,"a|b")
+want: | a | b |\n|---|---|\n| ‸![a\\|b](p.png) | keep |\n
+
+=== path_pipe_in_cell (… and its path: %7C)
+src: | a | b |\n|---|---|\n| ‸![p](p.png) | keep |\n
+flags: nolist noquote
+do: AtomSource(0,1,"x|y.png")
+want: | a | b |\n|---|---|\n| ‸![p](x%7Cy.png) | keep |\n
+
+=== typed_gt_in_phantom (`> ` typed in a new line's phantom: a quote, the words in it)
+src: Первый абзац.‸\n\nВторой абзац.\n
+flags: nolist noquote
+do: Enter; type ">"; type " "; type "ц"
+want: Первый абзац.\n\n> ц‸\n\nВторой абзац.\n
+
+=== typed_gt_in_phantom_after_list (… after a list at the end of the file)
+src: 1. первый\n2. второй‸\n
+flags: nolist noquote
+do: Enter; Enter; type ">"; type " "; type "ц"
+want: 1. первый\n2. второй\n\n> ц‸\n
+
+=== tab_empty_bullet_item (Enter then Tab in a `-` list: a nested item, never a setext underline)
+src: - пункт один‸\n
+flags: nolist noquote
+do: Enter; Tab; type "в"
+want: - пункт один\n  - в‸\n
+
+=== tab_empty_number_item (… in a numbered list)
+src: 1. один‸\n
+flags: nolist noquote
+do: Enter; Tab; type "в"
+want: 1. один\n   1. в‸\n
+
+=== type_second_hash (`##` typed on a new line: a heading 2)
+src: abc‸\n
+flags: nolist noquote
+do: Enter; type "#"; type "#"; type " "; type "Новый"
+want: abc\n\n## Новый‸\n
+
+=== typed_closer_ends_bold (typing the closing ** yourself ends the bold: the blank after it is plain)
+src: a ‸\n
+flags: nolist
+do: type "*"; type "*"; type "b"; type "*"; type "*"; type " "; type "t"
+want: a **b** t‸\n
+
+=== ctrl_b_blank_still_sticky (Ctrl+B typing: a blank at the bold's end still goes on bold, §7.3)
+src: a ‸\n
+flags: nolist
+do: Bold; type "b"; type " "; type "t"
+want: a **b t‸**\n
+
+=== image_at_paragraph_end (a picture put in at a paragraph's end: a paragraph of its own)
+src: Вот скриншот.‸\n
+flags: nolist noquote
+do: Image("img/s.png","s")
+want: Вот скриншот.\n\n‸![s](img/s.png)\n
+
+=== image_mid_paragraph (… in the middle of a line: in the line)
+src: Вот ‸скриншот.\n
+flags: nolist
+do: Image("img/s.png","s")
+want: Вот ![s](img/s.png)‸скриншот.\n
+
+=== backslash_before_cell_pipe (a backslash typed before a cell's pipe: written \\, the cells stay)
+src: |a|b|\n|-|-|\n|x‸|y|\n
+flags: nolist noquote
+do: type "\\"
+want: |a|b|\n|-|-|\n|x\\\\‸|y|\n
+
+=== bullet_off_autolink (the §7.4 check: an autolink at a line's start is no HTML block)
+src: - <https://x.org/a/>‸\n
+flags: nolist noquote
+do: Bullet
+want: <https://x.org/a/>‸\n
+
+=== unlink_hash_text (Remove link on text that starts like a heading: escaped)
+src: [# not ‸heading](u)\n
+flags: nolist noquote
+do: Unlink
+want: \\# not ‸heading\n
+
+=== p_escape_caret (P on `## ---`: escaped, the caret before the text)
+src: ## ‸---\n
+flags: nolist
+do: P
+want: ‸\\---\n
+
+=== quote_lazy_item_line (Quote on an item paragraph with a lazy line: both lines in the quote)
+src: - a‸\nb\n
+flags: nolist noquote
+do: Quote
+want: - > a‸\n  > b\n
+
+=== table_del_col_no_pipes (Delete column leaving one column of rows without outer pipes: the pipes put in)
+src: a | b\n--|--\nx‸ | y\n
+flags: nolist noquote
+do: Table.DelCol
+want: |  b |\n| -- |\n|  ‸y |\n
+
+=== link_after_bang (a link put in right after `!`: the `!` escaped, no picture)
+src: wow!‸\n
+flags: nolist
+do: Link("http://x.org")
+want: wow\\![http://x.org](http://x.org)‸\n
+
+=== link_dest_backslash_end (an address ending in a backslash: doubled, the `)` stays the closer)
+src: see ⟦it⟧\n
+flags: nolist
+do: Link("C:\\dir\\")
+want: see [⟦it⟧](C:\\dir\\\\)\n
+
+=== alt_backslash_end (alt text ending in a backslash: doubled, the `]` stays the closer)
+src: ‸a ![p](p.png) b\n
+flags: nolist noquote
+do: AtomSource(0,0,"C:\\")
+want: ‸a ![C:\\\\](p.png) b\n
+
+=== path_backslash_paren (a path `dir\(1)\c.png`: its backslashes kept)
+src: ‸a ![p](p.png) b\n
+flags: nolist noquote
+do: AtomSource(0,1,"dir\\(1)\\c.png")
+want: ‸a ![p](<dir\\\\(1)\\c.png>) b\n
+
+=== formula_after_backslash (a formula put in right after a backslash: a blank between, no `\$`)
+src: a\\‸\n
+flags: nolist
+do: Formula
+want: a\\ $x$‸\n
+
+=== number_to_bullet_tab_marker (a tab after the marker: the children keep their column)
+src: 1.\ta‸\n\t- c\n
+flags: nolist noquote
+do: Bullet
+want: -\ta‸\n\t- c\n

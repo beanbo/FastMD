@@ -256,6 +256,9 @@ void Open(const PopupFields& p) {
                         : nullptr;
         if (!x.edit) continue;
         s_editProc = (WNDPROC)SetWindowLongPtrW(x.edit, GWLP_WNDPROC, (LONG_PTR)EditProc);
+        // no limit: an EDIT takes 30,000 characters by default - WM_SETTEXT ignores it, but typing and paste stop there,
+        // and a big HTML block or SVG would lose the pasted rest in the document (Phase 4 notes)
+        SendMessageW(x.edit, EM_SETLIMITTEXT, 0, 0);
         std::wstring t;  // an EDIT breaks lines at CRLF
         for (wchar_t ch : p.text[f]) t += ch == L'\n' ? std::wstring(L"\r\n") : std::wstring(1, ch);
         SetWindowTextW(x.edit, t.c_str());
@@ -275,7 +278,12 @@ void Open(const PopupFields& p) {
     ReleaseSRWLockExclusive(&g_buf.lock);
     if (s_f[0].edit) {
         SetFocus(s_f[0].edit);
-        const int n = p.selectAll ? 0 : GetWindowTextLengthW(s_f[0].edit);  // all selected, or the caret at the end
+        int n = p.selectAll ? 0 : GetWindowTextLengthW(s_f[0].edit);  // all selected, or the caret at the end
+        // - or, a source taller than its box, at its start: at the end it would show only its last lines (Phase 4)
+        RECT rc;
+        if (!p.selectAll && s_multi && GetClientRect(s_f[0].host, &rc) &&
+            (int)SendMessageW(s_f[0].edit, EM_GETLINECOUNT, 0, 0) * s_lineH > rc.bottom - rc.top)
+            n = 0;
         SendMessageW(s_f[0].edit, EM_SETSEL, n, p.selectAll ? -1 : n);
         SendMessageW(s_f[0].edit, EM_SCROLLCARET, 0, 0);
     }
@@ -419,13 +427,21 @@ void Wake() {
 }
 }  // namespace
 
-void PreviewRequest(uint32_t seq, const std::wstring& key, const Image& im, const std::string& good) {
+bool PreviewRequest(uint32_t seq, const std::wstring& key, const Image& im, const std::string& good, const std::wstring& drop) {
+    Job old;
     AcquireSRWLockExclusive(&g_pl);
+    const bool displaced = g_has && g_job.key != key;  // (the same source again: the newer job simply takes its place)
+    if (displaced) old = std::move(g_job);
     g_job = Job{seq, MathContext(), g.loadGen.load(), key, im.mathKind, im.math, (float)g.cfg.fontSize, Scale(), g_pal[P_TEXT],
                 PaletteIsDark(), good};
     g_has = true;
     ReleaseSRWLockExclusive(&g_pl);
     Wake();
+    // The one slot forgets the job it held: a keystroke's own last one may go, but another popup's (closed meanwhile)
+    // is the last render of its formula - its table entry would stay pending for good (Phase 4 notes)
+    if (!displaced || old.key == drop) return displaced;
+    QueueMathRender(old.key, old.ctx, old.loadGen, old.kind, old.src, old.fontPx, old.rgb, old.dark);
+    return false;
 }
 
 void PreviewWarm(int what) {

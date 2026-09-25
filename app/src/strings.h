@@ -77,6 +77,8 @@ enum StrId : uint16_t {
     S_ED_ERR_DIAGRAM, S_ED_POP_REF_FMT, S_ED_POP_DONE, S_ED_LINK_REMOVE, S_ED_LINK_REF_FMT, S_ED_POP_LANG,
     S_ED_NO_INPUT, S_ED_ONLY_PICTURES, S_ED_BUBBLE_EDIT, S_ED_BUBBLE_REMOVE, S_ED_BUBBLE_OPEN, S_ED_MENU_EDIT_LINK,
     S_ED_MENU_REMOVE_LINK, S_ED_MENU_EDIT_SOURCE, S_FILTER_IMG,
+    // Phase 4: why a button is greyed in a task item (a heading or a quote cannot start after its box)
+    S_ED_NA_TASK_FMT,
     S_COUNT
 };
 

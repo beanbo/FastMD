@@ -425,6 +425,12 @@ void SettingsOpen() {
     GetWindowRect(g.hwnd, &owner);
     int w = r.right - r.left, h = r.bottom - r.top;
     int x = owner.left + ((owner.right - owner.left) - w) / 2, y = owner.top + std::max(0, (int)((owner.bottom - owner.top) - h) / 3);
+    // inside the monitor's work area, so its last rows (the autosave toggle) are not under the taskbar (Phase 4 notes)
+    MONITORINFO mi{sizeof(mi)};
+    if (GetMonitorInfoW(MonitorFromWindow(g.hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+        x = std::max<int>(mi.rcWork.left, std::min<int>(x, mi.rcWork.right - w));
+        y = std::max<int>(mi.rcWork.top, std::min<int>(y, mi.rcWork.bottom - h));
+    }
     g_wnd = CreateWindowExW(0, kClass, Tr(S_SETTINGS_TITLE), WS_CAPTION | WS_SYSMENU, x, y, w, h, g.hwnd, nullptr, g.inst, nullptr);
     if (!g_wnd) return;
     g_scale = GetDpiForWindow(g_wnd) / 96.f;

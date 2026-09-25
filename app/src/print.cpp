@@ -183,6 +183,9 @@ bool PrintPages(HDC dc, const wchar_t* jobName, const wchar_t* outFile, int from
         DrawLabel(num, pg.mL / s, (pg.mT + pg.headerDev + pg.areaH + pg.footerDev * 0.25f) / s, w, true, P_MUTED);
         if (EndPage(dc) <= 0) { ok = false; break; }
     }
+    // the paper's layouts go now, while the job and the print canvas they were drawn with are alive: released after
+    // EndDoc and the canvas, DirectWrite read freed memory now and then (a PDF export crashed under load, 1.2.0 too)
+    ClearLayoutCache();
     if (ok) EndDoc(dc);
     else if (started) AbortDoc(dc);
     Restore(saved);

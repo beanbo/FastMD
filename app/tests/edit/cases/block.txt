@@ -259,11 +259,11 @@ flags: nolist
 do: Enter; Quote; type "x"
 want: abc\n\n> x‸\n
 
-=== fence_wrap (§8.7: text blocks → one fence of their rendered lines)
+=== fence_wrap (§8.7, Phase 4 notes: text blocks → one fence of their source lines, emphasis and addresses kept)
 src: **bold** te‸xt\nline2\n
 flags: nolist
 do: Fence
-want: ```\nbold te‸xt\nline2\n```\n
+want: ```\n**bold** te‸xt\nline2\n```\n
 
 === fence_wrap_blocks (a blank line between the blocks; the caret where the selection's focus was)
 src: ⟦a\n\n# b⟧\n
@@ -272,10 +272,10 @@ do: Fence
 want: ```\na\n\nb‸\n```\n
 
 === fence_longer (§8.7: a fence longer than any backtick run inside)
-src: a \\`\\`\\` ‸c\n
+src: a ````x```` ‸c\n
 flags: nolist
 do: Fence
-want: ````\na ``` ‸c\n````\n
+want: `````\na ````x```` ‸c\n`````\n
 
 === fence_unwrap (§8.7: in a code block: a paragraph per non-empty line, escaped)
 src: ```\nfoo‸\n\nbar *x*\n```\n

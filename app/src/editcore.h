@@ -28,6 +28,7 @@ struct Phantom {
     std::wstring prefix, blankPrefix;  // ContPrefix / BlankPrefix the materialised text gets
     uint8_t depth = 0;                 // container depth (Enter/Backspace in an empty phantom pop one level)
     uint8_t style = 0;                 // 0 paragraph, 1..6 heading, 7 bullet, 8 numbered, 9 task, 10 quote (§8.1)
+    uint8_t tight = 0;                 // PH_AFTER: written right under its block, no blank line (a nested item, Phase 4)
     // The caret stands in the phantom row (focus = anchor = anchorSrc). A phantom before a block made by Enter at the
     // block's start keeps the caret in the block: ↑ goes into the row (§6.7, UX-7), so this cannot be told from the
     // offsets alone.
@@ -74,12 +75,21 @@ struct EditResult {
     // a cut's rebalancing, §7.5 step 5): the rendered text must be the old one with [t0, t1) replaced by `text`, and the
     // characters beside the change must keep their formatting. When it fails the step is taken back and refused.
     struct Keep { bool on = false; uint32_t t0 = 0, t1 = 0; std::wstring text; } keep;
+    // A structural step changes the blocks it names and no others (Phase 4 notes): the blocks before old block b0 and
+    // after old block b1 come out the same - kind, heading level, text -, the new document has `delta` blocks more (less),
+    // and with `same` the blocks in [b0, b1] keep their kind, level and text too (b1 < b0: every block). Synthesized
+    // blocks (an alert's title, the footnotes' rule) are not counted. The glue takes the step back when it fails.
+    struct Shape { bool on = false, same = false; int32_t b0 = 0, b1 = -1, delta = 0; } shape;
+    // A join whose check fails is tried once more with a blank between the two texts (Phase 4 notes): its last splice
+    // gets the blank, the check's text too (`*more.*If` → `*more.* If`). Failing again, it is refused.
+    bool blankRetry = false;
     // a formatting command keeps the text: its selection is found again by text position on the new document, from
     // inside the delimiters at its start (MAP_INNER_START) to before those at its end (MAP_INNER_END); block -1 = none
     TextPos selA{0, -1, -1}, selB{0, -1, -1};
     std::string refused;               // non-empty: nothing applied, the glue shows the toast named here
 };
 bool Kept(const Doc& oldD, const Doc& newD, const EditResult::Keep&);
+void BlankRetry(EditResult&);  // the result's retry (blankRetry): the blank put in, the flag cleared
 // Kept, and every one of the result's format expectations: what the glue (and the golden runner) checks after the
 // re-parse of a step that wrote delimiters; false = take it back
 bool Verified(const Doc& oldD, const Doc& newD, const EditResult&);
@@ -147,6 +157,7 @@ struct AtomBinding {
     PopupKind kind = PK_NONE;
     uint8_t fields = 0;                    // 1; a picture 2
     bool fixed1 = false;                   // a reference picture: field 1 shows its definition's address, read-only
+    bool cell = false;                     // in a table cell: a `|` of the text would end the cell (Phase 4 notes)
     uint32_t beg[2] = {}, end[2] = {};     // the source each field replaces
     uint32_t outerBeg = 0, outerEnd = 0;   // the object's whole source, delimiters and fences included
     uint32_t fence[2] = {UINT32_MAX, UINT32_MAX};  // a diagram's opening and closing fence runs (UINT32_MAX: none)
@@ -171,6 +182,10 @@ std::wstring PictureDest(const std::wstring& docDir, const std::wstring& file);
 // itself at the caret, and its neighbours must keep their formatting. When it does not, the glue tries the other places
 // TypeFallbacks names, in order; if none renders right, the first splice stays (typing is never blocked).
 bool NeedsTypeCheck(std::wstring_view text);
+// The formats whose closer ends at the caret (source offset): typing just closed them (`**bold*` + `*`). The caret
+// stays after that closer - normalised it would go back inside - and they are pending off, so what follows is plain,
+// the blank too (Phase 4 notes; §7.3's sticky end is for typing inside a span)
+uint16_t ClosedAt(const Doc&, const std::wstring& src, uint32_t caret);
 bool TypedOk(const Doc& oldD, uint32_t t, const Doc& newD, std::wstring_view rendered);
 // text put in at `at`; `also`: splices after that one, on the source it left (F9-2's `_` → `*`)
 struct TypeCandidate { uint32_t at; std::wstring text; uint32_t caret; std::wstring rendered; std::vector<Splice> also; };

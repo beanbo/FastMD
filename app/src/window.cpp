@@ -128,8 +128,10 @@ void ApplyTheme() {
     SetDarkPalette(dark);
     if (g.hwnd) {
         ApplyWindowChrome(g.hwnd);
-        SetClassLongPtrW(g.hwnd, GCLP_HBRBACKGROUND,
-                         (LONG_PTR)CreateSolidBrush(RGB(g_pal[P_BG] >> 16, (g_pal[P_BG] >> 8) & 255, g_pal[P_BG] & 255)));
+        // (the brush it replaces goes: one GDI object leaked on every theme switch until Phase 4)
+        HBRUSH old = (HBRUSH)SetClassLongPtrW(
+            g.hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)CreateSolidBrush(RGB(g_pal[P_BG] >> 16, (g_pal[P_BG] >> 8) & 255, g_pal[P_BG] & 255)));
+        if (old) DeleteObject(old);
     }
     FindRelayoutInput();
     SettingsRefresh();
@@ -466,6 +468,7 @@ static void Present(HDC hdc) {
     HDC dst = hdc ? hdc : GetDC(g.hwnd);
     BitBlt(dst, 0, 0, g.pxW, g.pxH, g.canvas->DC(), 0, g.canvas->ViewportTop(), SRCCOPY);
     if (!hdc) ReleaseDC(g.hwnd, dst);
+    if (g.editing) EditPresented();  // (a keystroke's cost ends here, §5.8)
 }
 
 static void ScrollTest() {  // steady-state cost of a scrolling frame, logged to %TEMP%\fastmd-scroll.txt

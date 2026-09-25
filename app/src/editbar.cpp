@@ -212,7 +212,10 @@ std::wstring KeyLabel(const Def& d) {
     if (d.vk == VK_OEM_3) {
         wchar_t n[32] = L"";
         LONG sc = (LONG)MapVirtualKeyW(d.vk, MAPVK_VK_TO_VSC) << 16;
-        if (GetKeyNameTextW(sc, n, 32) > 0) return s + n;
+        if (GetKeyNameTextW(sc, n, 32) > 0) {
+            CharUpperW(n);  // (the layout names the key in lower case: «ё»; shortcuts read «Ctrl+Ё»)
+            return s + n;
+        }
         return s + L"`";
     }
     return s + (wchar_t)d.vk;
@@ -223,9 +226,10 @@ std::wstring TipOf(int k) {
     std::wstring name = k == kStatus ? EditStatusTip() : std::wstring(Tr(d.tip));
     int why = 0;
     if (!Enabled(k, &why) && why) {  // greyed: why (§2.3, «Полужирный — недоступно в блоке кода»)
-        static const StrId kWhy[] = {S_ED_NA_TABLE_FMT, S_ED_NA_CODE_FMT, S_ED_NA_OBJECT_FMT, S_ED_NA_FOOTNOTE_FMT, S_ED_NA_RAW_FMT};
+        static const StrId kWhy[] = {S_ED_NA_TABLE_FMT, S_ED_NA_CODE_FMT, S_ED_NA_OBJECT_FMT, S_ED_NA_FOOTNOTE_FMT, S_ED_NA_RAW_FMT,
+                                     S_ED_NA_TASK_FMT};
         wchar_t b[256];
-        swprintf_s(b, Tr(kWhy[std::clamp(why, 1, 5) - 1]), name.c_str());
+        swprintf_s(b, Tr(kWhy[std::clamp(why, 1, 6) - 1]), name.c_str());
         return b;
     }
     std::wstring keys = KeyLabel(d);

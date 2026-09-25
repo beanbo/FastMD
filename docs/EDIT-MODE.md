@@ -2693,3 +2693,52 @@ fixes; the per-finding verdicts and evidence are in the phase report `2a-review-
 | Reading strips covered the corner buttons | §2.5 | between them |
 | The conflict strip cut its sizes | §2.5 | the whole text in the tooltip pill |
 | Tests: partial frames compared two full ones; hidden prompts, hangs and crashes at close; toasts told apart by ink only | §13.2, §13.6, §14.3 | `shot(paint=False)`; the close helper's checks; `Q_LAST_PROMPT` lp 2 |
+
+### Phase 4 notes (the review of the whole feature)
+
+Five lenses (data safety, Markdown, UX, architecture, regressions) reviewed Phases 1-3. What changed in the design with
+the fixes; the per-finding verdicts and evidence are in the phase report `4-review-fixes.md`. Where the code of 1-3
+differed from the text above, the code was kept and is described here.
+
+| Finding | Resolved in | Note |
+|---|---|---|
+| A popup open while the file was adopted wrote its text at the old offsets; Esc put stale lines back | §9.2, §10.7 | every path that replaces the text (adoption, discard, a journal's restore, a recovery command) closes the popup first, keeping what it holds as a step of its own - before the dirty check, so a popup's last change makes a conflict, not an adoption. Guard: the popup remembers its lines as it left them; when the source no longer holds them there, it writes nothing and Esc restores nothing |
+| No journal for files on a share | §10.6 | journals for every file; a share's are named by a hash of the path (volume `ffffffff`), since a server need not keep a file's index |
+| A conflict whose cause went away stayed a conflict | §10.7 | text equal to our baseline again: the strip goes, autosave goes on |
+| The leave strip outlived the unsaved edits | §2.5 | it goes whenever the document is no longer dirty |
+| Journal restore deleted the journal before the text was safe; an older journal could be restored over it | §10.6 | the window writes its own journal first; older journals of the same text are not offered again this session |
+| Delete on the recovery strip; "Open the copy" into %TEMP% | §10.5 | Delete sends the file to the Recycle Bin (a test profile, FASTMD_DATA, deletes it); copies go to the data folder's `copies\` |
+| An emptied inline formula removed after the flush on ✕ | §9.2 | leaving closes the popup before the flush (F5 and Ctrl+E already did) |
+| A block command could lose or merge blocks | §8.4-§8.7 | `EditResult::Shape`: after the re-parse the blocks it did not name are the same (kind, level, text) and as many; a list or quote command keeps every block's text; failing, the step is taken back (the toast "cannot be applied") |
+| Code block over a selection with a table, code, HTML, a definition between | §8.7 | refused; the fence holds the blocks' **source** lines (not the rendered text): addresses, emphasis and pictures stay as text |
+| Joins moved HTML wrapper lines and alert tags | §7.7 | such a line (a block-level tag, `[!TIP]`) between the blocks is a wall: Backspace / Delete move the caret over it (into a folded block: nothing); Delete before an alert's first text goes to it |
+| Joins changed the text (a closer losing its flank, `!` + `[x](y)`, code runs meeting) | §7.7, §7.5 | every join is checked (Kept: the texts meet, nothing shows up or goes; Shape: two blocks become one); failing, it is tried once with a blank between; failing again, refused. Into an ATX heading, a trailing ` #` of the joined text is escaped |
+| A heading made a paragraph ran into the paragraph line above or below | §7.6, §7.7, §8.4 | a blank line keeps them apart (Backspace at the start, P / Ctrl+n, Enter's second half, a heading joined by Delete) - not where the neighbour opens a container of its own |
+| Children of an item that lost its marker became lazy text or code | §7.8, §8.5 | its continuation lines and children move to its parent item's content column (the marker's column at the top); only the marker, its blanks and a box go - a heading's `#` stays |
+| Backspace on a nested ordered list's first item | §7.7 | the next item is renumbered 1 (only 1 interrupts the text the first item joined; the list stays tight) |
+| List off / Quote / List on next to other blocks | §8.5, §8.6 | a blank line after text the list interrupted; between a new quote and a quote right above or below; indented code right after a new item moves into it (indented by the marker); a lazy line gets the whole prefix |
+| Heading and quote in a task item | §8.1 | greyed, with the reason "not available in a task item" (a new string) |
+| Paste of several lines inside a span | §7.11 | the spans at the caret are closed before the first break and opened again before the last line |
+| A fence line typed or pasted into fenced code | §7.10 | both fences grow past it in the same step |
+| Editing a collapsed or shortcut reference link's text | §7.3, §7.9 | its closer names the old label (`[text][old]`) in the same step |
+| Inline code over a link | §8.2 | pieces are cut at every edge of a link's text; the code goes inside the link |
+| `|` from a popup in a cell; `$` and `|` in a formula made of a selection | §9.2, §8.8 | in a cell: `\vert` in TeX (md4c keeps `\|`), `\|` in alt text, `%7C` in a path, `&#124;` in HTML; `$` → `\$` |
+| Backslashes and `!` at an insert's edges | §8.3, §8.8 | a backslash before punctuation or at the end of an address or alt text is doubled; a link right after `!` escapes it; a formula right after `\` gets a blank |
+| Kind 7 of §7.4 took an autolink for a tag | §7.4 | the tag name must be followed by a blank, `/` or `>` |
+| `>` typed into an empty new line wrote an empty quote | §6.7 | it sets the phantom's quote style; the first character writes `> x` |
+| Enter then Tab in a `-` list made the item above a heading 2 | §7.8 | Tab on an empty item: its line goes, a list-styled phantom one level deeper, written right under the item's text (`Phantom::tight`) |
+| `##` typed on a new line made `# #` | §7.3 | `#` typed into an empty ATX heading lengthens its marker |
+| `---` + Enter; ```` ```js ```` + Enter; `$$` + Enter | §6.9 | a rule typed is selected (Enter: a paragraph after it); a fence opener typed is masked while the caret is on its line, Enter writes its end; `$$` + Enter makes a formula block with its popup |
+| Esc never left with the last block selected; Ctrl+Enter / Esc after an insert | §2.2, §9.2 | deselecting the last block leaves a phantom after it; a popup an insert opened: done goes on after the object (a phantom), Esc takes the insert back too (Ctrl+Y redoes it) |
+| Typing the closing `**` did not end bold | §7.3 | a span typing closed leaves the caret after its closer with the format pending off: the blank and the words after it are plain. The sticky end is for a caret before the closer (Ctrl+B typing) |
+| A new table's empty columns were slivers | §7.10 | while editing (a mapped parse) a column with no text at all is laid out 4 lines' height wide; the whole new table is brought into view |
+| A picture put in at a paragraph's end glued to it | §8.8 | a paragraph of its own after it; in the middle of a line it stays in the line |
+| An inline formula's popup took Enter as a line | §9.1 | its field is one line: Enter is done |
+| A long source popup opened at its end | §9.1 | a source taller than its box opens at its start |
+| An EDIT's 30,000-character limit | §9.1 | lifted (`EM_SETLIMITTEXT 0`) |
+| The preview slot dropped a closed popup's job; a failure's kept picture went into the table; a popup claimed every formula of its lines | §9.4 | a displaced job not the popup's own goes to the picture worker; a failure is stored without pixels, the last good picture is the bound formula's alone; only the bound formula is the preview worker's; a source the table knows sets the popup's error line |
+| §5.8's budgets were measured for the swap only | §5.8 | `Q_EDIT_STATS` lp 7-9: WM_CHAR to the end of Present (ring of 128). End to end, medium.md ≈ 4.9 ms (a full frame ≈ 4 ms), a 200 × 5 cell ≈ 12 ms, a 700-line code block ≈ 20 ms: chunked code layout and cell-layout reuse (R16) are left for after v1 |
+| A regenerated picture stayed stale when the .md was rewritten unchanged | §10.7 | every local picture's file stamp is kept; the text-equal branch and the activation read changed pictures again (the old pixels stay until the new arrive) |
+| "Restart now" inside a modal loop became a plain close | §10.10 | the restart waits for the loop's end as a restart |
+| The settings window below the work area | - | clamped into the monitor's work area |
+| A PDF export crash (1.2.0 too) | - | the paper's layouts are released before `EndDoc` and before the print canvas |

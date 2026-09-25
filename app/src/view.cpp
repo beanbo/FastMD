@@ -501,7 +501,7 @@ static void DrawTable(uint32_t i, const Block& b, BlockLayout* L, float x, float
                 g.canvas->Text(cl, tx, ty, b.muted ? P_MUTED : P_TEXT);
                 DrawLinkFocus(cl, cell.textOff, cell.textLen, tx, ty);
                 if (g.editing && r == 0 && !cell.textLen) {  // an empty header cell says what it is, on screen only (UX-24)
-                    // (in the column's own width, cut with "…": the table keeps the width reading mode gave it)
+                    // (in the column's own width, cut with "…"; an empty column is laid out wide enough, Phase 4 notes)
                     wchar_t ph[64];
                     swprintf_s(ph, Tr(S_ED_COLUMN_FMT), (int)c + 1);
                     float room = std::max(1.f, tl->colW[c] - 1 - 2 * Metrics::kCellPadX);
@@ -836,7 +836,12 @@ bool AtomRect(int32_t bi, int32_t image, float box[4]) {
 static void DrawAtomOutline(float top, float bottom) {
     float r[4];
     if (!AtomRect(g.selAtomBlock, g.selAtomImage, r) || r[3] + 3.f < top || r[1] - 3.f > bottom) return;
-    g.canvas->StrokeRoundRect(r[0] - 2.f, r[1] - 2.f, r[2] + 2.f, r[3] + 2.f, 2.f, 1.f, P_ACCENT);
+    // (a picture that no longer renders has its own outline 1 px out: this one goes a pixel further, not over it)
+    const Doc& d = g.doc;
+    int32_t ii = g.selAtomImage;
+    if (ii < 0 && (size_t)g.selAtomBlock < d.blocks.size() && d.blocks[g.selAtomBlock].kind == BK_IMAGE) ii = (int32_t)d.blocks[g.selAtomBlock].aux;
+    const float o = ii >= 0 && (size_t)ii < d.images.size() && d.images[ii].renderFailed ? 3.f : 2.f;
+    g.canvas->StrokeRoundRect(r[0] - o, r[1] - o, r[2] + o, r[3] + o, 2.f, 1.f, P_ACCENT);
 }
 
 // A styled phantom row (§6.7) shows what it will be: a list's marker (a bullet, `1.`, an empty box) left of where the

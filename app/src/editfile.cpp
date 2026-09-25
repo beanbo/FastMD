@@ -179,7 +179,7 @@ int g_flushPolicy = 0;  // SetFlushPolicyForTests
 // a local volume is flushed after every save while flushing it is cheap (the median of its first three flushes under
 // 5 ms, and those three to find out); otherwise only at the flush points
 bool FlushEverySave(uint32_t vol) {
-    if (g_flushPolicy == 1) return false;
+    if (g_flushPolicy) return g_flushPolicy == 2;  // (tests: 1 never, 2 always - not what a busy machine measured)
     VolFlush* v = VolumeCost(vol);
     if (!v || v->n < 3) return true;
     double a = v->ms[0], b = v->ms[1], c = v->ms[2];

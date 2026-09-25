@@ -328,8 +328,42 @@ std::vector<const SpanSrc*> ec::SpansIn(const Doc& d, const TextPos& p, TRange r
     return v;
 }
 
+namespace {
+// the blocks a structural check counts: not the synthesized ones
+std::vector<uint32_t> RealBlocks(const Doc& d) {
+    std::vector<uint32_t> v;
+    for (uint32_t i = 0; i < d.blocks.size(); i++)
+        if (i >= d.blockSrc.size() || !(d.blockSrc[i].flags & BS_SYNTH)) v.push_back(i);
+    return v;
+}
+bool SameShape(const Doc& a, uint32_t i, const Doc& b, uint32_t j) {
+    const Block &x = a.blocks[i], &y = b.blocks[j];
+    return x.kind == y.kind && x.heading == y.heading && x.textLen == y.textLen &&
+           !a.text.compare(x.textOff, x.textLen, b.text, y.textOff, y.textLen);
+}
+// EditResult::Shape: the blocks outside the ones the step names are the same, and as many (Phase 4 notes)
+bool Shaped(const Doc& a, const Doc& b, const EditResult::Shape& s) {
+    if (!s.on) return true;
+    const std::vector<uint32_t> ra = RealBlocks(a), rb = RealBlocks(b);
+    if ((int64_t)rb.size() != (int64_t)ra.size() + s.delta) return false;
+    size_t k0 = 0, k1 = 0;  // the first real block at b0, the first after b1
+    while (k0 < ra.size() && (int32_t)ra[k0] < s.b0) k0++;
+    k1 = k0;
+    while (k1 < ra.size() && (int32_t)ra[k1] <= s.b1) k1++;
+    if (s.b1 < s.b0) k0 = k1 = ra.size();  // every block
+    for (size_t k = 0; k < k0; k++)
+        if (!SameShape(a, ra[k], b, rb[k])) return false;
+    for (size_t k = k1; k < ra.size(); k++)
+        if (!SameShape(a, ra[k], b, rb[k + (size_t)((int64_t)rb.size() - (int64_t)ra.size())])) return false;
+    if (s.same && s.b1 >= s.b0)
+        for (size_t k = k0; k < k1; k++)
+            if (!SameShape(a, ra[k], b, rb[k])) return false;
+    return true;
+}
+}  // namespace
+
 bool Verified(const Doc& a, const Doc& b, const EditResult& r) {
-    if (!Kept(a, b, r.keep)) return false;
+    if (!Kept(a, b, r.keep) || !Shaped(a, b, r.shape)) return false;
     for (const EditResult::Expect& e : r.verify) {
         if (e.tEnd > b.text.size()) return false;
         for (uint32_t t = e.tBeg; t < e.tEnd; t++) {
@@ -346,8 +380,9 @@ namespace {
 struct Piece { int32_t block, cell; uint32_t t0, t1; };
 
 // The source of text [t0, t1) of a block or cell, with the delimiters of the spans that lie wholly inside it (their
-// text is all in the piece) - but not of those that go on beyond it
-bool PieceSrc(const Doc& d, const TextPos& p, TRange rg, uint32_t t0, uint32_t t1, uint32_t* sA, uint32_t* sB) {
+// text is all in the piece) - but not of those that go on beyond it, and for inline code not of a link: its text goes
+// into code inside it, its address never into the code's text (Phase 4 notes)
+bool PieceSrc(const Doc& d, const TextPos& p, TRange rg, uint32_t t0, uint32_t t1, uint32_t* sA, uint32_t* sB, bool code = false) {
     SegSpan ss = SegsIn(d, p.block, rg);
     const SrcSeg* g0 = SegCovering(ss, t0);
     const SrcSeg* g1 = t1 > t0 ? SegCovering(ss, t1 - 1) : nullptr;
@@ -355,7 +390,7 @@ bool PieceSrc(const Doc& d, const TextPos& p, TRange rg, uint32_t t0, uint32_t t
     *sA = g0->kind == SEG_PLAIN ? g0->s + (t0 - g0->t) : g0->s;
     *sB = g1->kind == SEG_PLAIN ? g1->s + (t1 - g1->t) : g1->s + g1->sLen;
     for (const SpanSrc* sp : SpansIn(d, p, rg)) {
-        if ((sp->flags & SF_UNCLOSED) || sp->tBeg < t0 || sp->tEnd > t1 || sp->tBeg == sp->tEnd) continue;
+        if ((sp->flags & SF_UNCLOSED) || sp->tBeg < t0 || sp->tEnd > t1 || sp->tBeg == sp->tEnd || (code && Link(*sp))) continue;
         *sA = std::min(*sA, sp->openBeg);
         *sB = std::max(*sB, sp->closeEnd);
     }
@@ -395,7 +430,8 @@ std::vector<Piece> Pieces(const EditCtx& c, const TextPos& A, const TextPos& B, 
             if (sp->flags & SF_UNCLOSED) continue;
             // every edge of the spans the format is taken off (one piece each), of what inline code leaves out; of the
             // other spans the edges of those that go on beyond the piece - a span inside it just nests in the new one
-            bool every = (remove && Gives(*sp, fmt)) || (fmt == FMT_CODE && !remove && NotText(*sp));
+            // (inline code: every edge of a link's text too - the code goes inside the link, Phase 4 notes)
+            bool every = (remove && Gives(*sp, fmt)) || (fmt == FMT_CODE && !remove && (NotText(*sp) || Link(*sp)));
             bool beyond = sp->tBeg < t0 || sp->tEnd > t1;
             if (!every && !(((sp->flags & SF_ENTERABLE) || Link(*sp)) && beyond)) continue;
             for (uint32_t e : {sp->tBeg, sp->tEnd})
@@ -476,7 +512,7 @@ bool AddTo(const EditCtx& c, Piece pc, uint16_t fmt, std::vector<Ed>& eds, EditR
     for (uint32_t t = pc.t0; t < pc.t1 && all; t++) all = !Ink(d, t) || HasFormat(d, t, fmt);
     if (all) return true;  // (a part of the selection that has it already)
     uint32_t sA, sB;
-    if (!PieceSrc(d, p, rg, pc.t0, pc.t1, &sA, &sB)) return false;
+    if (!PieceSrc(d, p, rg, pc.t0, pc.t1, &sA, &sB, fmt == FMT_CODE)) return false;
     if (fmt == FMT_CODE) {
         std::wstring t = Rendered(d, src, pc.block, rg, pc.t0, pc.t1);
         if (pc.cell >= 0) {  // (a pipe ends a cell, in code too)
@@ -600,7 +636,7 @@ bool RemoveFrom(const EditCtx& c, Piece pc, uint16_t fmt, std::vector<Ed>& eds, 
 
 // ------------------------------------------------------------------------------------------------ pending formats (§7.3)
 // the enterable spans a blank typed at text position p - their end - leaves behind: they stay "sticky" (§7.3)
-uint16_t ec::StickyAt(const Doc& d, const TextPos& p) {
+uint16_t ec::StickyAt(const Doc& d, const TextPos& p, uint32_t caret) {
     TRange rg;
     if (!ValidBlock(d, p.block) || !RangeOf(d, p, &rg)) return 0;
     uint32_t hard = 0;  // a link, code or formula ending there too: a span inside it cannot be carried past its closer
@@ -610,9 +646,26 @@ uint16_t ec::StickyAt(const Doc& d, const TextPos& p) {
     uint16_t bits = 0;
     for (const SpanSrc* sp : spans) {
         if (sp->tEnd != p.t || sp->tBeg >= p.t || (sp->flags & SF_UNCLOSED) || sp->type >= 0x80 || sp->closeBeg < hard) continue;
+        // Only a span the caret was typing in, before its closer: one whose closer the reader typed (or stepped over)
+        // is ended - the blank after `**bold**` is plain (Phase 4 notes)
+        if (caret > sp->closeBeg) continue;
         for (uint16_t f : {FMT_BOLD, FMT_ITALIC, FMT_STRIKE})
             if (Gives(*sp, f)) bits |= f;
     }
+    return bits;
+}
+
+uint16_t ClosedAt(const Doc& d, const std::wstring& src, uint32_t caret) {
+    if (!d.hasMap) return 0;
+    uint16_t tr = 0;
+    TextPos p = TextOfSrc(d, src, caret, -1, &tr);
+    TRange rg;
+    if (!ValidBlock(d, p.block) || !RangeOf(d, p, &rg)) return 0;
+    uint16_t bits = 0;
+    for (const SpanSrc* sp : SpansIn(d, p, rg))
+        if (sp->closeEnd == caret && sp->closeBeg < caret && !(sp->flags & SF_UNCLOSED) && (sp->flags & SF_ENTERABLE))
+            for (uint16_t f : {FMT_BOLD, FMT_ITALIC, FMT_STRIKE})
+                if (Gives(*sp, f)) bits |= f;
     return bits;
 }
 
@@ -826,6 +879,24 @@ EditResult OpToggleInline(const EditCtx& c, const EditState& st, uint16_t fmt) {
 }
 
 // ------------------------------------------------------------------------------------------------ block style (§8.4)
+namespace {
+// the first text of a task item: its box stands before it, so neither a heading nor a quote can start there
+bool TaskText(const Doc& d, int32_t b) {
+    const int32_t it = ItemOf(d, b);
+    return it >= 0 && d.containers[it].taskOff != UINT32_MAX;
+}
+// Block b becomes a paragraph: a blank line (its container prefix, stripped) between it and a paragraph line right
+// above or below it, which would run into it - `text⏎===` would be a setext heading (Phase 4 notes)
+void KeepApart(const EditCtx& c, int32_t b, uint32_t lastEnd, std::vector<Ed>& eds) {
+    const Doc& d = c.doc;
+    const std::wstring& src = c.src;
+    const std::wstring blank = Strip(ContPrefix(d, src, b));
+    const uint32_t line = d.blockSrc[b].line, nx = SkipEol(src, lastEnd);
+    if (RunsIntoAbove(d, src, b)) eds.push_back(Ed{line, line, blank + Eol(c, line)});
+    if (RunsIntoBelow(d, src, lastEnd)) eds.push_back(Ed{nx, nx, blank + Eol(c, lastEnd)});
+}
+}  // namespace
+
 // Paragraph ↔ heading n per text block; the same level again returns them to paragraphs. A paragraph's lines become
 // one (soft breaks a blank, hard breaks <br>); ATX m → n changes the # run only; setext becomes ATX; back to a
 // paragraph the markers go and §7.4 escapes what would read as block syntax. A one-line alert's tag goes onto its own
@@ -845,9 +916,13 @@ EditResult OpBlockStyle(const EditCtx& c, const EditState& st, int level) {
     bool all = level > 0;
     for (int32_t b : bl) all &= d.blocks[b].heading == level;
     const int to = all ? 0 : level;
+    if (to)  // a task item's box stands before its text: `- [x] ## Task` would be no heading (Phase 4 notes)
+        for (int32_t b : bl)
+            if (TaskText(d, b)) return Refuse(st, "context");
     if (to == 0 && bl.size() == 1 && d.blocks[bl[0]].heading && (d.blockSrc[bl[0]].flags & BS_ATX) && !d.blocks[bl[0]].textLen)
         return GoneToPhantom(c, st, bl[0], EK_FORMAT);  // an empty heading: nothing to keep as a paragraph
     std::vector<Ed> eds;
+    uint32_t escAt = UINT32_MAX;  // a backslash put in at the caret: the caret stays before it
     for (int32_t b : bl) {
         const BlockSrc& bs = d.blockSrc[b];
         const Block& blk = d.blocks[b];
@@ -882,12 +957,20 @@ EditResult OpBlockStyle(const EditCtx& c, const EditState& st, int level) {
             while (a > bs.line && src[a - 1] == L'#') a--;
             if (!AtxClose(src, bs).empty()) eds.push_back(Ed{bs.end, bs.lineEnd, L""});
             eds.push_back(Ed{a, bs.beg, L""});
+            const size_t n = eds.size();
             EscapeAt(eds, Sub(src, bs.beg, bs.end), bs.beg, true);
+            if (eds.size() > n && eds.back().a == eds.back().b && eds.back().a == st.focus) escAt = st.focus;
+            KeepApart(c, b, bs.lineEnd, eds);
         } else if (bs.flags & BS_SETEXT) {
             eds.push_back(Ed{bs.lineEnd, bs.outerEnd, L""});
+            KeepApart(c, b, bs.outerEnd, eds);
         }
     }
-    return Built(c, st, std::move(eds), EK_FORMAT);
+    EditResult r = Built(c, st, std::move(eds), EK_FORMAT);
+    if (r.refused.empty() && escAt != UINT32_MAX && st.anchor == st.focus)  // (before the backslash, wherever it went)
+        r.after.focus = r.after.anchor = MapThrough(r.splices, escAt, true) - 1;
+    SetShape(r, bl.front(), bl.back(), 0, false);  // the same blocks: only their levels (and line breaks) change
+    return r;
 }
 
 // ------------------------------------------------------------------------------------------------ lists (§8.5)
@@ -921,15 +1004,24 @@ std::vector<int32_t> ListRun(const Doc& d, int32_t item) {
     }
     return v;
 }
-// an item's continuation lines and children move by delta columns: its marker got wider or narrower
-void Reindent(const Doc& d, const std::wstring& src, int32_t item, int delta, std::vector<Ed>& eds) {
+// an item's continuation lines and children move by delta columns, at column col: its marker got wider or narrower
+void Reindent(const Doc& d, const std::wstring& src, int32_t item, uint32_t col, int delta, std::vector<Ed>& eds) {
     if (!delta) return;
     const ContainerSrc& it = d.containers[item];
     std::vector<Splice> v;
     uint32_t from = SkipEol(src, LineEndOf(src, it.markOff)), to = d.blockSrc[LastOf(d, item)].outerEnd;
     if (from > to) return;
-    Shift(src, from, to, Col(src, it.markOff), delta, v);
+    Shift(src, from, to, col, delta, v);
     for (const Splice& sp : v) eds.push_back(Ed{sp.at, sp.at + (uint32_t)sp.removed.size(), sp.inserted});
+}
+// The column an item's content starts at with another marker of width w in its place (the blanks after it the same; a
+// tab still goes to its tab stop): what its continuation lines and children move by is the difference (Phase 4 notes)
+uint32_t ContentWith(const std::wstring& src, const ContainerSrc& it, uint32_t w) {
+    uint32_t c = Col(src, it.markOff) + w, k = it.markOff + it.markLen, blanks = 0;
+    for (; k < src.size() && Blank(src[k]); k++) c = src[k] == L'\t' ? (c + 4) & ~3u : c + 1, blanks++;
+    if (!blanks || k >= src.size() || EolChar(src[k]) || c > Col(src, it.markOff) + w + 4)
+        return Col(src, it.markOff) + w + 1;  // an empty item, or indented code in it: one blank counts
+    return c;
 }
 }  // namespace
 
@@ -975,20 +1067,34 @@ EditResult OpList(const EditCtx& c, const EditState& st, int kind) {
             const ContainerSrc& it = d.containers[items[i]];
             const int32_t fb = (int32_t)it.firstBlock;
             const BlockSrc& fs = d.blockSrc[fb];
-            eds.push_back(Ed{it.markOff, fs.beg, L""});  // (a task's box with it)
-            Reindent(d, src, items[i], -(int)(it.contentCol - Col(src, it.markOff)), eds);
+            // the marker, its blanks and a task's box go - not a heading's #, which is the item's text (Phase 4 notes)
+            uint32_t e = it.markOff + it.markLen;
+            while (e < fs.beg && Blank(src[e])) e++;
+            if (it.taskOff != UINT32_MAX && it.taskOff + 2 <= fs.beg) {
+                e = it.taskOff + 2;
+                while (e < fs.beg && Blank(src[e])) e++;
+            }
+            eds.push_back(Ed{it.markOff, std::min(e, fs.beg), L""});
+            // The continuation lines and the children come out to the column the item's own content now stands in -
+            // its parent item's content, or the marker's column at the top: markers at the item's content column
+            // would be indented code or lazy text under the paragraph it became (Phase 4 notes)
+            const uint32_t base = it.parent >= 0 && d.containers[it.parent].kind == CT_ITEM ? d.containers[it.parent].contentCol
+                                                                                            : Col(src, it.markOff);
+            if (it.contentCol > base) Reindent(d, src, items[i], base, -(int)(it.contentCol - base), eds);
             if (Para(d, fb)) EscapeAt(eds, Sub(src, fs.beg, LineEndOf(src, fs.beg)), fs.beg, true);
-            // blank lines keep the paragraphs apart - from each other and from the items left before and after them
+            // blank lines keep the paragraphs apart - from each other, from the items left before and after them, and
+            // from a paragraph the list interrupted (`Intro:⏎- a`: Phase 4 notes)
             const std::wstring E = Eol(c, it.markOff), blank = Strip(PrefixN(d, src, fb, (int)Chain(d, fb).size() - 1, nullptr));
             const int32_t last = LastOf(d, items[i]), nx = NextInSource(d, last), pv = PrevInSource(d, fb);
             uint32_t le = d.blockSrc[last].outerEnd, nl = SkipEol(src, le);
-            if (nx >= 0 && nl < src.size() && !BlankLine(src, nl, LineEndOf(src, nl))) eds.push_back(Ed{le, le, E + blank});
-            if (i == 0 && pv >= 0 && ItemAround(d, pv) >= 0) {
-                uint32_t ls = LineStartOf(src, it.markOff), pe = BackEol(src, ls);
-                if (ls > 0 && !BlankLine(src, LineStartOf(src, pe), pe)) eds.push_back(Ed{ls, ls, blank + E});
-            }
+            if (nx >= 0 && nl > le && nl < src.size() && !BlankLine(src, nl, LineEndOf(src, nl))) eds.push_back(Ed{nl, nl, blank + E});
+            uint32_t ls = LineStartOf(src, it.markOff), pe = BackEol(src, ls), pl = LineStartOf(src, pe);
+            if (i == 0 && pv >= 0 && ls > 0 && !BlankLine(src, pl, pe) && (ItemAround(d, pv) >= 0 || ParaLine(d, pl)))
+                eds.push_back(Ed{ls, ls, blank + E});
         }
-        return Built(c, st, std::move(eds), EK_FORMAT);
+        EditResult r = Built(c, st, std::move(eds), EK_FORMAT);
+        SetShape(r, 0, -1, 0, true);  // every block as it was: only the markers and the indentation change
+        return r;
     }
     // another kind: with a caret its whole list level, with a selection the items it touches
     std::vector<int32_t> change;
@@ -1014,7 +1120,8 @@ EditResult OpList(const EditCtx& c, const EditState& st, int kind) {
         }
         std::wstring m = kind == 8 ? std::to_wstring(num++) + L"." : L"-";
         eds.push_back(Ed{it.markOff, it.markOff + it.markLen, m});
-        Reindent(d, src, x, (int)m.size() - (int)it.markLen, eds);
+        Reindent(d, src, x, Col(src, it.markOff),
+                 (int)ContentWith(src, it, (uint32_t)m.size()) - (int)ContentWith(src, it, it.markLen), eds);
     }
     // on: the blocks in no list - one tight list of them (the blank lines between them go), or the next items of a list
     // of that kind right before the first of them
@@ -1054,8 +1161,27 @@ EditResult OpList(const EditCtx& c, const EditState& st, int kind) {
             uint32_t x = WalkPrefix(d, src, b, l, nullptr);
             eds.push_back(Ed{x, x, std::wstring(w, L' ')});
         }
+        // Indented code right after the new item (only blank lines between) would be the item's paragraph text now:
+        // it moves into the item with it, still code (Phase 4 notes)
+        const int32_t N = i + 1 == plain.size() ? NextInSource(d, b) : -1;
+        if (N >= 0 && d.blocks[N].kind == BK_CODE && !(d.blockSrc[N].flags & BS_FENCED) && d.blockSrc[N].container == bs.container) {
+            bool blanks = true;
+            for (uint32_t l = SkipEol(src, bs.outerEnd); l < d.blockSrc[N].line && blanks;) {
+                const uint32_t le = LineEndOf(src, l), nx = SkipEol(src, le);
+                blanks = BlankLine(src, WalkPrefix(d, src, b, l, nullptr), le);
+                l = nx > l ? nx : l + 1;
+            }
+            for (uint32_t l = d.blockSrc[N].line; blanks && l <= d.blockSrc[N].outerEnd && l < src.size();) {
+                const uint32_t le = LineEndOf(src, l), nx = SkipEol(src, le), x = WalkPrefix(d, src, N, l, nullptr);
+                if (!BlankLine(src, x, le)) eds.push_back(Ed{x, x, std::wstring(w, L' ')});
+                if (nx <= l) break;
+                l = nx;
+            }
+        }
     }
-    return Built(c, st, std::move(eds), EK_FORMAT);
+    EditResult r = Built(c, st, std::move(eds), EK_FORMAT);
+    SetShape(r, 0, -1, 0, true);  // every block as it was: only markers and indentation (Phase 4 notes)
+    return r;
 }
 
 // ------------------------------------------------------------------------------------------------ quote (§8.6)
@@ -1104,15 +1230,35 @@ EditResult OpQuote(const EditCtx& c, const EditState& st) {
     }
     std::vector<Ed> eds;
     if (q < 0) {  // on
+        for (int32_t b : bl)  // a task item's box stands before its text: `- > [x] Task` loses the box (Phase 4 notes)
+            if (TaskText(d, b)) return Refuse(st, "context");
         for (const Line& l : lines) {
             if (l.blank) {
                 eds.push_back(Ed{l.ls, LineEndOf(src, l.ls), ContPrefix(d, src, l.b) + L">"});
                 continue;
             }
             uint32_t at = WalkPrefix(d, src, l.b, l.ls, nullptr);
+            // a lazy line (the containers' prefix left out) gets the whole prefix: `- > a⏎> b` would be two blocks
+            const std::wstring pre = ContPrefix(d, src, l.b);
+            if (l.ls != d.blockSrc[l.b].line && Col(src, at) < ColsOf(pre, 0, 0, (uint32_t)pre.size())) {
+                eds.push_back(Ed{l.ls, at, pre + L"> "});
+                continue;
+            }
             eds.push_back(Ed{at, at, L"> "});
         }
-        return Built(c, st, std::move(eds), EK_FORMAT);
+        // A quote right above or below would take the new one in - and an alert there would become a plain quote with
+        // its tag as text: a blank line keeps the two apart (Phase 4 notes)
+        const std::wstring blank = Strip(ContPrefix(d, src, bl[0]));
+        const uint32_t first = d.blockSrc[bl[0]].line, last = d.blockSrc[bl.back()].outerEnd, nx = SkipEol(src, last);
+        auto quoted = [&](int32_t b, uint32_t l) {
+            const uint32_t x = WalkPrefix(d, src, b, l, nullptr);
+            return x < src.size() && src[x] == L'>';
+        };
+        if (first > 0 && quoted(bl[0], LineStartOf(src, BackEol(src, first)))) eds.push_back(Ed{first, first, blank + Eol(c, first)});
+        if (nx > last && nx < src.size() && quoted(bl.back(), nx)) eds.push_back(Ed{nx, nx, blank + Eol(c, last)});
+        EditResult r = Built(c, st, std::move(eds), EK_FORMAT);
+        SetShape(r, 0, -1, 0, true);
+        return r;
     }
     // off: which of the line's quote markers is q's
     size_t qi = 0;
@@ -1152,26 +1298,31 @@ EditResult OpQuote(const EditCtx& c, const EditState& st) {
     uint32_t nl = SkipEol(src, ls.outerEnd);
     if (nx >= 0 && InCont(d, nx, q) && nl < src.size() && !BlankLine(src, nl, LineEndOf(src, nl)))
         eds.push_back(Ed{ls.outerEnd, ls.outerEnd, std::wstring(Eol(c, ls.outerEnd)) + qblank});
-    return Built(c, st, std::move(eds), EK_FORMAT);
+    EditResult r = Built(c, st, std::move(eds), EK_FORMAT);
+    SetShape(r, 0, -1, 0, true);
+    return r;
 }
 
 // ------------------------------------------------------------------------------------------------ code block (§8.7)
 namespace {
-// A text block as code lines: its rendered text, a line per source line (soft and hard breaks end a line); a picture
-// or formula in it and a footnote reference keep their source. *caretLine / *caretCol: where text offset t lands.
-std::vector<std::wstring> CodeLines(const Doc& d, const std::wstring& src, int32_t b, uint32_t t, int* caretLine, uint32_t* caretCol) {
-    const Block& bl = d.blocks[b];
-    std::vector<std::wstring> v(1);
-    SegSpan ss = SegsIn(d, b, TRange{bl.textOff, bl.textOff + bl.textLen});
-    for (const SrcSeg* g = ss.b; g < ss.e; g++) {
-        if (t >= g->t && t <= g->t + g->tLen && caretLine && *caretLine < 0) {
-            *caretLine = (int)v.size() - 1;
-            *caretCol = (uint32_t)v.back().size() + (g->kind == SEG_PLAIN ? t - g->t : 0);
+// A text block as code lines: its source lines without their container prefixes - a heading without its markers and
+// its closing sequence, a setext heading without its underline. The source, not the rendered text: link addresses,
+// emphasis and pictures stay in the code as text, and a one-key toggle loses nothing (Phase 4 notes). *caretLine /
+// *caretCol: where source offset s lands.
+std::vector<std::wstring> CodeLines(const Doc& d, const std::wstring& src, int32_t b, uint32_t s, int* caretLine, uint32_t* caretCol) {
+    const BlockSrc& bs = d.blockSrc[b];
+    const uint32_t end = (bs.flags & BS_ATX) ? bs.end : bs.lineEnd;
+    std::vector<std::wstring> v;
+    for (uint32_t ls = bs.beg;;) {
+        const uint32_t le = std::min(LineEndOf(src, ls), end);
+        if (caretLine && *caretLine < 0 && s >= ls && s <= le) {
+            *caretLine = (int)v.size();
+            *caretCol = s - ls;
         }
-        if (LineBrk(src, g)) v.emplace_back();
-        else if (g->kind == SEG_OBJATOM || (g->kind == SEG_TEXTATOM && g->sLen > 1 && src[g->s] == L'[' && src[g->s + 1] == L'^'))
-            v.back() += Sub(src, g->s, g->s + g->sLen);
-        else if (g->kind != SEG_SYNTH) v.back() += d.text.substr(g->t, g->tLen);
+        v.push_back(Sub(src, ls, le));
+        const uint32_t nx = SkipEol(src, le);
+        if (le >= end || nx <= le || nx > end) break;
+        ls = WalkPrefix(d, src, b, nx, nullptr);
     }
     return v;
 }
@@ -1224,6 +1375,7 @@ EditResult OpCodeBlock(const EditCtx& c, const EditState& st) {
         r.splices.push_back(Replace(src, at, fs.outerEnd, ins));
         r.after.focus = r.after.anchor = at + caret;
         r.after.pendOn = r.after.pendOff = 0;
+        SetShape(r, f.block, f.block, (int32_t)paras.size() - 1, false);
         return r;
     }
     if (fs.flags & BS_FOOTNOTE) return Refuse(st, "context");
@@ -1231,6 +1383,19 @@ EditResult OpCodeBlock(const EditCtx& c, const EditState& st) {
     if (bl.empty()) return Refuse(st, "context");
     for (int32_t b : bl)
         if (d.blockSrc[b].container != d.blockSrc[bl[0]].container) return Refuse(st, "format");  // one container only
+    // Everything from the first block to the last goes into the fence: a table, code, an HTML block, a folded block or
+    // a line no block owns (a reference definition, a comment) between them would be lost with it - refused then
+    // (Phase 4 notes)
+    const uint32_t from = d.blockSrc[bl[0]].line, to = d.blockSrc[bl.back()].outerEnd;
+    for (uint32_t k : d.blockOrder)
+        if (d.blockSrc[k].line >= from && d.blockSrc[k].line <= to && std::find(bl.begin(), bl.end(), (int32_t)k) == bl.end())
+            return Refuse(st, "format");
+    for (uint32_t l = from; l < to;) {
+        const uint32_t le = LineEndOf(src, l), nx = SkipEol(src, le);
+        if (!BlankLine(src, WalkPrefix(d, src, bl[0], l, nullptr), le) && !Owned(d, l)) return Refuse(st, "format");
+        if (nx <= l) break;
+        l = nx;
+    }
     std::vector<std::wstring> lines;
     int caretLine = -1;
     uint32_t caretCol = 0;
@@ -1238,7 +1403,7 @@ EditResult OpCodeBlock(const EditCtx& c, const EditState& st) {
         if (i) lines.emplace_back();
         int cl = -1;
         uint32_t cc = 0;
-        std::vector<std::wstring> v = CodeLines(d, src, bl[i], bl[i] == f.block ? f.t : UINT32_MAX, &cl, &cc);
+        std::vector<std::wstring> v = CodeLines(d, src, bl[i], st.focus, &cl, &cc);
         if (cl >= 0 && caretLine < 0) {
             caretLine = (int)lines.size() + cl;
             caretCol = cc;
@@ -1264,6 +1429,7 @@ EditResult OpCodeBlock(const EditCtx& c, const EditState& st) {
     r.after.focus = r.after.anchor = at + caret;
     r.after.atom = -1;
     r.after.pendOn = r.after.pendOff = 0;
+    SetShape(r, bl.front(), bl.back(), 1 - (int32_t)bl.size(), false);  // they become one block; nothing else changes
     return r;
 }
 
@@ -1340,9 +1506,17 @@ EditResult OpInsertFormula(const EditCtx& c, const EditState& st, bool block) {
         while (!tex.empty() && Ws(tex.back())) tex.pop_back();
         while (!tex.empty() && Ws(tex.front())) tex.erase(0, 1);
         if (tex.empty()) tex = L"x";
+        // the text as TeX: a `$` would end the formula (\$), and in a cell a `|` the cell (\vert, Phase 4 notes)
+        std::wstring o;
+        for (size_t i = 0; i < tex.size(); i++)
+            o += tex[i] == L'$' ? L"\\$" : tex[i] == L'|' && A.cell >= 0 ? (i + 1 < tex.size() && iswalpha(tex[i + 1]) ? L"\\vert " : L"\\vert")
+                                                                           : std::wstring(1, tex[i]);
+        tex = o;
     }
     std::wstring t = L"$" + tex + L"$";
+    const uint32_t s0 = SrcOfText(d, c.src, A, st.anchor != st.focus ? MAP_OUTER_START : MAP_CARET);
     if (A.t > rg.beg && iswalnum(d.text[A.t - 1])) t = L" " + t;
+    else if (s0 != UINT32_MAX && s0 > 0 && s0 <= c.src.size() && c.src[s0 - 1] == L'\\') t = L" " + t;  // (`\$` is no formula)
     if (B.t < rg.end && iswalnum(d.text[B.t])) t += L" ";
     if (st.anchor != st.focus) return Carry(CutRange(c, st, t, EK_STRUCT));
     return Carry(Insert(c, st, t, false, EK_STRUCT));
@@ -1390,6 +1564,11 @@ EditResult OpInsertImage(const EditCtx& c, const EditState& st, std::wstring_vie
     uint16_t tr = 0;
     TextPos f = FocusOf(c, st, &tr);
     if (!InPh(st) && (st.atom >= 0 || !ValidBlock(d, f.block) || d.blocks[f.block].kind == BK_CODE))
+        return InsertBlock(c, st, {t}, 0, (uint32_t)t.size(), false);
+    // At a paragraph's end a picture is a paragraph of its own after it: glued to the text it would be a picture in
+    // its last line, as tall as the picture (Phase 4 notes). In the middle of a line it stays in the line.
+    if (!InPh(st) && st.anchor == st.focus && Para(d, f.block) && f.cell < 0 && d.blocks[f.block].textLen &&
+        f.t >= LastStop(d, f.block))
         return InsertBlock(c, st, {t}, 0, (uint32_t)t.size(), false);
     return Carry(Insert(c, st, t, false, EK_STRUCT));
 }
@@ -1473,6 +1652,12 @@ EditResult OpTable(const EditCtx& c, const EditState& st, int op) {
             bool last = c0 + 1 == p.n;
             if (a != UINT32_MAX && (!last || b == UINT32_MAX)) eds.push_back(Ed{b == UINT32_MAX ? p.first : b + 1, a + 1, L""});
             else if (b != UINT32_MAX) eds.push_back(Ed{b, a == UINT32_MAX ? p.end : a, L""});
+            // one column left of rows without outer pipes: they get them - a row with no pipe is no table row
+            // (`a | b⏎--|--` would become a setext heading, Phase 4 notes)
+            if (cols == 2 && !p.lead && !p.trail) {
+                eds.push_back(Ed{p.first, p.first, L"| "});
+                eds.push_back(Ed{p.end, p.end, L" |"});
+            }
         }
         break;
     case 6: case 7: case 8: {  // the column's alignment in the delimiter row
@@ -1558,12 +1743,16 @@ std::wstring DestOf(std::wstring_view url, bool path) {
     bool angle = false;
     int depth = 0;
     std::wstring in;
-    for (wchar_t ch : url) {
+    for (size_t i = 0; i < url.size(); i++) {
+        const wchar_t ch = url[i];
         if (EolChar(ch)) continue;
         angle |= Blank(ch) || ch == L'<' || ch == L'>' || (path && (ch == L'(' || ch == L')'));
         if (ch == L'(') depth++;
         if (ch == L')' && --depth < 0) angle = true;
         in += ch == L'<' ? L"%3C" : ch == L'>' ? L"%3E" : std::wstring(1, ch);
+        // a backslash before punctuation, or at the end, would escape it (`dir\(1)` lost its `\`, `C:\dir\` its `)`):
+        // written twice it stays itself (Phase 4 notes)
+        if (ch == L'\\' && (i + 1 == url.size() || (url[i + 1] < 0x80 && Punct(url[i + 1])))) in += L'\\';
     }
     return angle || depth ? L"<" + in + L">" : in;
 }
@@ -1650,7 +1839,17 @@ EditResult OpLink(const EditCtx& c, const EditState& st, std::wstring_view url, 
     Ends(c, st, &A, &B);
     if (st.anchor == st.focus || InPh(st)) {
         const SpanSrc* sp = InPh(st) ? nullptr : LinkSpan(d, A);
-        if (!sp) return Carry(Insert(c, st, L"[" + EscapeBrackets(u) + L"](" + dest + L")", false, EK_FORMAT));
+        if (!sp) {
+            EditResult r = Carry(Insert(c, st, L"[" + EscapeBrackets(u) + L"](" + dest + L")", false, EK_FORMAT));
+            // right after a `!` the link would be a picture: that `!` is escaped (Phase 4 notes)
+            const uint32_t s = r.splices.empty() ? 0 : r.splices.back().at;
+            if (r.refused.empty() && s > 0 && s <= src.size() && src[s - 1] == L'!' && (s < 2 || src[s - 2] != L'\\')) {
+                r.splices.push_back(Splice{s - 1, L"", L"\\"});
+                r.after.focus++;
+                r.after.anchor++;
+            }
+            return r;
+        }
         uint32_t tb, te;
         std::vector<Ed> eds;
         if (sp->flags & SF_AUTOLINK) {  // its text stays, and gets the address; the caret stays in it
@@ -1729,6 +1928,11 @@ EditResult OpLinkRemove(const EditCtx& c, const EditState& st) {
         if (k == std::wstring::npos && t.size() > 4 && !_wcsnicmp(t.c_str(), L"www.", 4)) k = 3;
         if (k == std::wstring::npos) return Refuse(st, "link");
         eds.push_back(Ed{sp->openEnd + (uint32_t)k, sp->openEnd + (uint32_t)k, L"\\"});
+    } else if (sp->block >= 0 && Para(c.doc, sp->block)) {
+        // the text now starts its line: §7.4, so `[# x](u)` becomes `\# x`, not a heading (Phase 4 notes)
+        bool first;
+        if (LineContent(c.doc, src, sp->block, sp->tBeg, &first) == sp->openBeg)
+            EscapeAt(eds, Sub(src, sp->openEnd, sp->closeBeg) + Sub(src, sp->closeEnd, LineEndOf(src, sp->closeEnd)), sp->openEnd, first);
     }
     EditResult r = Built(c, st, std::move(eds), EK_FORMAT);
     if (!r.refused.empty()) return r;
@@ -1896,6 +2100,7 @@ bool BindAtom(const Doc& d, const std::wstring& src, int32_t atom, AtomBinding* 
         }
     }
     b.prefix = ContPrefix(d, src, blk);
+    b.cell = TableOf(d, blk) != nullptr;
     b.text[0] = Shown(src, b.beg[0], b.end[0], b.prefix);
     if (b.kind == PK_IMAGE && !b.fixed1) b.text[1] = Unwrap(src, b.beg[1], b.end[1]);
     return b.kind != PK_NONE;
@@ -1913,6 +2118,14 @@ bool AtomSplice(const std::wstring& src, AtomBinding& b, int f, std::wstring_vie
     uint32_t longest = 0;  // the longest fence-like run a line of a diagram starts with
     for (size_t i = 0, k = 0; i <= text.size(); i++) {
         wchar_t ch = i < text.size() ? text[i] : L'\n';
+        if (ch == L'|' && b.cell) {
+            // A pipe ends the cell (§7.10) - in a formula, an alt text or a path too: TeX's \vert (md4c would keep the
+            // backslash of \|, and TeX draws \| as ‖), \| in alt text, %7C in a path, &#124; in HTML (Phase 4 notes)
+            if (b.kind == PK_FORMULA) line += i + 1 < text.size() && iswalpha(text[i + 1]) ? L"\\vert " : L"\\vert";
+            else if (b.kind == PK_IMAGE) line += f ? L"%7C" : L"\\|";
+            else line += L"&#124;";
+            continue;
+        }
         if (ch != L'\r' && ch != L'\n') {
             line += (b.kind == PK_IMAGE && f == 0 && (ch == L'[' || ch == L']') && (line.empty() || line.back() != L'\\'))
                         ? std::wstring{L'\\', ch} : std::wstring(1, ch);
@@ -1934,6 +2147,11 @@ bool AtomSplice(const std::wstring& src, AtomBinding& b, int f, std::wstring_vie
         line.clear();
     }
     if (b.kind == PK_IMAGE && f == 1) ins = DestOf(ins, true);
+    if (b.kind == PK_IMAGE && f == 0) {  // a backslash at the alt text's end would escape its `]` (Phase 4 notes)
+        size_t n = 0;
+        while (n < ins.size() && ins[ins.size() - 1 - n] == L'\\') n++;
+        if (n % 2) ins += L'\\';
+    }
     const uint32_t at = b.beg[f], oldEnd = b.end[f];
     const int64_t delta = (int64_t)ins.size() - (oldEnd - at);
     if (b.kind == PK_DIAGRAM && b.fence[0] != UINT32_MAX && longest >= b.fenceLen) {

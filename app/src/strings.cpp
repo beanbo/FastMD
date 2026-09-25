@@ -181,7 +181,7 @@ const Pair kStr[] = {
     {L"Ещё", L"More"},
     {L"Закончить редактирование", L"Finish editing"},
     // style labels
-    {L"Текст", L"Text"},
+    {L"Обычный текст", L"Normal text"},
     {L"Заголовок %d", L"Heading %d"},
     {L"Код", L"Code"},
     {L"Таблица", L"Table"},
@@ -198,7 +198,7 @@ const Pair kStr[] = {
     {L"Не сохранено: файл недоступен", L"Not saved: file unavailable"},
     {L"Не сохранено: ошибка записи", L"Not saved: write error"},
     {L"Не сохранено (Ctrl+S)", L"Not saved (Ctrl+S)"},
-    {L"Прежние байты файла сохранены в %s", L"The previous bytes of the file are kept in %s"},
+    {L"Прежняя версия файла сохранена в %s", L"The previous version of the file is kept in %s"},
     // why a save failed
     {L"файл занят", L"the file is busy"},
     {L"нет доступа", L"access denied"},
@@ -320,7 +320,7 @@ const Pair kStr[] = {
     {L"HTML", L"HTML"},
     {L"Свойства (YAML)", L"Properties (YAML)"},
     {L"Изображение", L"Image"},
-    {L"Подпись", L"Alt text"},
+    {L"Описание (alt)", L"Alt text"},
     {L"Путь", L"Path"},
     {L"Выбрать файл…", L"Choose file…"},
     {L"Ctrl+Enter — готово · Esc — отменить", L"Ctrl+Enter — done · Esc — cancel"},
@@ -340,8 +340,10 @@ const Pair kStr[] = {
     {L"Открыть", L"Open"},
     {L"Изменить ссылку…\tCtrl+K", L"Edit link…\tCtrl+K"},
     {L"Убрать ссылку", L"Remove link"},
-    {L"Изменить источник…\tEnter", L"Edit source…\tEnter"},
+    {L"Изменить исходный текст…\tEnter", L"Edit source…\tEnter"},
     {L"Изображения", L"Pictures"},
+    // Phase 4: why a button is greyed in a task item
+    {L"%s — недоступно в задаче", L"%s — not available in a task item"},
 };
 static_assert(std::size(kStr) == S_COUNT, "one entry per StrId");
 UiLang g_lang = UL_RU;
