@@ -277,8 +277,20 @@ bool EditWalk(std::mt19937& rng, const std::wstring& input, std::string* why) {
             if (st.focus == UINT32_MAX || st.anchor == UINT32_MAX) continue;
         }
         EditResult r;
-        const unsigned op = rng() % 27;
+        const unsigned op = rng() % 31;
         switch (op) {
+        // links, the private format and the source popups (Phase 3b)
+        case 27: r = OpLink(c, st, rng() % 2 ? L"http://a.b/c d" : L"x)", rng() % 2 != 0); break;
+        case 28: r = OpLinkRemove(c, st); break;
+        case 29: r = OpPaste(c, st, BalancedSlice(c, st), true); break;
+        case 30: {  // an object's source rewritten by its popup: an inline picture, or a block atom
+            int32_t atom = -1;
+            if (rng() % 2 && !d.images.empty()) atom = (int32_t)(rng() % d.images.size());
+            else if (!d.blocks.empty()) atom = AtomOfBlock(d, (int32_t)(rng() % d.blocks.size()));
+            r = atom < 0 ? EditResult{} : OpAtomSource(c, st, atom, (int)(rng() % 2), RandomText(rng, true));
+            if (atom < 0) r.refused = "none";
+            break;
+        }
         // the commands of §8 (Phase 3a); a toggle with no selection leaves a pending format the typing ops take
         case 16: r = OpToggleInline(c, st, (uint16_t)(1u << (rng() % 4))); break;
         case 17: r = OpBlockStyle(c, st, (int)(rng() % 7)); break;

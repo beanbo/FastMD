@@ -135,8 +135,10 @@ EditResult OpAtomSource(const EditCtx&, const EditState&, int atom, int field, s
 
 // ---- links (§8.3), source popups (§9), pictures from files (§8.8) - Phase 3b
 // The link the caret (the selection's start) stands in: its address - an inline link's destination, a reference link's
-// definition's (label: the label that defines it) -, and whether it is an autolink. False: none there.
-bool LinkOfCaret(const EditCtx&, const EditState&, std::wstring* dest, std::wstring* label, bool* autolink);
+// definition's (label: the label that defines it) -, whether it is an autolink, and its text's range [*t0, *t1] in the
+// block the caret is in. False: none there.
+bool LinkOfCaret(const EditCtx&, const EditState&, std::wstring* dest, std::wstring* label, bool* autolink,
+                 TextPos* t0 = nullptr, TextPos* t1 = nullptr);
 enum PopupKind : uint8_t { PK_NONE, PK_FORMULA, PK_FORMULA_BLOCK, PK_DIAGRAM, PK_HTML, PK_FRONT, PK_IMAGE, PK_LINK, PK_CODELANG };
 // What a source popup edits (§9.1, §9.2): the source of each field - the TeX, the Mermaid lines, the HTML, the YAML; a
 // picture's alt text and its destination (with its <…>) - and what the popup shows of it: its lines without their
@@ -152,8 +154,9 @@ struct AtomBinding {
     wchar_t fenceCh = 0;
     std::wstring prefix;                   // what the lines after a field's first start with (ContPrefix)
     std::wstring text[2];
+    std::wstring label;                    // a reference picture: the label of its definition
 };
-bool BindAtom(const Doc&, const std::wstring& src, int32_t atom, AtomBinding*);
+bool BindAtom(const Doc&, const std::wstring& src, int32_t atom, AtomBinding* fresh);
 // A field's new text as its source (§9.2): line ends the file's, lines 2…n with the prefix, an inline formula's and a
 // picture's alt text on one line, a destination as §8.8 writes it, a diagram's fences made longer than a fence-like line
 // of the text. The binding follows the splice. False (why) when the text cannot be written there: a front matter line

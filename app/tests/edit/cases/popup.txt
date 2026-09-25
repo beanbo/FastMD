@@ -9,6 +9,11 @@ src: see ⟦the docs⟧ now
 do: Link("https://x.org/a")
 want: see [⟦the docs⟧](https://x.org/a) now
 
+=== link_trims_blanks (§8.3, §7.5 step 1: the blanks at the selection's edges stay outside the link)
+src: see⟦ the docs ⟧now
+do: Link("u")
+want: see [⟦the docs⟧](u) now
+
 === link_dest_blanks (§8.3: an address with blanks in <…>)
 src: ⟦file⟧ here
 do: Link("my file.md")
@@ -117,6 +122,18 @@ src: a **b⟦c⟧d** e
 do: Copy
 clip: **c**
 want: a **b⟦c⟧d** e
+
+=== copy_blank_edges (§7.11, §7.5 step 1: blanks at the edges stay outside the delimiters the slice adds)
+src: a **b⟦ c⟧ d** e
+do: Copy
+clip: \s**c**
+want: a **b⟦ c⟧ d** e
+
+=== copy_blank_end (§7.11)
+src: x **a⟦b c ⟧d** y
+do: Copy
+clip: **b c**\s
+want: x **a⟦b c ⟧d** y
 
 === copy_part_of_link (§7.11)
 src: a [li⟦nk te⟧xt](u) b

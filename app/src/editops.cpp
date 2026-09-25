@@ -1615,13 +1615,16 @@ std::wstring EscapeBrackets(std::wstring_view t) {
 }
 }  // namespace
 
-bool LinkOfCaret(const EditCtx& c, const EditState& st, std::wstring* dest, std::wstring* label, bool* autolink) {
+bool LinkOfCaret(const EditCtx& c, const EditState& st, std::wstring* dest, std::wstring* label, bool* autolink, TextPos* t0,
+                 TextPos* t1) {
     TextPos A, B;
     Ends(c, st, &A, &B);
     const SpanSrc* sp = st.atom < 0 && !InPh(st) ? LinkSpan(c.doc, A) : nullptr;
     if (!sp) return false;
     const std::wstring& src = c.src;
     uint32_t tb, te;
+    if (t0) *t0 = TextPos{sp->tBeg, A.block, A.cell};
+    if (t1) *t1 = TextPos{sp->tEnd, A.block, A.cell};
     label->clear();
     dest->clear();
     *autolink = (sp->flags & SF_AUTOLINK) != 0;
@@ -1668,6 +1671,9 @@ EditResult OpLink(const EditCtx& c, const EditState& st, std::wstring_view url, 
     TRange rg;
     if (A.block != B.block || A.cell != B.cell || !RangeOf(d, A, &rg) || d.blocks[A.block].kind == BK_CODE)
         return Refuse(st, "format");
+    while (A.t < B.t && Ws(d.text[A.t])) A.t++;  // blanks stay outside, as outside a format (§7.5 step 1)
+    while (B.t > A.t && Ws(d.text[B.t - 1])) B.t--;
+    if (A.t == B.t) return Refuse(st, "link");
     uint32_t sA = SrcOfText(d, src, A, MAP_OUTER_START), sB = SrcOfText(d, src, B, MAP_OUTER_END), tA = A.t, tB = B.t;
     if (sA == UINT32_MAX || sB == UINT32_MAX || sB <= sA) return Refuse(st, "format");
     const std::vector<const SpanSrc*> spans = SpansIn(d, A, rg);
@@ -1685,7 +1691,8 @@ EditResult OpLink(const EditCtx& c, const EditState& st, std::wstring_view url, 
             }
         }
     }
-    std::vector<Ed> eds{Ed{sA, sA, L"["}};
+    std::vector<Ed> eds;
+    eds.push_back(Ed{sA, sA, L"["});
     for (const SpanSrc* sp : spans)  // the links inside lose their delimiters: links do not nest
         if (sp->type == MD_SPAN_A && !(sp->flags & SF_UNCLOSED) && sp->openBeg >= sA && sp->closeEnd <= sB) {
             eds.push_back(Ed{sp->openBeg, sp->openEnd, L""});
@@ -1712,7 +1719,9 @@ EditResult OpLinkRemove(const EditCtx& c, const EditState& st) {
     uint16_t tr = 0;
     const SpanSrc* sp = st.atom < 0 && !InPh(st) ? LinkSpan(c.doc, FocusOf(c, st, &tr)) : nullptr;
     if (!sp) return Refuse(st, "link");
-    std::vector<Ed> eds{Ed{sp->openBeg, sp->openEnd, L""}, Ed{sp->closeBeg, sp->closeEnd, L""}};
+    std::vector<Ed> eds;
+    eds.push_back(Ed{sp->openBeg, sp->openEnd, L""});
+    eds.push_back(Ed{sp->closeBeg, sp->closeEnd, L""});
     if (sp->flags & SF_AUTOLINK) {
         std::wstring t = Sub(src, sp->openEnd, sp->closeBeg);
         size_t k = t.find(L"://");
@@ -1763,7 +1772,7 @@ std::wstring BalancedSlice(const EditCtx& c, const EditState& st) {
     };
     cut(A, true, !multi);
     if (multi) cut(B, false, true);
-    std::wstring out = head;
+    std::wstring out;
     for (uint32_t i = sA; i < sB;) {
         uint32_t le = std::min(LineEndOf(src, i), sB);
         out += Sub(src, i, le);
@@ -1773,7 +1782,12 @@ std::wstring BalancedSlice(const EditCtx& c, const EditState& st) {
         for (size_t k = 0; nx < sB && k < pc.size() && src[nx] == pc[k]; k++) nx++;  // the shared containers' prefix
         i = nx;
     }
-    return out + tail;
+    // blanks at the slice's edges stay outside the delimiters it adds (`** c**` would not be bold, §7.5 step 1)
+    size_t lead = 0, trail = out.size();
+    while (!head.empty() && lead < out.size() && (out[lead] == L' ' || out[lead] == L'\t')) lead++;
+    if (lead == out.size()) return out;
+    while (!tail.empty() && trail > lead && (out[trail - 1] == L' ' || out[trail - 1] == L'\t')) trail--;
+    return out.substr(0, lead) + head + out.substr(lead, trail - lead) + tail + out.substr(trail);
 }
 
 // ------------------------------------------------------------------------------------------------ source popups (§9)
@@ -1800,8 +1814,7 @@ uint8_t RunOf(const std::wstring& src, uint32_t p, wchar_t ch) {
 }  // namespace
 
 bool BindAtom(const Doc& d, const std::wstring& src, int32_t atom, AtomBinding* out) {
-    AtomBinding& b = *out;
-    b = AtomBinding{};
+    AtomBinding& b = *out;  // (a fresh one: the callers' own)
     const int32_t blk = AtomBlockOf(d, atom);
     if (!ValidBlock(d, blk)) return false;
     const BlockSrc& bs = d.blockSrc[blk];
@@ -1876,7 +1889,7 @@ bool BindAtom(const Doc& d, const std::wstring& src, int32_t atom, AtomBinding* 
                 for (uint32_t k = bs.spanOff; k < bs.spanOff + bs.spanCount && k < d.spans.size(); k++) {
                     const SpanSrc& sp = d.spans[k];
                     uint32_t tb, te;
-                    if (sp.type == MD_SPAN_IMG && sp.openBeg == im->outerBeg && Definition(src, RefLabel(src, sp), &tb, &te))
+                    if (sp.type == MD_SPAN_IMG && sp.openBeg == im->outerBeg && Definition(src, b.label = RefLabel(src, sp), &tb, &te))
                         b.text[1] = Unwrap(src, tb, te);
                 }
             }
