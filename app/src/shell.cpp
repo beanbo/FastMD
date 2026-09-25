@@ -6,8 +6,19 @@
 #include <shlobj.h>
 
 // ------------------------------------------------------------------------------------------------ clipboard
+// Right after a program puts something on the clipboard, Windows' clipboard history (and any clipboard manager) opens
+// it to read the new content; an OpenClipboard in that moment fails. Found by the paste tests of edit mode (Phase 2b):
+// a paste right after another program's copy did nothing, and a cut lost its text.
+bool OpenClipboardRetry() {
+    for (int k = 0; k < 10; k++) {
+        if (OpenClipboard(g.hwnd)) return true;
+        Sleep(10);
+    }
+    return false;
+}
+
 void CopyToClipboard(const std::wstring& text) {
-    if (text.empty() || !OpenClipboard(g.hwnd)) return;
+    if (text.empty() || !OpenClipboardRetry()) return;
     EmptyClipboard();
     size_t bytes = (text.size() + 1) * sizeof(wchar_t);
     if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
@@ -18,19 +29,18 @@ void CopyToClipboard(const std::wstring& text) {
     CloseClipboard();
 }
 
-static Image* DecodedImage(uint32_t bi, Image** entry) {
+static const Pixels* DecodedImage(uint32_t bi, Image** entry) {
     if (bi >= g.doc.blocks.size() || g.doc.blocks[bi].kind != BK_IMAGE) return nullptr;
-    Image& im0 = g.doc.images[g.doc.blocks[bi].aux];
-    if (entry) *entry = &im0;
-    Image& im = im0.canon >= 0 ? g.doc.images[im0.canon] : im0;
-    bool ok = im.state.load() == 2 && im.pxW > 0 && im.pxH > 0 && im.px.size() >= (size_t)im.pxW * im.pxH;
-    return ok ? &im : nullptr;
+    Image& im = g.doc.images[g.doc.blocks[bi].aux];
+    if (entry) *entry = &im;
+    const Pixels* p = im.pix.get();
+    bool ok = im.state == RS_OK && p && p->pxW > 0 && p->pxH > 0 && p->px.size() >= (size_t)p->pxW * p->pxH;
+    return ok ? p : nullptr;
 }
 
 // 32-bit DIB of a picture block, composed over white: what both the clipboard and a drag hand out
 HGLOBAL ImageAsDib(uint32_t bi) {
-    Image* entry = nullptr;
-    Image* im = DecodedImage(bi, &entry);
+    const Pixels* im = DecodedImage(bi, nullptr);
     if (!im) return nullptr;
     size_t w = (size_t)im->pxW, h = (size_t)im->pxH;  // the decoded buffer, not the header size
     HGLOBAL dib = GlobalAlloc(GMEM_MOVEABLE, sizeof(BITMAPINFOHEADER) + w * h * 4);
@@ -73,7 +83,7 @@ bool CopyImageToClipboard(uint32_t bi) {
             CloseHandle(f);
         }
     }
-    if (!OpenClipboard(g.hwnd)) {
+    if (!OpenClipboardRetry()) {
         GlobalFree(dib);
         if (png) GlobalFree(png);
         return false;
@@ -119,6 +129,7 @@ std::wstring UrlDecode(const std::wstring& s) {
 static bool Confirm(const std::wstring& what) {
     wchar_t msg[2048];
     swprintf_s(msg, Tr(S_CONFIRM_OPEN), what.substr(0, 1500).c_str());
+    ModalScope modal;
     return MessageBoxW(g.hwnd, msg, L"FastMD", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES;
 }
 
@@ -224,7 +235,12 @@ void OpenDialog() {
     of.nMaxFile = (DWORD)std::size(file);
     of.lpstrInitialDir = dir.empty() ? nullptr : dir.c_str();
     of.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
-    if (GetOpenFileNameW(&of)) OpenDocument(file, true, 0, true);
+    bool picked;
+    {
+        ModalScope modal;
+        picked = GetOpenFileNameW(&of) != 0;
+    }
+    if (picked) OpenDocument(file, true, 0, true);
 }
 
 // where to write the exported PDF: beside the document, named after it
@@ -248,6 +264,7 @@ std::wstring SavePdfDialog() {
     of.lpstrDefExt = L"pdf";
     of.lpstrInitialDir = dir.empty() ? nullptr : dir.c_str();
     of.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOREADONLYRETURN;
+    ModalScope modal;
     return GetSaveFileNameW(&of) ? std::wstring(file) : std::wstring();
 }
 
@@ -260,6 +277,7 @@ std::wstring PickExeDialog(HWND owner) {
     of.lpstrFile = file;
     of.nMaxFile = (DWORD)std::size(file);
     of.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+    ModalScope modal;
     return GetOpenFileNameW(&of) ? std::wstring(file) : std::wstring();
 }
 

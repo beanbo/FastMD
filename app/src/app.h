@@ -9,26 +9,39 @@
 //   shell.cpp       — links, clipboard, editor / Explorer / dialogs, .md association
 //   settings_ui.cpp — settings window and the gear button that opens it
 //   tasks.cpp       — task lists: a click on a box ticks the item in the file itself
+//   edit.cpp        — edit mode's glue: the model swap after a change, saving, recovery, test hooks (docs/EDIT-MODE.md)
+//   editbar.cpp     — edit mode's chrome on the canvas: the strip (the toolbar follows)
 //   strings.cpp     — UI strings (ru / en)
 //   window.cpp      — Win32 window, input, commands, menus, wWinMain
 #pragma once
 #include "canvas.h"
+#include "editcore.h"
+#include "editfile.h"
 #include "layout.h"
 #include "strings.h"
 #include <unordered_map>
 
 enum : UINT {
     WM_APP_MEASURED = WM_APP + 1,  // lParam = MeasureJob*
-    WM_APP_IMAGES,                 // image thread finished
+    WM_APP_IMAGES,                 // picture worker: lParam = std::vector<RenderResult>* (a batch; the receiver deletes it)
     WM_APP_FULLDOC,                // full parse of a big document ready (first screen came from a prefix)
     WM_APP_FILECHANGED,            // watcher: the open file changed on disk
     WM_APP_POSITIONS,              // positions.bin read after the first frame (lParam = std::vector<PosEntry>*)
     WM_APP_FINDINPUT,              // find input box → UI thread: wParam = FI_*, lParam = event data
-    WM_APP_SCALED,                 // images re-scaled to display size (wParam = docGen, lParam = std::vector<ScaledImage>*)
-    WM_APP_UPDATE,                 // update check: wParam 0 = newer version found, 1 = installer ready, 2 = failed
+    WM_APP_SCALED,                 // images re-scaled to display size (lParam = std::vector<ScaledImage>*)
+    WM_APP_UPDATE,                 // updater (update.cpp): wParam = what happened, lParam = its data
+    // edit mode (docs/EDIT-MODE.md §13.4; the ids are frozen now, the handlers arrive with their phases)
+    WM_APP_PREVIEW = WM_APP + 9,   // preview worker → UI: lParam = PreviewResult*
+    WM_APP_EDITINPUT = WM_APP + 10,  // popup EDITs → UI: wParam EI_TEXT (lParam = seq), EI_KEY (vk | mods << 16), EI_FOCUS
+    WM_APP_SAVED = WM_APP + 11,    // save worker → UI: lParam = SaveResult*
+    WM_APP_TESTKEY = WM_APP + 12,  // FASTMD_TEST_HOOKS only: wParam vk, lParam KM_CTRL | KM_SHIFT | KM_ALT
+    WM_APP_REPLAY = WM_APP + 13,   // the modal queue
     WM_APP_QUERY = WM_APP + 64,    // automation / UI tests: wParam = Query → LRESULT (read-only state)
 };
-enum : UINT_PTR { TIMER_TOAST = 1, TIMER_RELOAD = 2, TIMER_AUTOSCROLL = 3, TIMER_HBAR = 4 };
+enum : UINT_PTR { TIMER_TOAST = 1, TIMER_RELOAD = 2, TIMER_AUTOSCROLL = 3, TIMER_HBAR = 4, TIMER_UPDATE = 5,
+                  // edit mode (§13.3); the bar slide runs in the message loop's animation branch, not on a timer
+                  TIMER_CARET = 6, TIMER_EDIT_SAVE = 7, TIMER_EDIT_RETRY = 8, TIMER_EDIT_IDLE = 9, TIMER_EDIT_REPARSE = 10,
+                  TIMER_EDIT_JOURNAL = 11, TIMER_EDIT_POPUP = 12, TIMER_EDIT_UI = 13 };
 
 // WM_COMMAND ids (menus; tests and automation drive the viewer with them too — keep the numbers stable)
 enum Cmd : UINT {
@@ -39,6 +52,20 @@ enum Cmd : UINT {
     CMD_WRAP, CMD_SETTINGS, CMD_LINK_OPEN, CMD_IMG_COPY, CMD_IMG_OPEN,
     CMD_FIND_CASE, CMD_FIND_WORD, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_FIND_CLOSE, CMD_LINK_NEXT, CMD_LINK_PREV,
     CMD_LOAD_REMOTE, CMD_COPY_MD, CMD_PRINT, CMD_EXPORT_PDF, CMD_UPDATE,
+    // edit mode (docs/EDIT-MODE.md §13.1): the complete list for v1, declared before the features exist - an id whose
+    // feature is not built yet does nothing. WM_COMMAND passes HIWORD(wParam) as the argument (0 = the default).
+    CMD_EDIT_TOGGLE = 141, CMD_EDIT_HERE, CMD_EDIT_EXIT, CMD_UNDO, CMD_REDO, CMD_CUT, CMD_PASTE, CMD_SAVE, CMD_SAVE_AS,
+    CMD_FMT_BOLD = 150, CMD_FMT_ITALIC, CMD_FMT_STRIKE, CMD_FMT_CODE, CMD_LINK, CMD_LINK_REMOVE,
+    CMD_BLOCK_P = 156, CMD_BLOCK_H1, CMD_BLOCK_H2, CMD_BLOCK_H3, CMD_BLOCK_H4, CMD_BLOCK_H5, CMD_BLOCK_H6,
+    CMD_LIST_BULLET = 163, CMD_LIST_NUMBER, CMD_LIST_TASK, CMD_QUOTE, CMD_CODEBLOCK, CMD_CODE_LANG,
+    CMD_INS_TABLE = 169 /* arg = rows << 4 | cols, 0 = 3 x 3 */, CMD_INS_FORMULA, CMD_INS_FORMULA_BLOCK,
+    CMD_INS_DIAGRAM /* arg = template 0-8 */, CMD_INS_IMAGE, CMD_INS_HR, CMD_NEW_PARAGRAPH,
+    CMD_TABLE_ROW_ABOVE = 176, CMD_TABLE_ROW_BELOW, CMD_TABLE_COL_LEFT, CMD_TABLE_COL_RIGHT, CMD_TABLE_DEL_ROW,
+    CMD_TABLE_DEL_COL, CMD_TABLE_ALIGN_L, CMD_TABLE_ALIGN_C, CMD_TABLE_ALIGN_R, CMD_TABLE_DEL,
+    CMD_BLOCK_MENU = 186, CMD_TABLE_MENU, CMD_FORMULA_MENU, CMD_DIAGRAM_MENU, CMD_EDIT_MORE, CMD_ATOM_EDIT,
+    CMD_POPUP_DONE = 192, CMD_POPUP_CANCEL, CMD_CONFLICT_LOAD, CMD_CONFLICT_KEEP, CMD_SAVE_RETRY, CMD_DISCARD_EDITS,
+    CMD_ENC_UTF8 = 198, CMD_ENC_REMOVE_CHAR, CMD_RECOVERY_OPEN, CMD_RECOVERY_RESTORE, CMD_RECOVERY_DELETE,
+    CMD_OTHER_WINDOW = 203, CMD_STRIP_CLOSE = 204,
 };
 
 // WM_APP_QUERY ids (tests): pixel values are client pixels
@@ -55,10 +82,20 @@ enum Query : UINT {
     Q_CARET /* MAKELONG(x, y) of the caret in client pixels, or -1 when no caret is drawn */,
     Q_DRAG /* formats a drag would carry: lp = kind * 65536 + arg → DragFormat bits */,
     Q_MATH /* formulas and diagrams: lp = 0 all, 1 drawn, 2 failed */,
-    Q_UPDATE /* lp = 0 newer version found, 1 start a test download, 2 installer downloaded and checked */,
+    Q_UPDATE /* lp = 0 newer version known, 1 start a test download, 2 installer downloaded and checked,
+                3 UpdateStatus, 4 check now (the settings button) */,
     Q_TASK /* lp = task → 1 ticked, 0 not, -1 no such task */,
     Q_TASK_BOX /* lp = task → centre of its box x | y << 16 in client px, -1 = not on screen */,
     Q_DOC_SERIAL /* changes with every load of a document: a reload shows up here */,
+    // edit mode (docs/EDIT-MODE.md §13.2): declared now, answered as their features arrive; until then -1
+    Q_EDITING = 42 /* 1 editing, 0 not */, Q_EDIT_DIRTY, Q_EDIT_CARET_SRC /* -1 when not editing */, Q_EDIT_ANCHOR_SRC,
+    Q_EDIT_TOOL /* lp = id | row << 16 → centre MAKELONG(x, y), -1 hidden */, Q_EDIT_BAR /* slide 0-100 */,
+    Q_UNDO_DEPTH /* lp 0 undo, 1 redo */, Q_RELOADS, Q_SAVES, Q_EDIT_POPUP /* lp = field → hwnd */,
+    Q_MAP_SELFCHECK /* lp 0: MapSelfCheck now → 1 ok, 0 broken; lp 1: failures under FASTMD_EDIT_SELFCHECK */,
+    Q_SRC_HASH /* FNV-1a-32, lp 0 g.src, 1 disk text */, Q_SRC_LEN, Q_EDIT_BUSY, Q_EDIT_PHANTOM, Q_BLOCK_COUNT,
+    Q_EDIT_SAVE_STATE, Q_EDIT_CONFLICT, Q_EDIT_ENC, Q_EDIT_EOL, Q_EDIT_ACTIVE, Q_LAST_PROMPT, Q_RELAYOUT_ALL,
+    Q_FRAME_STATS, Q_RENDERS, Q_EDIT_STATS, Q_EDIT_CARET_VISIBLE, Q_EDIT_CARET_PHASE, Q_EDIT_POPUP_STATE,
+    Q_EDIT_ATOM, Q_EDIT_STRIP, Q_EDIT_RAW, Q_EDIT_BUBBLE, Q_EDIT_COLLAPSE = 75,
 };
 
 // what can be dragged out of the window, and the formats it is offered in (drag.cpp)
@@ -88,13 +125,54 @@ struct Config {
     bool updateCheck = true;    // once a day, ask GitHub whether a newer release exists (plan 5.6)
     std::wstring editor;        // exe for Ctrl+E; "" = the system "edit" verb
     bool findCase = false, findWord = false;
+    bool autosave = true;       // edit mode writes the edits into the file by itself (EDIT-MODE.md §2.12)
 };
 
 struct MeasureJob {
     uint32_t gen, from, to;
     float textW, wideW;
-    std::vector<float> h;
+    std::vector<float> h;          // one height per measured block, in the order below
+    std::vector<uint32_t> idx;     // the blocks to measure; empty = from .. to
 };
+
+// Worker threads that read the document are joined by kind (EDIT-MODE.md §5.1): an edit waits only for the measure
+// jobs, which stop within one block; opening a document waits for everything Spawn started.
+enum WorkerKind : uint8_t { WK_OTHER, WK_MEASURE, WK_SCALE, WK_FULLPARSE };
+struct Worker { HANDLE h; WorkerKind kind; };
+
+// The render table (EDIT-MODE.md §5.2, UI thread only): one entry per picture, formula or diagram source and render
+// context, so the same source is rendered once however often it appears, is not rendered again while it is pending,
+// and a failure is remembered instead of retried.
+struct RenderEntry {
+    uint8_t state = RS_PENDING;              // RenderState
+    std::shared_ptr<const Pixels> pix;
+    int w = 0, h = 0;                        // layout size (a picture's decoded size; a formula's rendered size)
+    float ascent = 0;
+    std::shared_ptr<const Scaled> sc;        // the last display-size copy made from pix
+    std::wstring cachePath;                  // a remote picture: its file in the download cache
+    FILETIME fileTime{};                     // a local picture: its file's stamp when it was read - a failure is tried
+    uint64_t fileSize = 0;                   // again, a picture read again, when it changes
+    std::string error;
+    uint64_t lastUse = 0;                    // for evicting what the document no longer shows
+};
+// what the picture worker hands back for one job (WM_APP_IMAGES)
+struct RenderResult {
+    std::wstring key;                        // render-table key (source key + context)
+    uint32_t ctx = 0, loadGen = 0;
+    bool math = false, ok = false;
+    std::shared_ptr<const Pixels> pix;
+    int w = 0, h = 0;
+    float ascent = 0;
+    std::wstring cachePath;
+    FILETIME fileTime{};
+    uint64_t fileSize = 0;
+    std::string error;
+    bool keep = false;                       // the preview worker's (§9.4): a failure keeps the last good picture shown
+};
+
+// FASTMD_TEST_SLOW=images:<ms>,scale:<ms>,preview:<ms>,fullparse:<ms>,save:<ms> (tests: every job of that worker
+// sleeps this long, so races that are too quick to happen on their own can be forced; §13.5)
+struct TestSlow { DWORD images = 0, scale = 0, preview = 0, fullparse = 0, save = 0; };
 
 struct HistoryEntry { std::wstring path; float scrollY; };
 
@@ -110,8 +188,9 @@ struct PosEntry {
 
 struct TocItem { uint32_t block; uint8_t level; std::wstring text; IDWriteTextLayout* layout = nullptr; };
 
-// one image scaled to its display size on a worker thread, handed to the UI thread (WM_APP_SCALED)
-struct ScaledImage { uint32_t index; int w, h; std::vector<uint32_t> px; };
+// one picture scaled to its display size on a worker thread, handed to the UI thread (WM_APP_SCALED): it belongs to
+// every entry showing the pixels with that serial, whatever their index is by then
+struct ScaledImage { std::wstring key; uint32_t pxSerial; int w, h; std::vector<uint32_t> px; };
 
 struct App {
     Config cfg;
@@ -125,8 +204,38 @@ struct App {
     std::wstring src;              // UTF-16 source (immutable while workers run)
     Doc doc;
     std::atomic<Doc*> fullDoc{nullptr};
-    bool fullPending = false, imagesStarted = false, loadFailed = false;
+    bool fullPending = false, loadFailed = false;
     bool scalingImages = false;    // a scaler thread is making display-size copies right now
+    bool editing = false;          // edit mode (docs/EDIT-MODE.md; entered from Phase 2a on)
+    int editModal = 0;             // modal depth (§10.10): no model swap inside a menu, a dialog or a print job
+    uint32_t editSerial = 0;       // bumped by every model swap after an edit (edit.cpp)
+    uint32_t reloads = 0, saves = 0;  // loads after start-up (Q_RELOADS), successful saves (Q_SAVES)
+    std::wstring eol = L"\n";      // the line end the editor writes where a line has none (§7.2)
+    DiskState disk;                // what the disk holds (§10.2): encoding and identity from the load, the rest once
+                                   // something is to be written
+    float stripH = 0;              // the strip over the top of the document (editbar.cpp), 0 = none
+    // what view.cpp reads of edit mode (plain fields: they stay zero in the preview DLL, which has no editor)
+    float barT = 0;                // the toolbar's eased slide progress 0..1 (it covers the top of the page, §12.1)
+    float barComp = 0;             // scroll added so far to make up for it
+    bool barSliding = false;       // the slide is paced by the message loop's animation branch
+    int32_t caretBlock = -1, caretCell = -1;  // the edit caret's block and cell (its text offset is selFocus)
+    uint16_t caretTrail = 0;       // columns of trailing blanks the caret stands right of its text position (§6.5)
+    int8_t caretAff = 0;           // -1: at a soft-wrap boundary the caret is drawn at the end of the upper line (§12.2)
+    bool caretVisible = false;     // edit mode: the blink phase is on and the document has the keyboard
+    int32_t selAtomBlock = -1, selAtomImage = -1;  // the selected object atom: drawn with an outline, no caret
+    // A phantom row (§6.7): an empty paragraph only the editor shows, after (before) phantomBlock or, phantomBreak, as the
+    // line a pending hard break starts at that block's end. RecomputeY makes room for it; phantomY is its line's top.
+    int32_t phantomBlock = -1;
+    bool phantomBefore = false, phantomBreak = false, phantomCaret = false;  // phantomCaret: the caret stands in it
+    float phantomH = 0, phantomX = 0, phantomY = 0, phantomLine = 0;
+    uint8_t phantomStyle = 0;      // what the row will be (§6.7): 1-6 heading, 7 bullet, 8 numbered, 9 task, 10 quote
+    uint32_t framesPartial = 0, framesFull = 0;    // scrolled and full frames (Q_FRAME_STATS)
+    bool pencilHot = false;        // the pencil button (reading mode, left of the gear) is under the mouse
+    uint32_t editChrome = 0;       // bumped whenever the bar, a strip or the pencil would draw differently (frame key)
+    bool editOverText = false;     // a bar tooltip is drawn over the text: frames are drawn in full
+    std::unordered_map<std::wstring, RenderEntry> renders;  // the render table (loader.cpp), UI thread only
+    std::atomic<uint32_t> loadGen{0};         // bumped by every load: queued picture jobs of the old document are skipped
+    std::atomic<uint32_t> rendersStarted{0};  // renders and decodes the workers started (Q_RENDERS)
     bool remoteAllowedOnce = false;  // "ask": the reader allowed the network pictures of this document
     FILETIME fileTime{};
     uint64_t fileSize = 0;
@@ -155,10 +264,10 @@ struct App {
 
     // ---- threads
     HANDLE docThread = nullptr;
-    std::vector<HANDLE> workers;
+    std::vector<Worker> workers;      // Spawn: measure, scale, full parse (the picture worker and the updater are detached)
     SRWLOCK workersLock = SRWLOCK_INIT;
     std::atomic<uint32_t> gen{0};     // layout generation: bumped whenever the document / widths change → measure jobs stop
-    std::atomic<uint32_t> docGen{0};  // document generation: bumped only when the document changes → full parse / images stop
+    std::atomic<uint32_t> docGen{0};  // document generation: bumped when the document changes → a full parse is dropped
     std::atomic<bool> closing{false};
     int jobsPending = 0;
     HANDLE watchThread = nullptr, watchStop = nullptr;
@@ -234,6 +343,17 @@ struct App {
 };
 extern App g;
 
+// Modal depth (EDIT-MODE.md §10.10): every modal loop - a menu, a message box, a file or print dialog, a print job, a
+// drag - runs inside one of these. Messages still arrive in such a loop, and whoever opened it holds on to the model
+// (a print job to its pages), so meanwhile the reload waits, a test splice is refused, window activation looks at no
+// file, and pictures that arrive are put in place only once the last scope has closed (WM_APP_REPLAY).
+struct ModalScope {
+    ModalScope() { g.editModal++; }
+    ~ModalScope();
+    ModalScope(const ModalScope&) = delete;
+    ModalScope& operator=(const ModalScope&) = delete;
+};
+
 // ------------------------------------------------------------------------------------------------ view.cpp
 float Scale();                       // pixels per DIP (DPI / 96 × zoom)
 float ViewW();
@@ -259,7 +379,8 @@ void TrimCache();
 void Render();                       // draw the frame into the canvas (a pure scroll only redraws what changed)
 void ForceFullRedraw();              // the canvas content is no longer trusted: the next frame is drawn in full
 void WithAnchor(void (*fn)());       // keep the top visible block in place while heights change
-void DrawPill(const std::wstring& s, float x, float y, bool centered);
+// a pill of UI text at x (centered: its middle at x), 30 DIP tall; returns its width (measure: only that)
+float DrawPill(const std::wstring& s, float x, float y, bool centered, bool measure = false);
 IDWriteTextLayout* UiLayout(const std::wstring& s, float maxW, IDWriteTextFormat* fmt = nullptr);
 // one icon-font glyph centred in a box × box square; the font loads on first use, so never in the first frame
 void DrawIcon(wchar_t icon, float l, float t, float box, float size, uint8_t pal);
@@ -273,6 +394,20 @@ bool HScrollBarRect(uint32_t i, float* l, float* t, float* r, float* b, float* t
 
 // positions & links
 bool HitTestDoc(float x, float y, uint32_t* pos, bool* inside);  // client DIP → absolute text offset
+// the same with where the offset belongs: its block and (in a table) cell, and the character under the point
+struct DocHit { uint32_t pos = 0; int32_t block = -1, cell = -1; uint32_t under = UINT32_MAX; bool inside = false,
+                above = false; /* in the gap above the block */ };
+bool HitTestDocAt(float x, float y, DocHit* h);
+// caret geometry at a text offset of a known block / cell (-1 = found from the offset): client x, document y, line
+// height. relayout = false never lays out (the paint path).
+bool CaretGeomAt(uint32_t pos, int32_t block, int32_t cell, float* cx, float* docY, float* h, bool relayout);
+float SpaceAdvance(uint32_t block);  // a blank in the block's font (DIP)
+// an object atom's box (l, t, r, b) in client DIP: a picture or formula in a line (image >= 0) or a block of its own;
+// false while it is not laid out (the paint path never lays out)
+bool AtomRect(int32_t block, int32_t image, float box[4]);
+float EditInset();                   // edit mode's bar over the top of the page, times its slide (0 when printing)
+float EditRevealTop();               // the caret counts as hidden above this line (bar, strip, find bar)
+float ScrollTrackTop();              // the scrollbar's track starts under the bar and a strip
 int LinkAt(float x, float y);        // link index or -1
 int ImageAt(float x, float y);       // image block index or -1
 int CodeBlockAt(float x, float y, bool* onCopyButton);
@@ -316,6 +451,8 @@ enum FindInputEvent : WPARAM { FI_TEXT = 1, FI_KEY, FI_FOCUS };
 void FindOpen();
 void FindClose();
 void FindUpdate(bool keepCurrent);
+// an edit replaced the text [beg, oldEnd) with [beg, newEnd): find the matches again without scrolling (§12.6)
+void FindRefresh(uint32_t beg, uint32_t oldEnd, uint32_t newEnd);
 void FindStep(int dir);
 void FindToggleCase();
 void FindToggleWord();
@@ -330,9 +467,12 @@ bool FindTypeChar(wchar_t c);                 // WM_CHAR on the document while t
 bool FindInputFocused();
 void FindFocusInput();
 HWND FindEditHwnd();                          // the box's EDIT (tests type into it)
+// fn(arg) on the input thread, which edit mode's popups share (editpop.cpp); false = there is none (arg stays the caller's)
+bool InputCall(void (*fn)(void*), void* arg);
 
 // ------------------------------------------------------------------------------------------------ toc.cpp
-bool TocAvailable();                 // the document has headings
+bool TocAvailable();                 // the document has headings (while editing: whether it had them at entry)
+void TocFreeze(bool on);             // edit mode's entry and exit: the panel neither docks nor undocks meanwhile (§12.7)
 bool TocWideEnough();                // the window can keep the column beside the panel
 bool TocDocked();                    // open and the window is wide enough to keep the column beside it
 bool TocOverlayOpen();               // shown as a drawer over the text (narrow window)
@@ -365,18 +505,38 @@ void NavigateForward();
 void StartBackgroundWork();          // after the first frame: measure, images, full doc, watcher
 void OnMeasured(MeasureJob* job);
 void OnFullDoc();
-void OnImagesLoaded();
+// Pictures, formulas and diagrams through the render table: what the table has is shown at once, the rest is queued
+// for the picture worker (once per source and context). Runs after every load and every model swap.
+void StartImages();
+void OnImagesLoaded(std::vector<RenderResult>* batch);  // WM_APP_IMAGES
+std::wstring ImageRenderKey(const Image& im);  // the render-table key of an entry in the current render context
+uint32_t MathContext();              // the render context of formulas and diagrams: text size, colour, theme
+// a formula (kind 1, 2) or a diagram (3) as pixels at `scale` per DIP (any thread); r: its size in DIP, ok
+bool RenderMath(uint8_t kind, const std::string& src, float fontPx, uint32_t rgb, bool dark, float scale, Pixels& pix,
+                RenderResult& r);
+// a formula or a diagram rendered on the picture worker (a preview job another one displaced before it began)
+void QueueMathRender(const std::wstring& key, uint32_t ctx, uint32_t loadGen, uint8_t kind, const std::string& src, float fontPx,
+                     uint32_t rgb, bool dark);
+void RetryChangedPictures();         // the window was activated: pictures whose file has changed since are read again
+void PicturesMayHaveChanged();       // the document was rewritten with the same text: the same, at once
 bool RemoteImagesAllowed();          // the privacy setting, plus a one-off allowance for this document
 bool DocHasRemoteImages();           // something is waiting to be fetched
 void LoadRemoteImages();             // allow them for this document and start fetching
 void ScheduleImageScaling();         // after a frame: start the scaler if an image was drawn at a size we have no copy of
-void OnScaledImages(std::vector<ScaledImage>* list, uint32_t gen);
+void OnScaledImages(std::vector<ScaledImage>* list);
 void StartMeasure();
-void JoinWorkers();
+void JoinWorkers();                  // open / reload: stop and wait for every worker that reads the document
+void JoinDocReaders();               // an edit swap: stop the measure jobs and wait for them only (§5.1)
+void MeasureUnknown();               // measure only the blocks whose height is still a guess (after an edit swap)
+// §5.5 step 4: what the render table (and the old model) know about the pictures of a new model, put on it before it
+// is installed; a formula whose source is being typed in [editBeg, newEnd) keeps the old one's picture meanwhile
+void CarryRenders(const Doc& oldD, Doc& nd, uint32_t editBeg, uint32_t oldEnd, uint32_t newEnd);
 void StartWatcher();
 void StopWatcher();
 void OnFileChanged();                // the watcher saw the file change: reload unless the disk holds what is shown
-HANDLE Spawn(LPTHREAD_START_ROUTINE fn, void* arg, int prio = THREAD_PRIORITY_NORMAL, SIZE_T stack = 0);
+HANDLE Spawn(LPTHREAD_START_ROUTINE fn, void* arg, int prio = THREAD_PRIORITY_NORMAL, SIZE_T stack = 0,
+             WorkerKind kind = WK_OTHER);
+const TestSlow& TestSlowMs();        // FASTMD_TEST_SLOW, read once
 std::wstring WindowTitle();
 void LoadPositionsAsync();           // after the first frame
 void OnPositionsLoaded(std::vector<PosEntry>* list);
@@ -391,6 +551,8 @@ void LoadConfig(Config& c, std::wstring* findQuery);  // everything but the wind
 void SaveConfig(const Config& c, const std::wstring& findQuery);
 bool RegReadBinary(const wchar_t* name, void* data, DWORD size);
 void RegWriteBinary(const wchar_t* name, const void* data, DWORD size);
+uint32_t RegGetDword(const wchar_t* name, uint32_t def);  // one value of the settings key (EditHintShown …)
+void RegSetDword(const wchar_t* name, uint32_t v);
 bool PositionsLoad(std::vector<PosEntry>& out);             // most recently opened first
 void PositionsSave(const PosEntry& e, bool keepPosition);   // merge one entry (keepPosition: only touch `opened`)
 void PositionsRemove(const std::wstring& path);
@@ -401,8 +563,10 @@ std::vector<EditorInfo> DetectEditors();
 // ------------------------------------------------------------------------------------------------ shell.cpp
 void OpenLink(int linkIndex);
 void CopyToClipboard(const std::wstring& text);
-// copy.cpp: the selection with its formatting (CF_HTML + RTF + text), and as the Markdown source it came from
-void CopySelectionRich();
+bool OpenClipboardRetry();  // OpenClipboard(g.hwnd), a few tries while another program reads what was just put there
+// copy.cpp: the selection with its formatting (CF_HTML + RTF + text), and as the Markdown source it came from; false when
+// the clipboard could not be opened (Cut then keeps the text)
+bool CopySelectionRich();
 void SelectionRichFormats(std::wstring& text, std::string& cfHtml, std::string& rtf);  // clipboard and drag
 std::wstring SelectionMarkdown();
 bool CopyImageToClipboard(uint32_t imageBlock);
@@ -415,24 +579,36 @@ std::wstring PickExeDialog(HWND owner);
 std::wstring SavePdfDialog();        // where to write the exported PDF ("" = cancelled)
 
 // ------------------------------------------------------------------------------------------------ update.cpp
-void UpdateCheckAsync();             // after the first frame: at most one request a day
-bool UpdateAvailable();
+enum UpdateStatus : int {
+    US_IDLE, US_CHECKING, US_LATEST, US_AVAILABLE, US_DOWNLOADING, US_INSTALLING, US_INSTALLED, US_CHECK_FAILED,
+    US_DOWNLOAD_FAILED,
+};
+void UpdateCheckAsync();             // after the first frame: at most one request a day (a failed one: an hour later)
+void UpdateCheckNow();               // the settings button: ask GitHub right away
+bool UpdateAvailable();              // a newer release is known (found now or remembered from an earlier check)
 std::wstring UpdateVersion();
-void UpdateInstall();                // ask, download, check the hash, run the installer
-void OnUpdateMessage(WPARAM what);
+UpdateStatus UpdateGetStatus();
+void UpdateInstall(bool ask);        // (ask,) download, check the hash, run the installer, offer a restart
+void UpdateRestart();                // start the installed FastMD on this document and close this window
+void OnUpdateMessage(WPARAM what, LPARAM lp);
 void UpdateFetchForTest();           // automation: download + verify, without running anything
 bool UpdateFetched();
 uint64_t LastUpdateCheck();          // store.cpp
 void SetLastUpdateCheck(uint64_t t);
+// store.cpp: the newest release a check found, so later windows show it without asking ("" = none)
+void LoadFoundUpdate(std::wstring& version, std::wstring& url, std::wstring& shaUrl);
+void SaveFoundUpdate(const std::wstring& version, const std::wstring& url, const std::wstring& shaUrl);
 
 // ------------------------------------------------------------------------------------------------ uia.cpp
 LRESULT UiaHandleGetObject(WPARAM wp, LPARAM lp);  // WM_GETOBJECT: hand a screen reader the document
-void UiaDocumentChanged();                         // another document was opened
+void UiaDocumentChanged();                         // the text changed: another document, an edit
 void UiaSelectionChanged();                        // the selection moved
+void UiaChromeChanged();                           // edit mode's buttons may have come or gone (§12.8)
 void UiaShutdown();                                // on close
 
 // ------------------------------------------------------------------------------------------------ crash.cpp
 void CrashHandlerInstall();          // wWinMain: minidumps into %LOCALAPPDATA%\FastMD\crashes
+void CrashPrivacy(bool on);          // editing or unsaved edits: a dump takes no memory it only points at (§10.12)
 void CrashReportIfAny();             // after the first frame: offer the folder if the last run left a dump
 uint64_t LastCrashSeen();            // store.cpp
 void SetLastCrashSeen(uint64_t t);
@@ -452,6 +628,190 @@ std::wstring UrlDecode(const std::wstring& s);
 // ------------------------------------------------------------------------------------------------ tasks.cpp
 bool ToggleTask(uint32_t block);     // tick or untick a task list item in the file, then on screen
 
+// ------------------------------------------------------------------------------------------------ edit.cpp
+// The model swap (§5.5): g.src changed in [at, at + oldLen) → [at, at + newLen) (at = UINT32_MAX: nothing changed).
+// keepOld: the model before the change is handed back (typing checks what the new one renders against it, §7.3).
+void EditReparse(uint32_t at = UINT32_MAX, uint32_t oldLen = 0, uint32_t newLen = 0, Doc* keepOld = nullptr);
+bool EditSplice(uint32_t at, uint32_t len, std::wstring text);  // the one way g.src changes (§7.1); false = refused
+bool EditDirty();                    // g.src != the baseline's text (compared, not flagged)
+enum BaselineResult { BL_OK, BL_CHANGED, BL_UNREADABLE, BL_REFUSED };
+// Takes the baseline from the disk when there is none (§10.1): the file must hold exactly the text on screen, in bytes
+// that can be written back byte for byte. BL_CHANGED: it holds something else; BL_UNREADABLE: *st says why.
+BaselineResult EditBaseline(SaveState* st);
+SaveState EditSave(bool flushPoint); // g.src into the file (§10.3); flushPoint: leave, close, Ctrl+S
+void EditPushStep(EditStep step);    // an undo step for a change made outside edit mode, if a history exists
+void EditOnLoad();                   // a document was (re)loaded: a new session
+void EditLeaveDocument();            // before another document (or a reload, or the close): a flush point
+void EditAfterOpen();                // after the first frame of an open: an interrupted save's recovery file?
+bool EditRecoveryRestorable();       // the recovery strip may offer Restore (the file is still the torn one)
+bool EditCommand(UINT id, UINT arg); // edit mode's commands (§13.1) and the strips': true = it was one of them
+LRESULT EditCopyData(const COPYDATASTRUCT* cd);  // FASTMD_TEST_HOOKS: splice / save
+bool EditTestHooks();                // FASTMD_TEST_HOOKS=1 (read once)
+void EditTimer(UINT_PTR id);
+bool EditQuery(UINT q, LPARAM lp, LRESULT* out);  // edit mode's queries; false = not one of them
+// entering and leaving (§2.1, §2.2)
+enum EnterHow : uint8_t { ENTER_CARET, ENTER_POINT };  // at the reading caret (F2, pencil) / at a client point (DIP)
+bool EditEnter(EnterHow how, float x = 0, float y = 0);  // false = refused (a toast said why) or deferred
+bool EditLeave();                    // Esc, ✕, F2: flush and leave; false = the edits could not be saved (leave strip)
+void EditExit(bool silent);          // leave with nothing left to save; silent: no slide (another document follows)
+bool CanLeaveDocument();             // §10.8: before the document goes - flushed, or the reader chose; false = stay
+bool EditBeforeClose();              // PrepareToClose's part: false = stay open (or the close waits for a modal loop)
+void EditRestartLater();             // the update's restart asked for inside a modal loop: UpdateRestart once it is over
+void EditPresented();                // a frame is on screen: the typed character's cost from WM_CHAR is taken (§5.8)
+void EditQueryEndSession();          // §10.9: journal, then the save, no UI
+void EditEndSession();
+// input in edit mode (§2.7, §2.8)
+bool EditKey(unsigned vk, bool ctrl, bool shift, bool alt);  // true = handled (never for Ctrl+Alt: AltGr text)
+void EditChar(wchar_t c);
+void EditMouseDown(float x, float y, WPARAM keys, int clickCount);  // a press on the document
+void EditMouseDrag(float x, float y);  // the button is down and the mouse moves: the selection follows
+bool EditContextPoint(float x, float y);  // right-click outside the selection moves the caret there first
+void EditContextMenu(int sx, int sy, bool keyboard);
+bool EditTripleClickCancels(float x, float y);  // a third click right after the double click that entered (UX-5)
+void EditTaskClick(uint32_t block);  // a task box in edit mode: an undoable splice, saved by autosave (§8.10)
+bool EditOpenLinkOnClick(WPARAM keys);  // a click on a link opens it only with Ctrl in edit mode
+void EditFocus(bool on);             // WM_SETFOCUS / WM_KILLFOCUS: the caret blinks only with the keyboard
+void EditActivated();                // WM_ACTIVATE: a read-only or missing file is looked at again
+void EditOnFileChanged();            // the watcher, in edit mode (§10.7)
+void EditOnFullDoc();                // a big document's full parse arrived: an entry asked for meanwhile happens now
+void EditSlideStep();                // one animation step of the bar (message loop)
+void EditSync();                     // the re-parse a big document's typing deferred (§5.7), now
+void EditThemeChanged();             // the palette changed: re-parse the source instead of reloading the file
+void EditPaletteChanged();           // any palette change: popovers close, a source popup's fields take the new colours
+LRESULT EditOwnerMessage(WPARAM vol, LPARAM index);  // FastMD.EditOwner: is this window editing that file?
+bool EditDeferred(UINT msg, WPARAM wp, LPARAM lp);  // inside a modal loop: queued for WM_APP_REPLAY (§10.10)
+void EditReplay();                   // WM_APP_REPLAY: what waited, in order, then a close that was asked for
+void EditOnSaved(WPARAM serial);     // WM_APP_SAVED: the save worker is done
+bool EditPendingReplay();            // something waits for the end of the modal loop (WM_APP_REPLAY is due)
+bool EditEscGuard();                 // within 1 s of the Esc that left edit mode: an Esc never closes the window (UX-6)
+void EditAutosaveChanged();          // the setting was switched: arm or stop the autosave of the open edits
+void EditSetContextPoint(float x, float y);  // where the reading menu was opened: "Edit here" enters there
+void EditZoomChanged(float from);    // after a zoom change: the bar's scroll make-up and the strip follow the new unit
+void EditDetailsToggled(uint32_t summary);  // a <details> folded in edit mode: the caret leaves what it hid
+std::wstring EditSelectionSource();  // copy as Markdown in edit mode: the source of the selection
+void EditSelectText(uint32_t from, uint32_t to);  // UI Automation's Select in edit mode: through the editor (§12.8)
+void EditRevealText(uint32_t pos);   // ... and its ScrollIntoView: the caret's minimal reveal
+// what the bar shows (editbar.cpp)
+SaveState EditSaveState();           // Q_EDIT_SAVE_STATE
+SaveState EditStatusShown();         // the status slot now: a change shows only after 300 ms (UX-24)
+std::wstring EditStatusTip();        // the status in full (the slot elides it), with a kept recovery file's path
+bool EditCanUndo();
+bool EditCanRedo();
+int EditStyleId();                   // the style label: 0 text, 1-6 heading, 7 code, 8 table, 9 atom, 10 footnote
+std::wstring EditStripText(int kind);  // the conflict, encoding, leave and journal strips say what happened
+// the context matrix (§8.1): may that command run where the caret is? why: 1 table, 2 code, 3 object, 4 footnote,
+// 5 raw text, 0 not built yet / nothing to say
+bool EditCmdEnabled(UINT cmd, int* why);
+bool EditCmdActive(UINT cmd);        // the format, list, quote or code block at the caret is on (Q_EDIT_ACTIVE's bits)
+// the source popups (§9) and the link and code-language popovers (§2.4): what editbar.cpp draws of the one open
+struct PopupView {
+    PopupKind kind = PK_NONE;
+    uint8_t fields = 0;              // EDIT fields: 1, or 2 (a picture's alt text and path)
+    bool multi = false;              // a source: one multi-line field
+    bool fixed1 = false;             // field 1 shows, read-only (a reference picture's address)
+    bool hidden = false;             // the fields are hidden while the panel moves (R18): the canvas draws their text
+    bool remove = false;             // the link popover offers [Remove link]
+    int focus = -1;                  // the field with the keyboard
+    int lines = 1;                   // what the source field shows now
+    std::wstring error, notice;      // the error line; a reference link's notice (a reference picture's note)
+};
+const PopupView* EditPopup();        // the one open, nullptr = none
+bool EditPopupAnchor(float box[4]);  // the object a source popup edits, client DIP (false: a popover under the bar)
+void EditPopupPlaced(const float fields[2][4], bool offscreen);  // editbar drew the panel: the fields go where it is
+void EditPopupClickOutside(bool onOpener);  // a click beside the panel keeps a source popup's text, closes a popover
+void EditPopupDismiss();             // the wheel, a resize, deactivation: a popover with a field closes
+void EditOnInput(WPARAM ev, LPARAM lp);  // WM_APP_EDITINPUT
+bool EditPopupCommit();              // §9.2's commit points: what the popup holds is in the source (false: none open)
+struct PreviewResult;
+void EditOnPreview(PreviewResult* r);    // WM_APP_PREVIEW
+bool EditPreviewClaim(const Image& im, const std::wstring& key);  // StartImages: the popup's formula goes to the preview worker
+void EditPreviewKnown(const Image& im, const std::wstring& key, uint8_t state);  // ... or the table knows it already
+bool EditPopupHolds(const Image& im);  // the formula or the diagram a source popup edits (not the others on its lines)
+bool EditDropFiles(HANDLE drop);     // WM_DROPFILES in edit mode: pictures go in at the drop point (false: not editing)
+// the link bubble (§2.11): the caret's link, its box (client DIP) and address; false = not shown
+bool EditBubble(float box[4], std::wstring* dest);
+std::wstring EditPrivateSlice();     // the selection in FastMD's own clipboard format (§7.11), "" = none
+
+// ------------------------------------------------------------------------------------------------ editbar.cpp
+enum StripId : int { STRIP_NONE, STRIP_CONFLICT, STRIP_ENCODING, STRIP_LEAVE, STRIP_READONLY, STRIP_MISSING,
+                     STRIP_RECOVERY, STRIP_OTHER_WINDOW };  // Q_EDIT_STRIP, in the order of their priority
+void StripShow(int kind);            // that condition holds: the strip of the highest priority is shown
+void StripHide(int kind);            // that condition is over
+void StripHideEditing();             // leaving edit mode: its strips go (the reading-mode ones stay)
+void StripRelayout();                // the zoom changed: the strip's height in canvas units follows
+std::wstring StripTipAt(float x, float y);  // the strip's whole text under the pointer when it was cut short ("" = none)
+int StripKind();                     // the strip shown, STRIP_NONE = none
+float StripTop();                    // under the bar in edit mode, at the top of the document in reading mode
+LRESULT StripButtonCenter(UINT cmd); // Q_EDIT_TOOL: client px MAKELONG(x, y), -1 = not shown
+bool StripMouse(float x, float y, bool click);  // true = the point is on the strip (a click runs its button)
+void DrawEditChrome(int layer);      // view.cpp: 0 = the bar, a strip, the pencil; 1 = a bar tooltip, over all
+int EditChromeRects(float (*rects)[4], int max);  // what a scrolled frame must repair (client DIP l, t, r, b)
+bool BarMouse(float x, float y, bool click);  // the toolbar: true = the point is on it (a click runs its button)
+bool PencilMouse(float x, float y, bool click);  // reading mode's pencil button, left of the gear
+void BarMouseLeave();
+void BarChanged();                   // something the bar shows changed: repaint (and a full frame)
+LRESULT BarToolCenter(UINT cmd, UINT row = 0);  // Q_EDIT_TOOL: a bar button, the pencil, a popover's row (from 1)
+int BarCollapse();                   // Q_EDIT_COLLAPSE
+std::wstring BarTipText();           // the tooltip shown now ("" = none)
+// the popovers under the bar's buttons (§2.4): style, table (grid or actions), formula, diagram, "…"
+bool PopoverOpen();
+void PopoverToggle(UINT cmd);        // opened under its button (under "…" when that one is collapsed), or closed
+void PopoverClose();                 // Esc, a click outside, the wheel, a resize, the zoom, the theme, deactivation
+bool PopoverKey(unsigned vk);        // ↑ ↓ ← → Home End Enter Esc: true = the popover took it
+bool PopoverMouse(float x, float y, bool click);  // true = the point is on it (or a click on its button closed it)
+// UI Automation (§12.8): the buttons the chrome shows now - the bar's, a popover's rows, a strip's, the pencil - in
+// reading order, and what a screen reader calls one of them (keys: its shortcut, "" = none). A popover row's cmd carries
+// its argument in the high word, as WM_COMMAND does.
+struct ChromeButton { UINT cmd; float l, t, r, b; bool enabled; };  // client DIP
+int EditChromeButtons(ChromeButton* out, int max);
+std::wstring EditChromeName(UINT cmd, std::wstring* keys);
+// the open popup's panel (§9.1): its box, its fields' boxes and where their EDITs go (client DIP); false = none
+struct PopupRects {
+    float l = 0, t = 0, r = 0, b = 0;
+    bool off = false;                // a source popup whose object is out of sight (it closes)
+    float field[2][4] = {}, edit[2][4] = {};
+    int buttons = 0;
+    UINT cmd[2] = {};
+    float btn[2][4] = {};
+    float label[2] = {}, notice = 0, hint = 0, error = 0;  // the tops of a picture's labels, the notice, hint, error
+};
+bool PopupGeometry(PopupRects* out);
+bool PopupMouse(float x, float y, bool click);   // true = the point is on the panel (or a click beside it closed a popover)
+bool BubbleMouse(float x, float y, bool click);  // the link bubble's buttons (§2.11)
+
+// ------------------------------------------------------------------------------------------------ editpop.cpp
+// A popup's fields live on the input thread (§9.1): the UI thread only posts to them, and they write their text into the
+// popup buffer and post WM_APP_EDITINPUT back - EI_TEXT (lp = the buffer's change count), EI_KEY (lp = vk | mods << 16),
+// EI_FOCUS (lp = 1 in, 0 out) - never a SendMessage between the threads. EI_OFFSCREEN: the object left the screen.
+enum EditInputEvent : WPARAM { EI_TEXT = 1, EI_KEY, EI_FOCUS, EI_OFFSCREEN };
+enum : int { KM_CTRL = 1, KM_SHIFT = 2, KM_ALT = 4 };  // the modifiers EI_KEY and WM_APP_TESTKEY carry
+struct PopupFields {
+    int n = 1;                       // 1, or 2 (a picture's alt text and path)
+    bool multi = false;              // a source: one multi-line field (with a scrollbar: scroll); else single-line fields
+    bool scroll = false, fixed1 = false, selectAll = false;
+    int tab = 0;                     // the blanks Tab types (TeX, YAML 2; Mermaid, HTML 4); 0: Tab goes to the other field
+    std::wstring text[2];            // what they start with, lines "\n"
+    RECT rc[2] = {};                 // client px
+    int fontPx = 13;
+    std::wstring face;
+    COLORREF fg = 0, bg = 0;
+    bool dark = false, show = true;
+};
+bool PopupFieldsOpen(const PopupFields& f);      // false: there is no input thread (§9.3)
+void PopupFieldsMove(const RECT rc[2], bool show);  // the panel moved (the fields hide while it moves, R18)
+void PopupFieldsStyle(const PopupFields& f);     // the theme changed: colours and scrollbars
+void PopupFieldsSetText(int field, const std::wstring& text);  // as if typed ([Choose file…])
+void PopupFieldsClose();
+HWND PopupFieldHwnd(int field);                  // Q_EDIT_POPUP; 0 until the input thread has made it
+uint32_t PopupFieldText(int field, std::wstring* text);  // the buffer: the field's latest text (lines "\n"), change count
+// the preview worker (§9.4): one detached thread, the latest job only - a newer one replaces a job not begun yet
+struct PreviewResult { uint32_t seq = 0; RenderResult r; std::string good; };  // good: the source, when it rendered
+// good: the popup's last source that rendered - drawn in its place, for the context of now, when this one does not.
+// A job not begun yet that this one replaces goes to the picture worker, unless its key is `drop` (the popup's own last
+// one): true then, and its table entry is the caller's to forget
+bool PreviewRequest(uint32_t seq, const std::wstring& key, const Image& im, const std::string& good, const std::wstring& drop);
+void PreviewWarm(int what);                      // 1 TeX, 2 Mermaid: loaded on the worker, once per process
+
 // ------------------------------------------------------------------------------------------------ settings_ui.cpp
 void SettingsOpen();
 void SettingsRefresh();              // settings changed elsewhere (menu, shortcut, other window)
@@ -467,10 +827,11 @@ enum SettingsChange : uint32_t {
     SC_THEME = 1, SC_TYPE = 2 /* font, size, wrap */, SC_COLUMN = 4, SC_LANGUAGE = 8, SC_OTHER = 16, SC_ALL = 31,
 };
 void Invalidate();
+bool PrepareToClose();               // the window is about to close (or restart): false = the reader chose to stay
 void Relayout();                     // column widths / typography changed: drop layouts, re-estimate, re-measure
 bool KeyCommand(WPARAM vk, bool ctrl, bool shift, bool alt);  // keyboard shortcuts (also forwarded by the find box)
 void ScrollTo(float y, bool animate);
 void UserScrollTo(float y, bool animate);  // reader-initiated: cancels a pending position restore
 void ApplyTheme();                   // re-evaluate system / forced theme, repaint
 void ApplySettings(uint32_t changed, bool persist);  // g.cfg changed → re-layout / repaint (+ save, notify other windows)
-void Command(UINT id);
+void Command(UINT id, UINT arg = 0);  // arg: HIWORD(wParam) of WM_COMMAND (0 from menus), e.g. a table's size

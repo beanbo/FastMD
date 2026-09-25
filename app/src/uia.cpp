@@ -7,12 +7,18 @@
 //
 // uiautomationcore.dll is delay-loaded and the first WM_GETOBJECT for the root object only arrives when a screen
 // reader is actually running, so a reader who never uses one never pays for this file.
+//
+// Edit mode (docs/EDIT-MODE.md §12.8): the text is no longer read-only, a range selected or scrolled to goes through the
+// editor, and the buttons of its chrome - the toolbar, a strip, the pencil - are children of the document a screen
+// reader can find by name and press.
 #include "app.h"
 
 #include <uiautomation.h>
 
 namespace {
 IRawElementProviderSimple* g_root = nullptr;
+const int kMaxButtons = 128;  // the bar's 22, a popover's rows (the size grid's 80 cells), a strip's 3, the pencil
+uint32_t g_chromeSig = 0;    // the buttons the last structure-changed event told about
 
 uint32_t Clamp(uint32_t pos) { return std::min<uint32_t>(pos, (uint32_t)g.doc.text.size()); }
 
@@ -36,8 +42,18 @@ BSTR Bstr(const std::wstring& s) { return SysAllocStringLen(s.c_str(), (UINT)s.s
 struct Range final : ITextRangeProvider {
     LONG ref = 1;
     uint32_t from = 0, to = 0;
+    uint32_t serial = g.editSerial;  // the text it was made on: two ranges of different edits are never the same one
 
     Range(uint32_t a, uint32_t b) : from(std::min(a, b)), to(std::max(a, b)) {}
+
+    // A client may hold a range across a model swap that shortened the text (a reload, a ticked box, typing), so
+    // every method that reads the text or moves the selection first brings the range back inside it (§5.6, §12.8):
+    // a stale range works on the clamped offsets and never throws.
+    void Fit() {
+        from = Clamp(from);
+        to = Clamp(to);
+        if (from > to) from = to;
+    }
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
         if (riid == IID_IUnknown || riid == __uuidof(ITextRangeProvider)) {
@@ -101,12 +117,14 @@ struct Range final : ITextRangeProvider {
     }
 
     HRESULT STDMETHODCALLTYPE Clone(ITextRangeProvider** out) override {
-        *out = new Range(from, to);
+        auto* r = new Range(from, to);
+        r->serial = serial;
+        *out = r;
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE Compare(ITextRangeProvider* other, BOOL* same) override {
         auto* o = static_cast<Range*>(other);
-        *same = o && o->from == from && o->to == to;
+        *same = o && o->from == from && o->to == to && o->serial == serial;
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE CompareEndpoints(TextPatternRangeEndpoint mine, ITextRangeProvider* other,
@@ -119,6 +137,7 @@ struct Range final : ITextRangeProvider {
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE ExpandToEnclosingUnit(TextUnit unit) override {
+        Fit();
         uint32_t a = 0, b = 0;
         if (UnitRange(unit, from, &a, &b)) {
             from = a;
@@ -134,6 +153,7 @@ struct Range final : ITextRangeProvider {
                                        ITextRangeProvider** out) override {
         *out = nullptr;
         if (!text) return E_INVALIDARG;
+        Fit();
         std::wstring needle(text, SysStringLen(text)), hay = g.doc.text.substr(from, to - from);
         if (needle.empty()) return S_OK;
         if (ignoreCase) {
@@ -146,6 +166,7 @@ struct Range final : ITextRangeProvider {
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetAttributeValue(TEXTATTRIBUTEID id, VARIANT* value) override {
+        Fit();
         VariantInit(value);
         if (id == UIA_StyleIdAttributeId) {  // how a screen reader finds headings
             int level = HeadingLevelAt(from);
@@ -153,15 +174,16 @@ struct Range final : ITextRangeProvider {
             value->lVal = level >= 1 && level <= 6 ? StyleId_Heading1 + (level - 1) : StyleId_Normal;
             return S_OK;
         }
-        if (id == UIA_IsReadOnlyAttributeId) {
+        if (id == UIA_IsReadOnlyAttributeId) {  // in edit mode the reader can type here
             value->vt = VT_BOOL;
-            value->boolVal = VARIANT_TRUE;
+            value->boolVal = g.editing ? VARIANT_FALSE : VARIANT_TRUE;
             return S_OK;
         }
         value->vt = VT_UNKNOWN;
         return UiaGetReservedNotSupportedValue((IUnknown**)&value->punkVal);
     }
     HRESULT STDMETHODCALLTYPE GetBoundingRectangles(SAFEARRAY** out) override {
+        Fit();
         std::vector<double> rects;
         RangeScreenRects(from, to, rects);
         *out = SafeArrayCreateVector(VT_R8, 0, (ULONG)rects.size());
@@ -179,6 +201,7 @@ struct Range final : ITextRangeProvider {
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE Move(TextUnit unit, int count, int* moved) override {
+        Fit();
         *moved = 0;
         uint32_t at = from;
         for (int i = 0; i < std::abs(count); i++) {
@@ -200,6 +223,8 @@ struct Range final : ITextRangeProvider {
                                                   TextPatternRangeEndpoint theirs) override {
         auto* o = static_cast<Range*>(other);
         if (!o) return E_INVALIDARG;
+        Fit();
+        o->Fit();
         uint32_t v = theirs == TextPatternRangeEndpoint_Start ? o->from : o->to;
         if (mine == TextPatternRangeEndpoint_Start) from = std::min(v, to);
         else to = std::max(v, from);
@@ -207,6 +232,7 @@ struct Range final : ITextRangeProvider {
     }
     HRESULT STDMETHODCALLTYPE MoveEndpointByUnit(TextPatternRangeEndpoint endpoint, TextUnit unit, int count,
                                                  int* moved) override {
+        Fit();
         *moved = 0;
         uint32_t at = endpoint == TextPatternRangeEndpoint_Start ? from : to;
         for (int i = 0; i < std::abs(count); i++) {
@@ -225,12 +251,19 @@ struct Range final : ITextRangeProvider {
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE RemoveFromSelection() override { return UIA_E_INVALIDOPERATION; }
-    HRESULT STDMETHODCALLTYPE ScrollIntoView(BOOL) override {
-        RevealTextPos(from, false);
+    HRESULT STDMETHODCALLTYPE ScrollIntoView(BOOL alignToTop) override {
+        Fit();
+        if (g.editing) EditRevealText(alignToTop ? from : to);  // the caret's minimal reveal, under the bar
+        else RevealTextPos(from, false);
         Invalidate();
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE Select() override {
+        Fit();
+        if (g.editing) {  // the editor's selection lives in the source: through it, to caret stops
+            EditSelectText(from, to);
+            return S_OK;
+        }
         g.selAnchor = from;
         g.selFocus = to;
         Invalidate();
@@ -239,6 +272,149 @@ struct Range final : ITextRangeProvider {
     HRESULT STDMETHODCALLTYPE AddToSelection() override { return UIA_E_INVALIDOPERATION; }
     HRESULT STDMETHODCALLTYPE GetChildren(SAFEARRAY** out) override {
         *out = SafeArrayCreateVector(VT_UNKNOWN, 0, 0);
+        return S_OK;
+    }
+};
+
+SAFEARRAY* Ints(std::initializer_list<int> v) {
+    SAFEARRAY* a = SafeArrayCreateVector(VT_I4, 0, (ULONG)v.size());
+    LONG i = 0;
+    for (int x : v) {
+        if (a) SafeArrayPutElement(a, &i, &x);
+        i++;
+    }
+    return a;
+}
+BSTR BstrOf(VARIANT* v, const std::wstring& s) {
+    v->vt = VT_BSTR;
+    return v->bstrVal = Bstr(s);
+}
+void BoolOf(VARIANT* v, bool b) {
+    v->vt = VT_BOOL;
+    v->boolVal = b ? VARIANT_TRUE : VARIANT_FALSE;
+}
+template <class I> HRESULT RootAs(I** out) {
+    *out = nullptr;
+    return g_root ? g_root->QueryInterface(__uuidof(I), (void**)out) : S_OK;
+}
+
+// ------------------------------------------------------------------------------------------- edit mode's buttons
+// One button of the chrome (§12.8), a child of the document. It stands for a command, not for a place: every answer is
+// looked up in the chrome as it is now, and once the button is gone (the bar slid away, the strip closed) it says so.
+// Invoke posts the command a click runs, so a screen reader presses exactly what the mouse would.
+struct Button final : IRawElementProviderSimple, IRawElementProviderFragment, IInvokeProvider {
+    LONG ref = 1;
+    UINT cmd;
+    explicit Button(UINT c) : cmd(c) {}
+
+    // the chrome now, and this button's place in it (-1 = gone)
+    int Find(ChromeButton* all, int* n) const {
+        *n = EditChromeButtons(all, kMaxButtons);
+        for (int k = 0; k < *n; k++)
+            if (all[k].cmd == cmd) return k;
+        return -1;
+    }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+        if (riid == IID_IUnknown || riid == __uuidof(IRawElementProviderSimple))
+            *ppv = static_cast<IRawElementProviderSimple*>(this);
+        else if (riid == __uuidof(IRawElementProviderFragment))
+            *ppv = static_cast<IRawElementProviderFragment*>(this);
+        else if (riid == __uuidof(IInvokeProvider))
+            *ppv = static_cast<IInvokeProvider*>(this);
+        else { *ppv = nullptr; return E_NOINTERFACE; }
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&ref); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        LONG r = InterlockedDecrement(&ref);
+        if (!r) delete this;
+        return r;
+    }
+
+    // ---- IRawElementProviderSimple
+    HRESULT STDMETHODCALLTYPE get_ProviderOptions(ProviderOptions* out) override {
+        *out = ProviderOptions_ServerSideProvider;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetPatternProvider(PATTERNID id, IUnknown** out) override {
+        *out = nullptr;
+        if (id == UIA_InvokePatternId) {
+            *out = static_cast<IInvokeProvider*>(this);
+            AddRef();
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetPropertyValue(PROPERTYID id, VARIANT* value) override {
+        VariantInit(value);
+        ChromeButton all[kMaxButtons];
+        int n, k = Find(all, &n);
+        if (k < 0) return UIA_E_ELEMENTNOTAVAILABLE;
+        std::wstring keys, name;
+        switch (id) {
+        case UIA_ControlTypePropertyId:
+            value->vt = VT_I4;
+            value->lVal = UIA_ButtonControlTypeId;
+            break;
+        case UIA_NamePropertyId:  // the tooltip's name; its shortcut is the accelerator key
+        case UIA_AcceleratorKeyPropertyId:
+            name = EditChromeName(cmd, &keys);
+            if (id == UIA_NamePropertyId) BstrOf(value, name);
+            else if (!keys.empty()) BstrOf(value, keys);
+            break;
+        case UIA_AutomationIdPropertyId: BstrOf(value, L"FastMD.cmd." + std::to_wstring(cmd)); break;
+        case UIA_IsEnabledPropertyId: BoolOf(value, all[k].enabled); break;
+        case UIA_IsKeyboardFocusablePropertyId: case UIA_HasKeyboardFocusPropertyId: BoolOf(value, false); break;
+        case UIA_IsControlElementPropertyId: case UIA_IsContentElementPropertyId: BoolOf(value, true); break;
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE get_HostRawElementProvider(IRawElementProviderSimple** out) override {
+        *out = nullptr;  // drawn on the document's canvas: no window of its own
+        return S_OK;
+    }
+
+    // ---- IRawElementProviderFragment: a leaf, between its neighbours in the chrome
+    HRESULT STDMETHODCALLTYPE Navigate(NavigateDirection dir, IRawElementProviderFragment** out) override {
+        *out = nullptr;
+        if (dir == NavigateDirection_Parent) return RootAs(out);
+        if (dir != NavigateDirection_NextSibling && dir != NavigateDirection_PreviousSibling) return S_OK;
+        ChromeButton all[kMaxButtons];
+        int n, k = Find(all, &n), j = k + (dir == NavigateDirection_NextSibling ? 1 : -1);
+        if (k >= 0 && j >= 0 && j < n) *out = new Button(all[j].cmd);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetRuntimeId(SAFEARRAY** out) override {
+        *out = Ints({UiaAppendRuntimeId, 2, (int)cmd});
+        return *out ? S_OK : E_OUTOFMEMORY;
+    }
+    HRESULT STDMETHODCALLTYPE get_BoundingRectangle(UiaRect* out) override {
+        *out = UiaRect{};
+        ChromeButton all[kMaxButtons];
+        int n, k = Find(all, &n);
+        if (k < 0) return UIA_E_ELEMENTNOTAVAILABLE;
+        float s = Scale();
+        POINT p{(LONG)std::lround(all[k].l * s), (LONG)std::lround(all[k].t * s)};
+        ClientToScreen(g.hwnd, &p);
+        *out = UiaRect{(double)p.x, (double)p.y, std::round((all[k].r - all[k].l) * s), std::round((all[k].b - all[k].t) * s)};
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetEmbeddedFragmentRoots(SAFEARRAY** out) override {
+        *out = nullptr;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE SetFocus() override { return S_OK; }  // the keyboard stays in the document
+    HRESULT STDMETHODCALLTYPE get_FragmentRoot(IRawElementProviderFragmentRoot** out) override { return RootAs(out); }
+
+    // ---- IInvokeProvider: posted, so the call returns at once even when the command opens a dialog (Save As)
+    HRESULT STDMETHODCALLTYPE Invoke() override {
+        ChromeButton all[kMaxButtons];
+        int n, k = Find(all, &n);
+        if (k < 0) return UIA_E_ELEMENTNOTAVAILABLE;
+        if (!all[k].enabled) return UIA_E_ELEMENTNOTENABLED;
+        PostMessageW(g.hwnd, WM_COMMAND, cmd, 0);
+        if (UiaClientsAreListening()) UiaRaiseAutomationEvent(this, UIA_Invoke_InvokedEventId);
         return S_OK;
     }
 };
@@ -321,17 +497,19 @@ struct DocumentProvider final : IRawElementProviderSimple, IRawElementProviderFr
         return UiaHostProviderFromHwnd(g.hwnd, out);
     }
 
-    // ---- IRawElementProviderFragment: one element, no children
-    HRESULT STDMETHODCALLTYPE Navigate(NavigateDirection, IRawElementProviderFragment** out) override {
+    // ---- IRawElementProviderFragment: the root; its children are edit mode's buttons, while there are any
+    HRESULT STDMETHODCALLTYPE Navigate(NavigateDirection dir, IRawElementProviderFragment** out) override {
         *out = nullptr;
+        if (dir == NavigateDirection_FirstChild || dir == NavigateDirection_LastChild) {
+            ChromeButton b[kMaxButtons];
+            int n = EditChromeButtons(b, kMaxButtons);
+            if (n) *out = new Button(b[dir == NavigateDirection_FirstChild ? 0 : n - 1].cmd);
+        }
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetRuntimeId(SAFEARRAY** out) override {
-        int id[] = {UiaAppendRuntimeId, 1};
-        *out = SafeArrayCreateVector(VT_I4, 0, 2);
-        if (!*out) return E_OUTOFMEMORY;
-        for (LONG i = 0; i < 2; i++) SafeArrayPutElement(*out, &i, &id[i]);
-        return S_OK;
+        *out = Ints({UiaAppendRuntimeId, 1});
+        return *out ? S_OK : E_OUTOFMEMORY;
     }
     HRESULT STDMETHODCALLTYPE get_BoundingRectangle(UiaRect* out) override {
         RECT r{};
@@ -353,8 +531,17 @@ struct DocumentProvider final : IRawElementProviderSimple, IRawElementProviderFr
         return S_OK;
     }
 
-    // ---- IRawElementProviderFragmentRoot
-    HRESULT STDMETHODCALLTYPE ElementProviderFromPoint(double, double, IRawElementProviderFragment** out) override {
+    // ---- IRawElementProviderFragmentRoot: a button under the point, else the document
+    HRESULT STDMETHODCALLTYPE ElementProviderFromPoint(double x, double y, IRawElementProviderFragment** out) override {
+        POINT p{(LONG)x, (LONG)y};
+        ScreenToClient(g.hwnd, &p);
+        float s = Scale(), cx = p.x / s, cy = p.y / s;
+        ChromeButton b[kMaxButtons];
+        for (int k = 0, n = EditChromeButtons(b, kMaxButtons); k < n; k++)
+            if (cx >= b[k].l && cx < b[k].r && cy >= b[k].t && cy < b[k].b) {
+                *out = new Button(b[k].cmd);
+                return S_OK;
+            }
         *out = static_cast<IRawElementProviderFragment*>(this);
         AddRef();
         return S_OK;
@@ -431,6 +618,20 @@ void UiaDocumentChanged() {
 // the selection moved (mouse, keyboard, find): a screen reader follows it
 void UiaSelectionChanged() {
     if (g_root && UiaClientsAreListening()) UiaRaiseAutomationEvent(g_root, UIA_Text_TextSelectionChangedEventId);
+}
+
+// Edit mode's buttons came or went - the bar slid in or out, a strip showed or closed, the bar collapsed: a screen
+// reader that listens reads the document's children again (§12.8). Only a real change of the set is told.
+void UiaChromeChanged() {
+    if (!g_root || !UiaClientsAreListening()) return;
+    ChromeButton b[kMaxButtons];
+    int n = EditChromeButtons(b, kMaxButtons);
+    uint32_t sig = 2166136261u ^ (uint32_t)n;
+    for (int k = 0; k < n; k++) sig = (sig ^ b[k].cmd) * 16777619u;
+    if (sig == g_chromeSig) return;
+    g_chromeSig = sig;
+    int id[] = {UiaAppendRuntimeId, 1};
+    UiaRaiseStructureChangedEvent(g_root, StructureChangeType_ChildrenInvalidated, id, 2);
 }
 
 void UiaShutdown() {

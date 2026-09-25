@@ -1,0 +1,247 @@
+Links, the private clipboard format and the source popups (docs/EDIT-MODE.md §8.3, §7.11, §9.2; Phase 3b): Ctrl+K on a
+selection, at the caret and in a link of each kind, Remove link, the balanced slice FastMD copies for itself, and a
+popup's text written back into the object it edits (AtomSource: an image index, or b<block> for an object of its own;
+then the field). src holds the caret ‸ (or a selection ⟦ … ⟧); want the source afterwards; clip what Copy took. Each
+case also runs with CRLF line ends, inside a quote and inside a list item unless its flags say otherwise.
+
+=== link_selection (§8.3: the selection becomes the link's text; it stays selected)
+src: see ⟦the docs⟧ now
+do: Link("https://x.org/a")
+want: see [⟦the docs⟧](https://x.org/a) now
+
+=== link_trims_blanks (§8.3, §7.5 step 1: the blanks at the selection's edges stay outside the link)
+src: see⟦ the docs ⟧now
+do: Link("u")
+want: see [⟦the docs⟧](u) now
+
+=== link_dest_blanks (§8.3: an address with blanks in <…>)
+src: ⟦file⟧ here
+do: Link("my file.md")
+want: [⟦file⟧](<my file.md>) here
+
+=== link_dest_parens (§8.3: parentheses that balance stay bare, one that does not needs <…>)
+src: ⟦a⟧ b
+do: Link("x(1)")
+want: [⟦a⟧](x(1)) b
+
+=== link_dest_unbalanced (§8.3)
+src: ⟦a⟧ b
+do: Link("x)")
+want: [⟦a⟧](<x)>) b
+
+=== link_strips_inner (§8.3: links inside the selection lose their delimiters)
+src: ⟦a [b](u) c⟧ d
+do: Link("v")
+want: [⟦a b c⟧](v) d
+
+=== link_grows_over_bold (§8.3: a span half inside comes in whole)
+src: x **bo⟦ld** te⟧xt
+do: Link("u")
+want: x [**bo⟦ld** te⟧](u)xt
+
+=== link_escapes_brackets (§8.3: a bracket of the text is escaped)
+src: ⟦a]b⟧ c
+do: Link("u")
+want: [⟦a\]b⟧](u) c
+
+=== link_caret_inserts (§8.3: no selection, no link: the address linked to itself)
+src: see ‸here
+do: Link("https://a.b")
+want: see [https://a.b](https://a.b)‸here
+
+=== link_edit_dest (§8.3: in an inline link only the destination changes)
+src: a [li‸nk](old "t") b
+do: Link("new")
+want: a [li‸nk](new "t") b
+
+=== link_edit_empty_dest (§8.3)
+src: a [li‸nk]() b
+do: Link("new")
+want: a [li‸nk](new) b
+
+=== link_ref_needs_confirm (§8.3: a reference link's definition changes only once the notice was confirmed)
+src: a [li‸nk][r] b\n\n[r]: old\n
+do: Link("new")
+state: refused=refdef
+want: a [li‸nk][r] b\n\n[r]: old\n
+
+=== link_ref_confirmed (§8.3: the definition line gets the address)
+src: a [li‸nk][r] b\n\n[r]: old\n
+do: Link!("new")
+want: a [li‸nk][r] b\n\n[r]: new\n
+
+=== link_ref_shortcut (§8.3: [t] is defined by t, case and blanks aside)
+src: a [Li‸nk] b\n\n[link]: old\n
+do: Link!("new")
+want: a [Li‸nk] b\n\n[link]: new\n
+
+=== link_edit_autolink (§8.3: an autolink with another address becomes a link)
+src: see <http://a‸.b> now
+do: Link("http://c.d")
+want: see [http://a‸.b](http://c.d) now
+
+=== unlink_inline (§8.3)
+src: a [li‸nk](u) b
+do: Unlink
+want: a li‸nk b
+
+=== unlink_ref_keeps_def (§8.3: the definition stays)
+src: a [li‸nk][r] b\n\n[r]: u\n
+do: Unlink
+want: a li‸nk b\n\n[r]: u\n
+
+=== unlink_autolink_url (§8.3: escaped where it would link again)
+src: see <http://‸x.org> now
+do: Unlink
+want: see http\://‸x.org now
+
+=== unlink_autolink_mail (§8.3)
+src: mail <a@b‸.co> now
+do: Unlink
+want: mail a\@b‸.co now
+
+=== unlink_permissive_www (§8.3)
+src: go www.ex‸ample.com now
+do: Unlink
+want: go www\.ex‸ample.com now
+
+=== unlink_nothing (§8.3: no link at the caret)
+src: a‸ b
+do: Unlink
+state: refused=link
+want: a‸ b
+
+=== copy_balanced_bold (§7.11: `**br⟦own** fox⟧` → `**own** fox`)
+src: **br⟦own** fox⟧ end
+do: Copy
+clip: **own** fox
+want: **br⟦own** fox⟧ end
+
+=== copy_inside_bold (§7.11: a span around the selection around the slice too)
+src: a **b⟦c⟧d** e
+do: Copy
+clip: **c**
+want: a **b⟦c⟧d** e
+
+=== copy_blank_edges (§7.11, §7.5 step 1: blanks at the edges stay outside the delimiters the slice adds)
+src: a **b⟦ c⟧ d** e
+do: Copy
+clip: \s**c**
+want: a **b⟦ c⟧ d** e
+
+=== copy_blank_end (§7.11)
+src: x **a⟦b c ⟧d** y
+do: Copy
+clip: **b c**\s
+want: x **a⟦b c ⟧d** y
+
+=== copy_part_of_link (§7.11)
+src: a [li⟦nk te⟧xt](u) b
+do: Copy
+clip: [nk te](u)
+want: a [li⟦nk te⟧xt](u) b
+
+=== copy_items_whole (§7.11: blocks covered whole keep their markers)
+src: - ⟦one\n- two⟧\n
+do: Copy
+clip: - one\n- two
+want: - ⟦one\n- two⟧\n
+
+=== copy_heading_and_text (§7.11)
+src: # ⟦Title\n\npara⟧graph\n
+do: Copy
+clip: # Title\n\npara
+want: # ⟦Title\n\npara⟧graph\n
+
+=== copy_paste_private (§7.11: pasted inside FastMD it keeps its markup)
+src: **br⟦own** fox⟧ end\n\nnext\n
+do: Copy; click(17,1); PastePrivate
+clip: **own** fox
+want: **brown** fox end\n\nnext**own** fox‸\n
+
+=== atom_formula (§9.2: an inline formula's TeX)
+src: ‸a $x$ b
+tex: on
+do: AtomSource(0,0,"y+1")
+want: ‸a $y+1$ b
+
+=== atom_formula_one_line (§9.2: its line ends become blanks)
+src: ‸a $x$ b
+tex: on
+do: AtomSource(0,0,"p\nq")
+want: ‸a $p q$ b
+
+=== atom_formula_block (§9.2: the lines between `$$` and `$$`, each with the block's prefix)
+src: ‸para\n\n$$\nx\n$$\n
+tex: on
+do: AtomSource(b1,0,"a\nb")
+want: ‸para\n\n$$\na\nb\n$$\n
+
+=== atom_formula_block_one_line (§9.2)
+src: ‸para\n\n$$x$$\n
+tex: on
+do: AtomSource(b1,0,"z")
+want: ‸para\n\n$$z$$\n
+
+=== atom_diagram (§9.2: the content lines)
+src: ‸p\n\n```mermaid\ngraph TD\n```\n
+tex: on
+do: AtomSource(b1,0,"graph LR\n    A --> B")
+want: ‸p\n\n```mermaid\ngraph LR\n    A --> B\n```\n
+
+=== atom_diagram_fence (§9.2: a line that would close the fence makes both fences longer)
+src: ‸p\n\n```mermaid\ngraph TD\n```\n
+tex: on
+do: AtomSource(b1,0,"A\n```\nB")
+want: ‸p\n\n````mermaid\nA\n```\nB\n````\n
+
+=== atom_html (§9.2: an HTML block's lines)
+src: ‸p\n\n<div>\nx\n</div>\n
+do: AtomSource(b1,0,"<div>\ny\n</div>")
+want: ‸p\n\n<div>\ny\n</div>\n
+
+=== atom_front (§9.2: front matter's lines)
+src: ---\ntitle: a\n---\n\n‸text\n
+flags: noquote nolist
+do: AtomSource(b0,0,"title: b\nx: 1")
+want: ---\ntitle: b\nx: 1\n---\n\n‸text\n
+
+=== atom_front_dashes (§9.2: a --- line would end it: refused)
+src: ---\ntitle: a\n---\n\n‸text\n
+flags: noquote nolist
+do: AtomSource(b0,0,"x: 1\n---")
+state: refused=front
+want: ---\ntitle: a\n---\n\n‸text\n
+
+=== atom_image_path (§9.2, §8.8: the path as a destination)
+src: ‸a ![cat](c.png) b
+do: AtomSource(0,1,"my cat.png")
+want: ‸a ![cat](<my cat.png>) b
+
+=== atom_image_path_angle (§9.2: a destination in <…> is replaced with its brackets)
+src: ‸a ![cat](<my c.png>) b
+do: AtomSource(0,1,"c.png")
+want: ‸a ![cat](c.png) b
+
+=== atom_image_alt (§9.2: a bracket of the alt text is escaped)
+src: ‸a ![cat](c.png) b
+do: AtomSource(0,0,"big]cat")
+want: ‸a ![big\]cat](c.png) b
+
+=== atom_source_keeps_phantom (§6.7, the final gate: a phantom the caret is in stays beside its block while an object before it is rewritten - the fuzz's walk typed into its old place)
+src: a $x$ b\n\nla‸st\n
+tex: on
+do: C-Enter; AtomSource(0,0,"y+1"); type "z"
+want: a $y+1$ b\n\nlast\n\nz‸\n
+
+=== atom_source_keeps_phantom_beside (§6.7, §9.2, the final gate: the object in the phantom's own block, the caret back in it, as when a popup is open)
+src: a $x$ b‸\n
+tex: on
+flags: nolist
+do: Enter; Back; AtomSource(0,0,"y+1"); Phantom; type "z"
+want: a $y+1$ b\n\nz‸\n
+
+=== image_several (§8.8: several pictures, one after the other)
+src: a ‸b
+do: Image("x.png\ny.png","x\ny")
+want: a ![x](x.png) ![y](y.png)‸b

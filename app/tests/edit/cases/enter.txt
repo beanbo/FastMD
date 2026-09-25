@@ -1,0 +1,418 @@
+Enter, Shift+Enter and Ctrl+Enter (docs/EDIT-MODE.md §7.6), the phantom rows they make and how typing makes those real
+(§6.7), soft and hard breaks under them (§6.6). src holds the caret ‸ (or a selection ⟦ … ⟧); `do` lists the operations
+(`Phantom` puts the caret into the phantom row, as ↑ / ↓ do in the app); want is the source after them with the caret
+where the glue puts it (normalised: where typed text would go - so before a link's `[`, a code span's backtick); phantom
+is where a phantom row stands afterwards (the block it is next to, `in` when the caret is in it). Each case also runs
+with CRLF line ends, inside a quote and inside a list item unless its flags say otherwise.
+
+=== enter_para (§7.6 paragraph: ab‸cd → ab⏎⏎‸cd)
+src: ab‸cd\n
+flags: nolist
+do: Enter
+want: ab\n\n‸cd\n
+
+=== enter_second_para (§7.6: the same as the second paragraph of a loose item in the list variant)
+src: x\n\nab‸cd\n
+do: Enter
+want: x\n\nab\n\n‸cd\n
+
+=== enter_in_bold (§7.6: a span open at the split is closed before the break and opened again after it)
+src: **bold ‸text**\n
+flags: nolist
+do: Enter
+want: **bold**\n\n**‸text**\n
+
+=== enter_in_link (§7.6: a link duplicates its closer; the caret stands where typing goes, before the `[`)
+src: [link ‸text](https://x)\n
+flags: nolist
+do: Enter
+want: [link](https://x)\n\n‸[text](https://x)\n
+
+=== enter_in_code_span (§7.6: a code span reuses its backtick run)
+src: `a ‸b`\n
+flags: nolist
+do: Enter
+want: `a`\n\n‸`b`\n
+
+=== enter_nested_spans (§7.6: closed innermost first, opened outermost first)
+src: **[li‸nk](u)** x\n
+flags: nolist
+do: Enter
+want: **[li](u)**\n\n**‸[nk](u)** x\n
+
+=== enter_para_end (§7.6: at a paragraph's end the source stays; a phantom row after it, the caret in it)
+src: abcd‸\n
+flags: nolist
+do: Enter
+want: abcd‸\n
+phantom: after 0 in
+
+=== enter_para_start (§7.6, UX-7: at its start a phantom before it; the caret stays with the text)
+src: ‸abcd\n
+flags: nolist
+do: Enter
+want: ‸abcd\n
+phantom: before 0
+
+=== enter_soft_break_left (§6.6, §7.6: at a soft break's left edge the break's source is replaced)
+src: one‸\ntwo\n
+flags: nolist
+do: Enter
+want: one\n\n‸two\n
+
+=== enter_soft_break_right (§6.6, §7.6: the same at its right edge)
+src: one\n‸two\n
+flags: nolist
+do: Enter
+want: one\n\n‸two\n
+
+=== enter_hard_break (§6.6: a hard break's source is replaced too)
+src: one\\\n‸two\n
+flags: nolist
+do: Enter
+want: one\n\n‸two\n
+
+=== enter_quote (§7.6 quote: > ab‸cd → > ab⏎>⏎> ‸cd)
+src: > ab‸cd\n
+do: Enter
+want: > ab\n>\n> ‸cd\n
+
+=== enter_nested_quote (§7.6 nested quote)
+src: > > ab‸cd\n
+do: Enter
+want: > > ab\n> >\n> > ‸cd\n
+
+=== enter_atx (§7.6: the closing sequence stays with the heading; the second half is a paragraph)
+src: ## Ti‸tle ##\n
+flags: nolist
+do: Enter
+want: ## Ti ##\n\n‸tle\n
+
+=== enter_atx_plain (§7.6: an ATX heading without a closing sequence)
+src: # Ti‸tle\n
+flags: nolist
+do: Enter
+want: # Ti\n\n‸tle\n
+
+=== enter_atx_end (§7.6: at a heading's end, a phantom after it)
+src: ## Title‸\n
+flags: nolist
+do: Enter
+want: ## Title‸\n
+phantom: after 0 in
+
+=== enter_atx_start (§7.6: at a heading's start, a phantom before it)
+src: ## ‸Title\n
+flags: nolist
+do: Enter
+want: ## ‸Title\n
+phantom: before 0
+
+=== enter_setext (§7.6: a setext heading is made ATX first)
+src: Ti‸tle\n=====\n
+flags: nolist
+do: Enter
+want: # Ti\n\n‸tle\n
+
+=== enter_setext_multiline (§7.6: its lines are joined, a soft break as a blank)
+src: Line one\nLi‸ne two\n---\n
+flags: nolist
+do: Enter
+want: ## Line one Li\n\n‸ne two\n
+
+=== enter_tight_item (§7.6 tight bullet item)
+src: - ab‸cd\n- x\n
+do: Enter
+want: - ab\n- ‸cd\n- x\n
+
+=== enter_loose_item (§7.6 loose bullet item)
+src: - ab‸cd\n\n- x\n
+do: Enter
+want: - ab\n\n- ‸cd\n\n- x\n
+
+=== enter_ordered (§7.6 ordered item: the next number; later numbers untouched)
+src: 1. ab‸cd\n
+do: Enter
+want: 1. ab\n2. ‸cd\n
+
+=== enter_ordered_paren (§7.6: 9) → 10))
+src: 9) ab‸cd\n
+do: Enter
+want: 9) ab\n10) ‸cd\n
+
+=== enter_task (§7.6, F16: a task item's new box is unticked)
+src: - [x] ab‸cd\n
+do: Enter
+want: - [x] ab\n- [ ] ‸cd\n
+
+=== enter_task_numbered (§7.6: a numbered task item)
+src: 1. [ ] ab‸cd\n
+do: Enter
+want: 1. [ ] ab\n2. [ ] ‸cd\n
+
+=== enter_item_end (§7.6: at an item's end an empty item is written)
+src: - abcd‸\n
+do: Enter
+want: - abcd\n- ‸\n
+
+=== enter_item_start (§7.6: at a non-empty item's start an empty item before it; the caret stays with its text)
+src: - ‸abcd\n
+do: Enter
+want: - \n- ‸abcd\n
+
+=== enter_item_children (§7.6: the children follow the second half)
+src: - ab‸cd\n  - child\n
+do: Enter
+want: - ab\n- ‸cd\n  - child\n
+
+=== enter_empty_last_item (§7.6: an empty last item goes; a phantom at the list's own level)
+src: - a\n- ‸\n
+flags: nolist
+do: Enter
+want: - a‸\n
+phantom: after 0 in
+
+=== enter_empty_middle_item (§7.6: an empty middle item goes; the phantom stands between the items)
+src: - a\n- ‸\n- b\n
+flags: nolist
+do: Enter
+want: - a‸\n- b\n
+phantom: after 0 in
+
+=== enter_empty_middle_item_typed (§7.6, F18: typed into, blank lines on both sides at the list's level)
+src: - a\n- ‸\n- b\n
+flags: nolist
+do: Enter; type "x"
+want: - a\n\nx‸\n\n- b\n
+
+=== enter_empty_nested_item (§7.6: an empty nested item moves one level out)
+src: - a\n  - b\n  - ‸\n
+do: Enter
+want: - a\n  - b\n- ‸\n
+
+=== enter_loose_second_para (§7.6: the second paragraph of a loose item)
+src: - a\n\n  ab‸cd\n
+do: Enter
+want: - a\n\n  ab\n\n  ‸cd\n
+
+=== enter_item_in_quote (§7.6: an item in a quote)
+src: > - ab‸cd\n
+do: Enter
+want: > - ab\n> - ‸cd\n
+
+=== enter_alert_body (§7.6: an alert's text is a quote's)
+src: > [!NOTE]\n> ab‸cd\n
+do: Enter
+want: > [!NOTE]\n> ab\n>\n> ‸cd\n
+
+=== enter_fenced (§7.6: a new line in code)
+src: ```\nco‸de\n```\n
+do: Enter
+want: ```\nco\n‸de\n```\n
+
+=== enter_fenced_indented_line (§7.6: the line's code indentation is repeated)
+src: ```\n    return 1‸\n```\n
+do: Enter
+want: ```\n    return 1\n    ‸\n```\n
+
+=== enter_fenced_in_list (§7.6, F4: the indentation counted after the container prefix)
+src: - x\n  ```\n  co‸de\n  ```\n
+do: Enter
+want: - x\n  ```\n  co\n  ‸de\n  ```\n
+
+=== enter_fenced_last_line_end (§7.6, F4: the empty last line stays a line of its own)
+src: ```\nfoo‸\n```\n
+do: Enter
+want: ```\nfoo\n‸\n```\n
+
+=== enter_indented_code (§7.6: indented code keeps its four columns)
+src: \s\s\s\sco‸de\n
+flags: nolist
+do: Enter
+want: \s\s\s\sco\n    ‸de\n
+
+=== enter_code_shift (§7.6: Shift+Enter in code is Enter)
+src: ```\nco‸de\n```\n
+do: S-Enter
+want: ```\nco\n‸de\n```\n
+
+=== enter_table_next_row (§7.6: the caret to the same column of the next row; the source stays)
+src: | a‸ | b |\n|---|---|\n| c | d |\n
+do: Enter
+want: | a | b |\n|---|---|\n| ‸c | d |\n
+
+=== enter_table_last_row (§7.6, §7.10: a new row after the last, the caret in its cell of that column)
+src: | a | b |\n|---|---|\n| x | y‸ |\n
+do: Enter
+want: | a | b |\n|---|---|\n| x | y |\n|  | ‸ |\n
+
+=== enter_table_empty_last_row (§7.6, UX-3: an empty last row goes; a phantom after the table)
+src: | a | b |\n|---|---|\n| x | y |\n| ‸ |  |\n
+do: Enter
+want: | a | b |\n|---|---|\n| x | y |‸\n
+phantom: after 0 in
+
+=== enter_footnote (§7.6, F5: a definition is one paragraph: Enter is Shift+Enter)
+src: Text[^a].\n\n[^a]: No‸te\n
+flags: noquote nolist
+do: Enter
+want: Text[^a].\n\n[^a]: No\\\n‸te\n
+
+=== enter_hr_selected (§7.6: Enter on a selected rule: a phantom after it)
+src: abc‸\n\n---\n
+flags: noquote nolist
+do: Del; Enter
+want: abc\n\n---‸\n
+phantom: after 1 in
+
+=== enter_selection_in_block (§7.6: over a selection inside a block, the selection is what the split removes)
+src: ab⟦xx⟧cd\n
+flags: nolist
+do: Enter
+want: ab\n\n‸cd\n
+
+=== senter_para (§7.6 Shift+Enter: a backslash hard break)
+src: ab‸cd\n
+do: S-Enter
+want: ab\\\n‸cd\n
+
+=== senter_quote (§7.6 Shift+Enter in a quote)
+src: > ab‸cd\n
+do: S-Enter
+want: > ab\\\n> ‸cd\n
+
+=== senter_item (§7.6 Shift+Enter in an item: the continuation indent)
+src: - ab‸cd\n
+do: S-Enter
+want: - ab\\\n  ‸cd\n
+
+=== senter_soft_break (§6.6: at a soft break it becomes a hard break)
+src: one‸\ntwo\n
+do: S-Enter
+want: one\\\n‸two\n
+
+=== senter_in_bold (§7.6: the span goes on over the hard break)
+src: **bold ‸text**\n
+do: S-Enter
+want: **bold\\\n‸text**\n
+
+=== senter_block_end (§6.6, §6.7: at a block's end a pending hard break; nothing is written yet)
+src: abcd‸\n
+do: S-Enter
+want: abcd‸\n
+phantom: break 0 in
+
+=== senter_block_end_typed (§6.7: the first character writes it)
+src: abcd‸\n
+do: S-Enter; type "x"
+want: abcd\\\nx‸\n
+
+=== senter_atx (§7.6, UX-20: in an ATX heading a <br>)
+src: # Ti‸tle\n
+do: S-Enter
+want: # Ti<br>‸tle\n
+
+=== senter_atx_end_typed (§6.7: a pending break at an ATX heading's end is a <br>)
+src: # Title‸\n
+do: S-Enter; type "x"
+want: # Title<br>x‸\n
+
+=== senter_setext (§7.6: a setext heading is made ATX first)
+src: Ti‸tle\n===\n
+flags: nolist
+do: S-Enter
+want: # Ti<br>‸tle\n
+
+=== senter_cell (§7.6: in a cell a <br>)
+src: | a‸b |\n|---|\n
+do: S-Enter
+want: | a<br>‸b |\n|---|\n
+
+=== senter_footnote (§7.6: a definition's hard break)
+src: Text[^a].\n\n[^a]: No‸te\n
+flags: noquote nolist
+do: S-Enter
+want: Text[^a].\n\n[^a]: No\\\n‸te\n
+
+=== center_para (§7.6 Ctrl+Enter: a new paragraph after the block; the source stays)
+src: ab‸cd\n
+do: C-Enter
+want: abcd‸\n
+phantom: after 0 in
+
+=== center_item_typed (§7.6: in an item a continuation paragraph of the item)
+src: - ab‸cd\n
+do: C-Enter; type "x"
+want: - abcd\n\n  x‸\n
+
+=== center_code_typed (§7.6: after a code block, after its closing fence)
+src: ```\nco‸de\n```\n
+do: C-Enter; type "x"
+want: ```\ncode\n```\n\nx‸\n
+
+=== center_then_enter_pops (§7.6, F18: Enter in that empty phantom pops a level)
+src: - ab‸cd\n
+flags: nolist
+do: C-Enter; Enter; type "x"
+want: - abcd\n\nx‸\n
+
+=== phantom_after_typed (§6.7: `abc‸⏎⏎def` Enter, type x)
+src: abc‸\n\ndef\n
+flags: nolist
+do: Enter; type "x"
+want: abc\n\nx‸\n\ndef\n
+
+=== phantom_after_heading_typed (§6.7: blank lines on both sides of the new paragraph)
+src: # T‸\ndef\n
+flags: nolist
+do: Enter; type "x"
+want: # T\n\nx‸\n\ndef\n
+
+=== phantom_before_typed (§6.7: `# Title` Enter at its start, ↑, type x)
+src: # ‸Title\n
+flags: nolist
+do: Enter; Phantom; type "x"
+want: x‸\n\n# Title\n
+
+=== phantom_quote_typed (§6.7: > abc‸ Enter, type x → > abc⏎>⏎> x‸)
+src: > abc‸\n
+do: Enter; type "x"
+want: > abc\n>\n> x‸\n
+
+=== phantom_quote_pops (§6.7: a second Enter in the empty phantom pops out of the quote)
+src: > abc‸\n
+flags: noquote
+do: Enter; Enter; type "x"
+want: > abc\n\nx‸\n
+
+=== phantom_enter_nothing (§6.7: Enter in an empty phantom at the top level does nothing)
+src: abc‸\n
+flags: nolist
+do: Enter; Enter
+want: abc‸\n
+phantom: after 0 in
+
+=== phantom_blank_dropped (§6.5: a blank at a phantom's first position is dropped)
+src: abc‸\n
+flags: nolist
+do: Enter; type " "
+want: abc‸\n
+phantom: after 0 in
+
+=== phantom_break_then_enter (§6.7: Enter in a pending hard break makes a new paragraph instead)
+src: abc‸\n
+flags: nolist
+do: S-Enter; Enter; type "x"
+want: abc\n\nx‸\n
+
+=== phantom_before_survives_typing (§6.7, UX-7: it lives while the caret is in its block)
+src: ‸abc\n
+flags: nolist
+do: Enter; type "x"
+want: x‸abc\n
+phantom: before 0
+
+=== phantom_paste (§6.7, §7.11: a paste makes it real too, its lines prefixed)
+src: > abc‸\n
+do: Enter; Paste("x\ny")
+want: > abc\n>\n> x\n> y‸\n

@@ -1,0 +1,263 @@
+Backspace at the start of a block and Delete at its end (docs/EDIT-MODE.md §7.7): the matrix of what happens there -
+headings and list items give up their marks, quotes a level, text blocks are joined, code, tables and objects are
+stepped onto - and §7.5's normalisation of what meets where text went (spans of one kind merge, blanks leave a span).
+Format as in enter.txt; each case also runs with CRLF, in a quote and in a list item unless flagged.
+
+=== bs_atx_to_para (§7.7: an ATX heading's marks go; a paragraph, escaped where it would be a list, §7.4)
+src: # ‸1. Intro\n
+do: BS
+want: ‸1\\. Intro\n
+
+=== bs_atx_closing (§7.7: the closing sequence goes too)
+src: ## ‸Title ##\n
+do: BS
+want: ‸Title\n
+
+=== bs_setext_to_para (§7.7: a setext heading's underline goes)
+src: ‸Title\n===\n
+do: BS
+want: ‸Title\n
+
+=== bs_empty_atx (§7.7: an empty heading's line and one blank line go; the caret to the end before)
+src: abc\n\n#‸\n
+do: BS
+want: abc‸\n
+
+=== bs_item_tight (§7.7, UX-21: in a tight list the marker becomes a hard break in the item before)
+src: - молоко\n- ‸хлеб\n
+do: BS
+want: - молоко\\\n  ‸хлеб\n
+
+=== bs_item_loose (§7.7, F16: in a loose one the item before gets a paragraph)
+src: - a\n\n- ‸b\n
+do: BS
+want: - a\n\n  ‸b\n
+
+=== bs_first_item (§7.7, F16: the first item of a top-level list becomes a paragraph, a blank line before the next)
+src: 1. ‸a\n2. b\n
+do: BS
+want: ‸a\n\n2. b\n
+
+=== bs_nested_first_item (§7.7: the first item of a nested list: a hard break into the parent item)
+src: - p\n  - ‸a\n
+do: BS
+want: - p\\\n  ‸a\n
+
+=== bs_empty_item (§7.7: an empty item's line goes; the caret to the end before)
+src: - a\n- ‸\n
+do: BS
+want: - a‸\n
+
+=== bs_alert_to_quote (§7.7: the first text of an alert: its tag goes, a plain quote stays)
+src: > [!NOTE]\n> ‸Text\n
+flags: noquote nolist
+do: BS
+want: > ‸Text\n
+
+=== bs_one_line_alert (§7.7: a one-line alert loses its tag and the blanks after it)
+src: > [!NOTE] ‸Text\n
+flags: noquote nolist
+do: BS
+want: > ‸Text\n
+
+=== bs_quote_strip (§7.7, F15: the first block of a quote loses one level on every line)
+src: > ‸line one\n> line two\n
+do: BS
+want: ‸line one\nline two\n
+
+=== bs_nested_quote_strip (§7.7: only the innermost level)
+src: > > ‸a\n> > b\n
+do: BS
+want: > ‸a\n> b\n
+
+=== bs_footnote_nothing (§7.7, F5: at a definition's start nothing happens)
+src: Text[^a].\n\n[^a]: ‸Note\n
+flags: noquote nolist
+do: BS
+want: Text[^a].\n\n[^a]: ‸Note\n
+
+=== bs_empty_code (§7.7: an empty code block goes whole; the caret to the end of the block before)
+src: abc\n\n```‸\n```\n
+do: BS
+want: abc‸\n
+
+=== bs_code_nonempty (§7.7: at a non-empty code block's start the caret goes to the block before)
+src: abc\n\n```\n‸code\n```\n
+do: BS
+want: abc‸\n\n```\ncode\n```\n
+
+=== bs_table_cell (§7.7: in a cell the caret goes to the end of the cell before; nothing is deleted)
+src: | a | b |\n|---|---|\n| c | ‸d |\n
+do: BS
+want: | a | b |\n|---|---|\n| c‸ | d |\n
+
+=== bs_table_first_cell (§7.7: in the first cell, to the end of the block before the table)
+src: abc\n\n| ‸a |\n|---|\n
+do: BS
+want: abc‸\n\n| a |\n|---|\n
+
+=== bs_join (§7.7, F6: two paragraphs are joined)
+src: abc\n\n‸def\n
+do: BS
+want: abc‸def\n
+
+=== bs_join_trailing_blanks (§7.7: the trailing blanks of the first go with the gap)
+src: abc  \n\n‸def\n
+do: BS
+want: abc‸def\n
+
+=== bs_join_atx (§7.7, F15: into an ATX heading, soft breaks become blanks)
+src: # Head\n\n‸l1\nl2\n
+do: BS
+want: # Head‸l1 l2\n
+
+=== bs_join_atx_hard_break (§7.7, F15: and hard breaks <br>)
+src: # Head\n\n‸l1\\\nl2\n
+do: BS
+want: # Head‸l1<br>l2\n
+
+=== bs_join_atx_closing (§7.7: the heading's closing sequence moves after the joined text)
+src: # Head #\n\n‸tail\n
+do: BS
+want: # Head‸tail #\n
+
+=== bs_join_setext (§7.7: into a setext heading, its underline moves after the joined text)
+src: Title\n===\n\n‸def\n
+flags: nolist
+do: BS
+want: Title‸def\n===\n
+
+=== bs_join_invisible (§7.7, F6: a reference definition between them moves after the joined block)
+src: See [x].\n\n[x]: u\n\n‸Next\n
+do: BS
+want: See [x].‸Next\n\n[x]: u\n
+
+=== bs_join_comment (§7.7: so does a comment)
+src: abc\n\n<!-- note -->\n\n‸def\n
+flags: nolist
+do: BS
+want: abc‸def\n\n<!-- note -->\n
+
+=== bs_join_item_text (§7.7: the second paragraph of an item joins its first)
+src: - a\n\n  ‸b\n
+do: BS
+want: - a‸b\n
+
+=== bs_join_into_quote (§7.7: a paragraph after a quote joins it; its lines take the quote's prefix)
+src: > abc\n\n‸def\nghi\n
+flags: noquote
+do: BS
+want: > abc‸def\n> ghi\n
+
+=== bs_after_code (§7.7: after code the caret goes to its last stop; nothing is deleted)
+src: ```\ncode\n```\n\n‸abc\n
+do: BS
+want: ```\ncode‸\n```\n\nabc\n
+
+=== bs_after_table (§7.7: after a table, to its last cell's end)
+src: | a |\n|---|\n\n‸abc\n
+do: BS
+want: | a‸ |\n|---|\n\nabc\n
+
+=== bs_first_block_nothing (§7.7: nothing before it: nothing)
+src: ‸abc\n
+flags: noquote nolist
+do: BS
+want: ‸abc\n
+
+=== bs_merge_join (§7.5: `**bold1**` and `**bold2**` joined become one span)
+src: **bold1**\n\n‸**bold2**\n
+do: BS
+want: **bold1‸bold2**\n
+
+=== bs_merge_inline (§7.5: `*a* ‸*b*` Backspace → `*ab*`)
+src: *a* ‸*b*\n
+do: BS
+want: *a‸b*\n
+
+=== bs_normalise_closer (§7.5 step 1: `**bold x**` Backspace after x → `**bold**` + a blank)
+src: **bold x‸**\n
+do: BS
+want: **bold** ‸\n
+
+=== del_normalise_opener (§7.5 step 1: the opener moves after the blanks)
+src: a **‸x bold**\n
+do: Del
+want: a  ‸**bold**\n
+
+=== del_join_heading (§7.7: a heading's marks go with the gap)
+src: abc‸\n\n# Head\n
+do: Del
+want: abc‸Head\n
+
+=== del_join_items (§7.7: the next item's marker goes with the gap)
+src: - a‸\n- b\n
+do: Del
+want: - a‸b\n
+
+=== del_join_closing (§7.7: the next heading's closing sequence goes too)
+src: abc‸\n\n## Head ##\n
+do: Del
+want: abc‸Head\n
+
+=== del_join_setext (§7.7: and a setext heading's underline)
+src: abc‸\n\nTitle\n===\n
+flags: nolist
+do: Del
+want: abc‸Title\n
+
+=== del_join_quote_lines (§7.7: the next quote's lines take this block's prefix)
+src: abc‸\n\n> def\n> ghi\n
+flags: noquote
+do: Del
+want: abc‸def\nghi\n
+
+=== del_join_into_atx (§7.7, F15: into an ATX heading the next block is one line)
+src: # Head‸\n\nl1\nl2\n
+do: Del
+want: # Head‸l1 l2\n
+
+=== del_footnote_nothing (§7.7: before a definition nothing happens)
+src: Text[^a].‸\n\n[^a]: Note\n
+flags: noquote nolist
+do: Del
+want: Text[^a].‸\n\n[^a]: Note\n
+
+=== del_before_code (§7.7: before code, the caret to its first stop)
+src: abc‸\n\n```\ncode\n```\n
+do: Del
+want: abc\n\n```\n‸code\n```\n
+
+=== del_table_cell (§7.7: at a cell's end, the caret to the next cell's start)
+src: | a ‸| b |\n|---|---|\n
+do: Del
+want: | a | ‸b |\n|---|---|\n
+
+=== del_code_end (§7.7: at the end of code's last line, the caret to the next block)
+src: ```\ncode‸\n```\n\nabc\n
+do: Del
+want: ```\ncode\n```\n\n‸abc\n
+
+=== del_last_block_nothing (§7.7: nothing after it: nothing)
+src: abc‸\n
+flags: nolist
+do: Del
+want: abc‸\n
+
+=== del_phantom (§6.7: Delete in an empty phantom drops it; the caret to the next block's start)
+src: abc‸\n\ndef\n
+flags: nolist
+do: Enter; Del
+want: abc\n\n‸def\n
+
+=== bs_phantom_drop (§6.7: Backspace in an empty phantom drops it; the caret back to the block's end)
+src: abc‸\n\ndef\n
+flags: noquote nolist
+do: Enter; BS
+want: abc‸\n\ndef\n
+
+=== bs_phantom_pops (§6.7: in a quote it moves out one level first)
+src: > abc‸\n
+flags: noquote
+do: Enter; BS; type "x"
+want: > abc\n\nx‸\n

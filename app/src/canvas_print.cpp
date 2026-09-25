@@ -119,13 +119,14 @@ struct PrintCanvas final : RendererCanvas {
     // The page has no pixels to read back, so a picture with transparency is composed over the page colour first, at
     // its own size, and the printer driver scales it to the box.
     void DrawImage(::Image& im, float l, float t, float r, float b) override {
-        if (im.state.load() != 2 || im.pxW <= 0 || im.pxH <= 0 || im.px.size() < (size_t)im.pxW * im.pxH) return;
+        const Pixels* pix = im.pix.get();
+        if (!pix || pix->pxW <= 0 || pix->pxH <= 0 || pix->px.size() < (size_t)pix->pxW * pix->pxH) return;
         int x0 = D(l), y0 = D(t), x1 = D(r), y1 = D(b);
         if (x1 <= x0 || y1 <= y0) return;
         uint32_t bg = g_pal[P_BG];
-        tmp.resize((size_t)im.pxW * im.pxH);
+        tmp.resize((size_t)pix->pxW * pix->pxH);
         for (size_t i = 0; i < tmp.size(); i++) {  // premultiplied BGRA over the page colour
-            uint32_t sp = im.px[i], a = sp >> 24;
+            uint32_t sp = pix->px[i], a = sp >> 24;
             if (a == 255) { tmp[i] = sp & 0xffffff; continue; }
             uint32_t ia = 255 - a;
             uint32_t rb = (sp & 0xff00ff) + ((((bg & 0xff00ff) * ia) >> 8) & 0xff00ff);
@@ -134,12 +135,12 @@ struct PrintCanvas final : RendererCanvas {
         }
         BITMAPINFO bi{};
         bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
-        bi.bmiHeader.biWidth = im.pxW;
-        bi.bmiHeader.biHeight = -im.pxH;  // top-down
+        bi.bmiHeader.biWidth = pix->pxW;
+        bi.bmiHeader.biHeight = -pix->pxH;  // top-down
         bi.bmiHeader.biPlanes = 1;
         bi.bmiHeader.biBitCount = 32;
         bi.bmiHeader.biCompression = BI_RGB;
-        StretchDIBits(dc, x0, y0, x1 - x0, y1 - y0, 0, 0, im.pxW, im.pxH, tmp.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
+        StretchDIBits(dc, x0, y0, x1 - x0, y1 - y0, 0, 0, pix->pxW, pix->pxH, tmp.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
     }
     void PushClip(float l, float t, float r, float b) override {
         SaveDC(dc);

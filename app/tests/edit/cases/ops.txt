@@ -1,0 +1,469 @@
+The operations of Phase 2a (docs/EDIT-MODE.md §6.3, §6.5, §6.6, §7.3, §7.7 in a block, §7.9 in a block, §8.10): typing
+at a caret, Backspace and Delete inside a block, a selection inside one block, a task box. src holds the caret ‸ (or a
+selection ⟦ … ⟧, anchor first); `do` lists the operations; want is the source after them, with the caret where the glue
+puts it (normalised: where typed text would go next). Each case also runs with CRLF line ends, inside a quote and inside a
+list item. Phase 2b's structure (Enter, joins across blocks, selections across blocks, escaping) is in the other files.
+
+=== type_bold_end (§6.3 **bold‸** tail: typing continues the bold)
+src: **bold‸** tail\n
+do: type "x"
+want: **boldx‸** tail\n
+
+=== type_before_bold (§6.3 plain ‸**bold**)
+src: plain ‸**bold**\n
+do: type "x"
+want: plain x‸**bold**\n
+
+=== type_block_start_bold (§6.3 ‸**Bold** at the block start: inside the enterable opener)
+src: ‸**Bold** text\n
+do: type "x"
+want: **x‸Bold** text\n
+
+=== type_before_link (§6.3 see ‸[Docs](u))
+src: see ‸[Docs](u)\n
+do: type "x"
+want: see x‸[Docs](u)\n
+
+=== type_link_end (§6.3 [Docs‸](u) more: never inside a link from its right edge)
+src: [Docs‸](u) more\n
+do: type "x"
+want: [Docs](u)x‸ more\n
+
+=== type_block_start_link (§6.3 ‸[Docs](u) at the block start: outside the link)
+src: ‸[Docs](u) are\n
+do: type "x"
+want: x‸[Docs](u) are\n
+
+=== type_before_code (§6.3 run ‸`make`)
+src: run ‸`make`\n
+do: type "x"
+want: run x‸`make`\n
+
+=== type_code_end (§6.3 `make‸` now: never inside code from its right edge)
+src: `make‸` now\n
+do: type "x"
+want: `make`x‸ now\n
+
+=== type_link_in_bold (§6.3 **[x‸](u)** y)
+src: **[x‸](u)** y\n
+do: type "x"
+want: **[x](u)x‸** y\n
+
+=== type_bold_in_link_end (§6.3 [**x‸**](u) at the block end)
+src: [**x‸**](u)\n
+do: type "x"
+want: [**x**](u)x‸\n
+
+=== type_formula_end_blank (§6.3, §7.3 step 5: the $E$‸ is + x fails the check, then a separating blank)
+src: the $E$‸ is\n
+tex: on
+do: type "x"
+want: the $E$ x‸ is\n
+
+=== type_after_closer (§7.3 step 5: **API‸**s + . renders only after the closer)
+src: **API‸**s\n
+do: type "."
+want: **API**.‸s\n
+
+=== type_word (§7.3: plain typing, a word)
+src: one ‸two\n
+do: type "a"; type "b"; type "c"
+want: one abc‸two\n
+
+=== type_leading_blank (§6.5: a blank at the first content position is not written)
+src: ‸abc\n
+do: type " "
+want: ‸abc\n
+
+=== type_trailing_blank (§6.5: a blank at the end stands in the trailing blanks, the next character follows it)
+src: abc‸\n
+do: type " "
+want: abc ‸\n
+
+=== type_trailing_then_char (§6.5: a + Space at the end of a paragraph, then more)
+src: abc‸\n
+do: type " "; type "d"
+want: abc d‸\n
+
+=== type_soft_break_left (§6.6: a blank at the left edge of a soft break goes over it)
+src: one‸\ntwo\n
+flags: noquote nolist
+do: type " "
+want: one\n‸two\n
+
+=== type_soft_break_right (§6.6: a blank at the right edge of a soft break is dropped)
+src: one\n‸two\n
+flags: noquote nolist
+do: type " "
+want: one\n‸two\n
+
+=== type_backslash_line_end (§7.3: a backslash before a line end is written doubled)
+src: abc‸\n
+do: type "\\"
+want: abc\\\\‸\n
+
+=== type_pipe_in_cell (§7.3, §7.10: a pipe in a cell is escaped)
+src: | a‸ | b |\n|---|---|\n
+flags: nolist
+do: type "|"
+want: | a\\|‸ | b |\n|---|---|\n
+
+=== type_empty_atx (§6.3.1: the first character of an empty ATX heading gets its blank)
+src: ##‸\n
+do: type "x"
+want: ## x‸\n
+
+=== type_empty_atx_closing (§6.3.1: ## ## - a trailing blank, so the closer stays one)
+src: ## ‸##\n
+do: type "x"
+want: ## x‸ ##\n
+
+=== type_empty_item (§6.3.1: an empty item gets its blank)
+src: - a\n-‸\n
+flags: nolist
+do: type "x"
+want: - a\n- x‸\n
+
+=== type_surrogate_pair (§7.1: a character outside the BMP, whole)
+src: ab‸\n
+do: type "😀"
+want: ab😀‸\n
+
+=== type_empty_cell (§6.3.1: an empty cell sitting on its pipe gets a trailing blank)
+src: | a | b |\n|---|---|\n| x |‸|\n
+flags: nolist
+do: type "y"
+want: | a | b |\n|---|---|\n| x |y‸ |\n
+
+=== bs_char (§7.7: one character)
+src: abc‸\n
+do: BS
+want: ab‸\n
+
+=== bs_entity (§7.7: an entity is one atom)
+src: a&amp;‸b\n
+do: BS
+want: a‸b\n
+
+=== bs_escape (§7.7: an escape is one atom)
+src: a\\*‸b\n
+do: BS
+want: a‸b\n
+
+=== bs_emoji (§7.7: an emoji shortcode is one atom)
+src: a :smile:‸ b\n
+do: BS
+want: a ‸ b\n
+
+=== bs_soft_break (§6.6: Backspace at the right edge of a soft break joins the lines)
+src: one\n‸two\n
+flags: noquote nolist
+do: BS
+want: one‸two\n
+
+=== bs_empties_bold (§7.7: a span the deletion empties loses its delimiters)
+src: x **y‸** z\n
+do: BS
+want: x ‸ z\n
+
+=== bs_empties_link (§7.7: [](u) goes whole, and the blank it leaves at the block's start)
+src: [l‸](u) x\n
+do: BS
+want: ‸x\n
+
+=== bs_empties_code (§7.7: an emptied code span)
+src: `c‸` d\n
+do: BS
+want: ‸d\n
+
+=== bs_setext_empty (§7.7, F17: an emptied setext heading becomes an empty ATX one, never an HR)
+src: T‸\n---\n
+flags: nolist noquote
+do: BS
+want: ##‸\n
+
+=== bs_cluster (§6.2: a combining mark goes with its letter)
+src: aé‸x\n
+do: BS
+want: a‸x\n
+
+=== bs_surrogate (§6.2: a surrogate pair goes whole)
+src: a😀‸b\n
+do: BS
+want: a‸b\n
+
+=== bs_word (§7.7: Ctrl+Backspace to the word's start)
+src: hello world‸\n
+do: C-BS
+want: hello ‸\n
+
+=== bs_word_in_bold (§7.7: a word that is a whole bold span takes it along)
+src: ab **cd‸**\n
+do: C-BS
+want: ab ‸\n
+
+=== bs_trailing_blank (§6.5: trailing blanks go one at a time)
+src: abc  ‸\n
+do: BS
+want: abc ‸\n
+
+=== bs_selects_hr (§7.7: at a block's start after an HR the first press selects it; the caret stands on it)
+src: ---\n\n‸abc\n
+flags: nolist noquote
+do: BS
+state: atom=blk0
+want: ‸---\n\nabc\n
+
+=== bs_deletes_hr (§7.7: the second press deletes it with one blank line)
+src: ---\n\n‸abc\n
+flags: nolist noquote
+do: BS; BS
+want: ‸abc\n
+
+=== bs_selects_inline_image (§6.2: a picture in the line is selected first; the caret stands on it)
+src: a![i](x.png)‸b\n
+do: BS
+state: atom=img0
+want: a‸![i](x.png)b\n
+
+=== bs_deletes_inline_image (§6.2: then deleted with its whole source)
+src: a![i](x.png)‸b\n
+do: BS; BS
+want: a‸b\n
+
+=== bs_block_start_joins (§7.7: at a paragraph's start after a paragraph, Phase 2b joins them)
+src: abc\n\n‸def\n
+do: BS
+want: abc‸def\n
+
+=== del_char (§7.7)
+src: a‸bc\n
+do: Del
+want: a‸c\n
+
+=== del_entity (§7.7)
+src: a‸&amp;b\n
+do: Del
+want: a‸b\n
+
+=== del_word (§7.7: Ctrl+Delete over a word and the blanks after it)
+src: ‸hello world\n
+do: C-Del
+want: ‸world\n
+
+=== del_trailing_blank (§6.5)
+src: abc‸  \n
+do: Del
+want: abc‸ \n
+
+=== del_image (§6.2: selected by the first Delete, gone with the second)
+src: a‸![i](x.png)b\n
+do: Del; Del
+want: a‸b\n
+
+=== del_selects_hr (§7.7: at a block's end before an HR; the caret stands on it)
+src: abc‸\n\n---\n
+flags: nolist noquote
+do: Del
+state: atom=blk1
+want: abc\n\n‸---\n
+
+=== del_deletes_hr (§7.7: the second press deletes it and the blank line before it)
+src: abc‸\n\n---\n
+flags: nolist noquote
+do: Del; Del
+want: abc‸\n
+
+=== sel_delete_span (§7.9: x ⟦**bold**⟧ y)
+src: x ⟦**bold**⟧ y\n
+do: BS
+want: x ‸ y\n
+
+=== sel_delete_inner (§7.9: a selection that ends before the closer: **⟦foo ⟧bar**)
+src: **⟦foo ⟧bar**\n
+do: BS
+want: **‸bar**\n
+
+=== sel_delete_rebalance (§7.9: a *b⟦c* d⟧e - the closer comes back at the cut; §6.4 puts the caret where typing goes)
+src: a *b⟦c* d⟧e\n
+do: BS
+want: a *b‸*e\n
+
+=== sel_replace_bold (§7.9: typing over a bold word keeps it bold)
+src: **⟦bold⟧** text\n
+do: type "strong"
+want: **strong‸** text\n
+
+=== sel_replace_heading (§7.9: # ⟦Title⟧ + New)
+src: # ⟦Title⟧\n
+do: type "New"
+want: # New‸\n
+
+=== sel_across_blocks (§7.9: across blocks, Phase 2b: the text goes, the blocks are joined)
+src: ⟦a\n\nb⟧\n
+flags: noquote nolist
+do: BS
+want: ‸\n
+
+=== task_toggle (§8.10: a task box is a splice of its mark)
+src: - [ ] a‸\n
+flags: nolist
+do: TaskToggle(0)
+want: - [x] a‸\n
+
+=== task_untoggle (§8.10)
+src: - [x] a‸\n
+flags: nolist
+do: TaskToggle(0)
+want: - [ ] a‸\n
+
+=== sel_whole_text_of_para (§7.9: a selection over a span's whole text takes both of its delimiters - never ****)
+src: first\n\n⟦some text **important**⟧\n\nlast\n
+flags: noquote nolist
+do: Del
+want: first\n\n\n\n‸last\n
+
+=== sel_span_then_text (§7.9: ⟦**bold** text⟧ - the span inside goes whole)
+src: pre ⟦**bold** text⟧\n
+do: BS
+want: pre ‸\n
+
+=== sel_text_then_italic (§7.9: ⟦text *it*⟧)
+src: pre ⟦text *it*⟧\n
+do: Del
+want: pre ‸\n
+
+=== sel_code_span_at_start (§7.9: ⟦run `make`⟧ now - no empty backticks left, nor the blank at the start)
+src: ⟦run `make`⟧ now\n
+do: BS
+want: ‸now\n
+
+=== sel_span_in_middle (§7.9: a ⟦**c** b⟧ d)
+src: a ⟦**c** b⟧ d\n
+do: BS
+want: a ‸ d\n
+
+=== sel_span_in_cell (§7.9: the same in a table cell)
+src: | h |\n|---|\n| a ⟦**c** b⟧ d |\n
+flags: nolist
+do: BS
+want: | h |\n|---|\n| a ‸ d |\n
+
+=== sel_type_over_text_and_bold (§7.9: typing over ⟦text **bold**⟧ - the bold goes, the text is plain)
+src: pre ⟦text **bold**⟧\n
+do: type "x"
+want: pre x‸\n
+
+=== sel_link_at_start (§7.9: ⟦[l](u) te⟧xt - no [](u) left behind)
+src: ⟦[l](u) te⟧xt\n
+do: BS
+want: ‸xt\n
+
+=== sel_type_over_link_start (§7.9: text typed over it is no link text)
+src: ⟦[l](u) te⟧xt\n
+do: type "y"
+want: y‸xt\n
+
+=== sel_replace_bold_start (§7.9: typing over the start of a bold span stays bold)
+src: **⟦bo⟧ld** x\n
+do: type "y"
+want: **y‸ld** x\n
+
+=== sel_replace_bold_end_on (§7.9: the closer the cut took follows the typed text)
+src: **ab⟦c** de⟧f\n
+do: type "x"
+want: **abx‸**f\n
+
+=== type_blank_after_link_end (§6.5: a blank after a link at the line's end: the caret stays after it)
+src: see [l](u)‸\n
+do: type " "; type "a"
+want: see [l](u) a‸\n
+
+=== type_blank_after_code_end (§6.5: the same after a code span)
+src: run `make`‸\n
+do: type " "; type "n"; type "o"; type "w"
+want: run `make` now‸\n
+
+=== type_blank_after_link_heading (§6.5: the same in a heading)
+src: # See [l](u)‸\n
+do: type " "; type "a"
+want: # See [l](u) a‸\n
+
+=== type_blank_bold_end_para (§7.3: a blank at the end of bold goes after its closer: `**bold **` is no bold)
+src: a **bold‸**\n
+do: type " "
+want: a **bold** ‸\n
+
+=== type_blank_bold_end_then_word (§7.3's sticky end: the next non-blank extends the span over the blank)
+src: a **bold‸**\n
+do: type " "; type "x"
+want: a **bold x‸**\n
+
+=== type_blank_bold_end_mid (§7.3: the same in the middle of a paragraph)
+src: a **bold‸** tail\n
+do: type " "
+want: a **bold** ‸ tail\n
+
+=== type_blank_in_soft_break_blanks (§6.6: no second blank before a soft break - that would be a hard one)
+src: abc ‸\ndef\n
+flags: noquote nolist
+do: type " "
+want: abc \n‸def\n
+
+=== del_hard_break_left_edge (§6.6: Delete at a hard break's left edge takes the whole break)
+src: abc‸  \ndef\n
+flags: noquote nolist
+do: Del
+want: abc‸def\n
+
+=== type_hard_break_left_edge (§6.6: typing at its left edge goes before the break's blanks)
+src: abc‸  \ndef\n
+flags: noquote nolist
+do: type "x"
+want: abcx‸  \ndef\n
+
+=== type_backslash_before_backslash_break (§6.6: a \ typed at a backslash break's left edge is written \\)
+src: abc‸\\\ndef\n
+flags: noquote nolist
+do: type "\\"
+want: abc\\\\‸\\\ndef\n
+
+=== del_hr_keeps_paragraphs_apart (§7.7: abc⏎⏎---⏎def loses the rule and stays two paragraphs)
+src: abc\n\n---\n‸def\n
+flags: nolist noquote
+do: BS; BS
+want: abc\n\n‸def\n
+
+=== del_rule_under_text (§7.7: a rule right under a line: a blank line keeps the neighbours apart)
+src: abc\n***\n‸def\n
+flags: nolist
+do: BS; BS
+want: abc\n\n‸def\n
+
+=== del_image_in_bold (§7.7: a picture that was all of a bold span takes the span along)
+src: x **![i](a.png)‸** y\n
+do: BS; BS
+want: x ‸ y\n
+
+=== del_linked_badge (§7.7: a linked badge leaves no [](u) behind)
+src: x [![i](b.png)](u)‸ y\n
+do: BS; BS
+want: x ‸ y\n
+
+=== del_details_whole (§7.7: a selected <details> summary goes with its group up to the closing tag)
+src: abc‸\n\n<details><summary>S</summary>\n\nbody text\n\n</details>\n\nafter\n
+flags: noquote nolist
+do: Del; Del
+want: abc\n\n‸after\n
+
+=== type_into_emptied_document (§7.3: the only block's last character gone, typing starts the document again)
+src: x‸\n
+flags: noquote nolist
+do: BS; type "y"; type "z"
+want: yz‸\n
+
+=== type_after_definitions_only (§7.3: invisible lines stay; the text is a paragraph after them)
+src: [a]: http://x\n\nb‸\n
+flags: noquote nolist
+do: BS; type "c"
+want: [a]: http://x\n\nc‸\n\n\n

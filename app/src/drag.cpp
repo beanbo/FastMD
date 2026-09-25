@@ -158,8 +158,7 @@ DataObject* Build(int kind, int arg) {
         }
         d->Add(CF_DIB, ImageAsDib((uint32_t)arg));
         const Image& im = g.doc.images[g.doc.blocks[arg].aux];
-        const Image& src = im.canon >= 0 ? g.doc.images[im.canon] : im;
-        if (!src.path.empty()) d->Add(CF_HDROP, DropFiles(src.path));
+        if (!im.path.empty()) d->Add(CF_HDROP, DropFiles(im.path));
     }
     if (d->fmt.empty()) { d->Release(); return nullptr; }
     return d;
@@ -199,7 +198,10 @@ void StartDrag(int kind, int arg) {
     if (!data) return;
     auto* src = new DropSource();
     DWORD effect = 0;
-    DoDragDrop(data, src, DROPEFFECT_COPY | (kind == DRAG_LINK ? DROPEFFECT_LINK : 0), &effect);
+    {
+        ModalScope modal;  // the data object holds on to what it was built from
+        DoDragDrop(data, src, DROPEFFECT_COPY | (kind == DRAG_LINK ? DROPEFFECT_LINK : 0), &effect);
+    }
     src->Release();
     data->Release();
     g.selecting = false;

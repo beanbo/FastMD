@@ -1,0 +1,101 @@
+Escaping accidental block syntax (docs/EDIT-MODE.md §7.4): a line whose start an edit changed must not turn into a
+heading, a list, a quote, a fence, a rule, a setext underline, an HTML block, a definition or indented code by accident -
+except where the reader typed the syntax at a block's visible start (Principle 4). Format as in enter.txt.
+
+=== esc_typed_dash (§7.4: `The value⏎is high`, caret before `is`, type `- ` → still one paragraph)
+src: The value\n‸is high\n
+do: type "-"; type " "
+want: The value\n\\- ‸is high\n
+
+=== esc_typed_hash (§7.4: a # and a blank at a line's start that goes on a paragraph)
+src: one\n‸two\n
+do: type "#"; type " "
+want: one\n\\# ‸two\n
+
+=== esc_typed_quote (§7.4: a > there)
+src: one\n‸two\n
+do: type ">"
+want: one\n\\>‸two\n
+
+=== esc_typed_ordered (§7.4: a number and a dot there: the dot is escaped)
+src: one\n‸two\n
+do: type "1"; type "."; type " "
+want: one\n1\\. ‸two\n
+
+=== esc_typed_setext (§7.4: a lone = under a paragraph line would make it a heading)
+src: one\ntwo‸\n
+do: S-Enter; type "="
+want: one\ntwo\\\n\\=‸\n
+
+=== esc_typed_fence (§7.4: three backticks)
+src: one\n‸two\n
+do: type "`"; type "`"; type "`"
+want: one\n\\```‸two\n
+
+=== esc_block_start_typed (Principle 4: typed at a block's visible start the syntax is taken as such)
+src: ‸two\n
+flags: nolist
+do: type "#"; type " "
+want: # ‸two\n
+
+=== esc_enter_hash (§7.4: `I like C‸# and F#.` Enter → the new paragraph's # escaped)
+src: I like C‸# and F#.\n
+flags: nolist
+do: Enter
+want: I like C\n\n‸\\# and F#.\n
+
+=== esc_enter_bullet (§7.4: a new block starting with `- `)
+src: pay ‸- this\n
+flags: nolist
+do: Enter
+want: pay\n\n‸\\- this\n
+
+=== esc_enter_html (§7.4: a new block starting like an HTML block)
+src: see ‸<div> here\n
+flags: nolist
+do: Enter
+want: see\n\n‸\\<div> here\n
+
+=== esc_enter_inline_html_kept (§7.4: inline HTML that starts no block is left alone)
+src: see ‸<b>bold</b> here\n
+flags: nolist
+do: Enter
+want: see\n\n<b>‸bold</b> here\n
+
+=== esc_enter_definition (§7.4: a new block that looks like a link reference definition)
+src: see ‸[x]: y\n
+flags: nolist
+do: Enter
+want: see\n\n‸\\[x]: y\n
+
+=== esc_enter_rule (§7.4: a new block that is a rule)
+src: see ‸***\n
+flags: nolist
+do: Enter
+want: see\n\n‸\\***\n
+
+=== esc_senter_dash (§7.4: `see ‸- this` Shift+Enter → `see\⏎\- this`)
+src: see ‸- this\n
+do: S-Enter
+want: see\\\n‸\\- this\n
+
+=== esc_bs_heading (§7.4: `# 1. Introduction`, Backspace at its text start → `1\. Introduction`)
+src: # ‸1. Introduction\n
+do: BS
+want: ‸1\\. Introduction\n
+
+=== esc_delete_selection (§7.4: `⟦I use C⟧# daily` Delete → `\# daily`)
+src: ⟦I use C⟧# daily\n
+flags: nolist
+do: Del
+want: ‸\\# daily\n
+
+=== esc_delete_char (§7.4: a deletion that makes a line's start block syntax)
+src: one\nx‸- two\n
+do: BS
+want: one\n‸\\- two\n
+
+=== esc_break_typed (§7.4: a line a pending hard break starts goes on the paragraph: checked as typed)
+src: one‸\n
+do: S-Enter; type "#"; type " "
+want: one\\\n\\# ‸\n

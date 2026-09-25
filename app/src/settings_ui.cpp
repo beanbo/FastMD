@@ -13,8 +13,9 @@ const wchar_t kRepoUrl[] = L"https://github.com/beanbo/FastMD";
 const float kW = 680.f, kLabelX = 28.f, kCtlX = 236.f, kRowH = 48.f, kTop = 20.f, kCtlH = 32.f;
 const int kSizes[] = {14, 15, 16, 17, 18, 20};
 
-enum Row { ROW_THEME, ROW_FONT, ROW_SIZE, ROW_COLUMN, ROW_WRAP, ROW_SMOOTH, ROW_REMOTE, ROW_UPDATE, ROW_LANG,
-           ROW_EDITOR, ROW_ASSOC, ROW_COUNT };
+// ROW_AUTOSAVE came last (EDIT-MODE.md §2.12): the hit ids of the rows before it (row * 100 + option) never move
+enum Row { ROW_THEME, ROW_FONT, ROW_SIZE, ROW_COLUMN, ROW_WRAP, ROW_SMOOTH, ROW_REMOTE, ROW_UPDATE, ROW_VERSION,
+           ROW_LANG, ROW_EDITOR, ROW_ASSOC, ROW_AUTOSAVE, ROW_COUNT };
 const int kLinkId = 9000;
 
 HWND g_wnd = nullptr;
@@ -44,7 +45,7 @@ std::vector<std::wstring> Options(int row) {
         return v;
     }
     case ROW_COLUMN: return {Tr(S_COL_NARROW), Tr(S_COL_NORMAL), Tr(S_COL_WIDE), Tr(S_COL_FULL)};
-    case ROW_WRAP: case ROW_SMOOTH: case ROW_UPDATE: return {Tr(S_OFF), Tr(S_ON)};
+    case ROW_WRAP: case ROW_SMOOTH: case ROW_UPDATE: case ROW_AUTOSAVE: return {Tr(S_OFF), Tr(S_ON)};
     case ROW_REMOTE: return {Tr(S_REMOTE_ALWAYS), Tr(S_REMOTE_ASK), Tr(S_REMOTE_NEVER)};
     case ROW_LANG: return {Tr(S_LANG_SYSTEM), L"Русский", L"English"};
     default: return {};
@@ -64,14 +65,15 @@ int Selected(int row) {
     case ROW_REMOTE: return g.cfg.remoteImages;
     case ROW_UPDATE: return g.cfg.updateCheck;
     case ROW_LANG: return g.cfg.language;
+    case ROW_AUTOSAVE: return g.cfg.autosave;
     default: return -1;
     }
 }
 
 const wchar_t* Label(int row) {
-    static const StrId ids[ROW_COUNT] = {S_SET_THEME,  S_SET_FONT,   S_SET_SIZE,     S_SET_COLUMN, S_SET_WRAP,
-                                         S_SET_SMOOTH, S_SET_REMOTE, S_SET_UPDATE,   S_SET_LANGUAGE,
-                                         S_SET_EDITOR, S_SET_ASSOC};
+    static const StrId ids[ROW_COUNT] = {S_SET_THEME,  S_SET_FONT,   S_SET_SIZE,    S_SET_COLUMN,   S_SET_WRAP,
+                                         S_SET_SMOOTH, S_SET_REMOTE, S_SET_UPDATE,  S_SET_VERSION,  S_SET_LANGUAGE,
+                                         S_SET_EDITOR, S_SET_ASSOC,  S_SET_AUTOSAVE};
     return Tr(ids[row]);
 }
 
@@ -146,6 +148,68 @@ void Button(int id, const std::wstring& text, float x, float y, bool dropdown) {
     g_hits.push_back(Hit{x, y, x + w, y + kCtlH, id});
 }
 
+// The update row: one button that does the next step - check, update to the version found, restart into it - and a
+// note beside it saying where things stand. While something runs, the button only says what.
+void UpdateRow(float x, float y) {
+    UpdateStatus st = UpdateGetStatus();
+    std::wstring ver = UpdateVersion();
+    wchar_t buf[160];
+    std::wstring label, note;
+    bool accent = false, busy = false;
+    switch (st) {
+    case US_CHECKING: label = Tr(S_UPD_CHECKING); busy = true; break;
+    case US_DOWNLOADING: label = Tr(S_UPD_DOWNLOADING); busy = true; break;
+    case US_INSTALLING: label = Tr(S_UPD_INSTALLING); busy = true; break;
+    case US_INSTALLED:
+        label = Tr(S_UPD_RESTART);
+        accent = true;
+        swprintf_s(buf, Tr(S_UPD_NOTE_INSTALLED_FMT), ver.c_str());
+        note = buf;
+        break;
+    case US_AVAILABLE:
+    case US_DOWNLOAD_FAILED:
+        swprintf_s(buf, Tr(S_UPD_UPDATE_FMT), ver.c_str());
+        label = buf;
+        accent = true;
+        if (st == US_DOWNLOAD_FAILED) note = Tr(S_UPD_NOTE_DL_FAILED);
+        else {
+            swprintf_s(buf, Tr(S_UPD_NOTE_CURRENT_FMT), FASTMD_VERSION_WSTR);
+            note = buf;
+        }
+        break;
+    case US_LATEST:
+        label = Tr(S_UPD_CHECK);
+        swprintf_s(buf, Tr(S_UPD_NOTE_LATEST_FMT), FASTMD_VERSION_WSTR);
+        note = buf;
+        break;
+    case US_CHECK_FAILED: label = Tr(S_UPD_CHECK); note = Tr(S_UPD_NOTE_FAILED); break;
+    default:
+        label = Tr(S_UPD_CHECK);
+        swprintf_s(buf, Tr(S_UPD_NOTE_CURRENT_FMT), FASTMD_VERSION_WSTR);
+        note = buf;
+        break;
+    }
+    int id = ROW_VERSION * 100;
+    IDWriteTextLayout* L = Layout(label, 360.f, 13.f, accent);
+    float w = (L ? TextW(L) : 60.f) + 28.f;
+    if (accent) g_cv->FillRoundRect(x, y, x + w, y + kCtlH, 6.f, g_hot == id ? P_LINK : P_ACCENT);
+    else {
+        g_cv->FillRoundRect(x, y, x + w, y + kCtlH, 6.f, g_hot == id && !busy ? P_HOVER : P_PANEL);
+        g_cv->StrokeRoundRect(x, y, x + w, y + kCtlH, 6.f, 1.f, P_BORDER);
+    }
+    if (L) {
+        TextMid(L, x + 14.f, y, kCtlH, accent ? P_ONACCENT : busy ? P_MUTED : P_TEXT);
+        L->Release();
+    }
+    if (!busy) g_hits.push_back(Hit{x, y, x + w, y + kCtlH, id});
+    if (!note.empty()) {
+        if (IDWriteTextLayout* N = Layout(note, kW - kLabelX - (x + w + 14.f), 12.5f)) {
+            TextMid(N, x + w + 14.f, y, kCtlH, P_MUTED);
+            N->Release();
+        }
+    }
+}
+
 void Paint() {
     if (!g_cv) return;
     g_hits.clear();
@@ -159,6 +223,7 @@ void Paint() {
         }
         if (row == ROW_EDITOR) Button(row * 100, EditorLabel(), kCtlX, y, true);
         else if (row == ROW_ASSOC) Button(row * 100, Tr(S_SET_ASSOC_BTN), kCtlX, y, false);
+        else if (row == ROW_VERSION) UpdateRow(kCtlX, y);
         else Segmented(row, kCtlX, y);
     }
     // footer: version, licence, repository
@@ -200,7 +265,11 @@ void EditorMenu(float x, float y) {
     AppendMenuW(m, MF_STRING, 3, Tr(S_EDITOR_OTHER));
     POINT p{(LONG)std::lround(x * g_scale), (LONG)std::lround(y * g_scale)};
     ClientToScreen(g_wnd, &p);
-    UINT id = (UINT)TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, g_wnd, nullptr);
+    UINT id;
+    {
+        ModalScope modal;  // the document window's messages run in this loop too
+        id = (UINT)TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, g_wnd, nullptr);
+    }
     DestroyMenu(m);
     if (!id || id == 2) return;
     if (id == 1) g.cfg.editor.clear();
@@ -228,7 +297,18 @@ void Pick(int id) {
         if (opt == 0) LoadRemoteImages();  // switched to "always": fetch what this document is still missing
         changed = SC_OTHER;
         break;
-    case ROW_UPDATE: g.cfg.updateCheck = opt == 1; changed = SC_OTHER; break;
+    case ROW_UPDATE:
+        g.cfg.updateCheck = opt == 1;
+        ApplySettings(SC_OTHER, true);
+        if (g.cfg.updateCheck) UpdateCheckAsync();  // switched on: ask now if a day has passed
+        return;
+    case ROW_VERSION:
+        switch (UpdateGetStatus()) {
+        case US_AVAILABLE: case US_DOWNLOAD_FAILED: UpdateInstall(false); break;  // the button named the version
+        case US_INSTALLED: UpdateRestart(); break;
+        default: UpdateCheckNow(); break;
+        }
+        return;
     case ROW_LANG: g.cfg.language = (uint8_t)opt; changed = SC_LANGUAGE; break;
     case ROW_EDITOR: {
         for (const Hit& h : g_hits)
@@ -236,6 +316,11 @@ void Pick(int id) {
         return;
     }
     case ROW_ASSOC: Command(CMD_ASSOCIATE); return;
+    case ROW_AUTOSAVE:
+        g.cfg.autosave = opt == 1;
+        ApplySettings(SC_OTHER, true);
+        EditAutosaveChanged();  // edits open right now are saved (or journalled) by the new rule
+        return;
     default: return;
     }
     ApplySettings(changed, true);
@@ -340,6 +425,12 @@ void SettingsOpen() {
     GetWindowRect(g.hwnd, &owner);
     int w = r.right - r.left, h = r.bottom - r.top;
     int x = owner.left + ((owner.right - owner.left) - w) / 2, y = owner.top + std::max(0, (int)((owner.bottom - owner.top) - h) / 3);
+    // inside the monitor's work area, so its last rows (the autosave toggle) are not under the taskbar (Phase 4 notes)
+    MONITORINFO mi{sizeof(mi)};
+    if (GetMonitorInfoW(MonitorFromWindow(g.hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+        x = std::max<int>(mi.rcWork.left, std::min<int>(x, mi.rcWork.right - w));
+        y = std::max<int>(mi.rcWork.top, std::min<int>(y, mi.rcWork.bottom - h));
+    }
     g_wnd = CreateWindowExW(0, kClass, Tr(S_SETTINGS_TITLE), WS_CAPTION | WS_SYSMENU, x, y, w, h, g.hwnd, nullptr, g.inst, nullptr);
     if (!g_wnd) return;
     g_scale = GetDpiForWindow(g_wnd) / 96.f;
@@ -365,7 +456,7 @@ void SettingsRefresh() {
 // column's side padding. An icon-font glyph, so it waits for the second frame; the find bar takes that corner while open.
 bool SettingsButtonRect(float* l, float* t, float* r, float* b) {
     const float kBtn = 30.f, kTop = 8.f, kRight = 14.f;
-    if (g.firstFrame || g.findOpen) return false;
+    if (g.firstFrame || g.findOpen || g.editing || g.barT > 0) return false;  // edit mode's ✕ takes that corner
     *r = ViewW() - kRight;
     *l = *r - kBtn;
     *t = kTop;
@@ -384,4 +475,6 @@ void DrawSettingsButton() {
     bool hot = g.settingsBtnHot;
     if (hot) g.canvas->FillRoundRect(l, t, r, b, 6.f, P_HOVER);
     DrawIcon(0xE713, l, t, r - l, 15.f, hot ? P_TEXT : P_MUTED);  // Segoe Fluent Icons: Settings
+    // a newer version is known: a dot on the gear until it is installed (the tooltip names the version)
+    if (UpdateAvailable()) g.canvas->FillCircle(r - 7.f, t + 7.f, 3.5f, P_ACCENT);
 }

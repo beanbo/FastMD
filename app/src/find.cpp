@@ -9,8 +9,8 @@
 
 namespace {
 const wchar_t kInputClass[] = L"FastMD.FindInput";
-enum : UINT { IM_SETUP = WM_APP + 1 /* lp = InputSetup* */, IM_SETTEXT /* lp = std::wstring* */, IM_FOCUS /* wp = select all */ };
-enum : int { KM_CTRL = 1, KM_SHIFT = 2, KM_ALT = 4 };  // key modifiers posted with FI_KEY
+enum : UINT { IM_SETUP = WM_APP + 1 /* lp = InputSetup* */, IM_SETTEXT /* lp = std::wstring* */, IM_FOCUS /* wp = select all */,
+              IM_CALL /* wp = a function, lp = its argument: edit mode's popups (editpop.cpp) run on this thread too */ };
 
 struct InputSetup {
     RECT rc;
@@ -153,6 +153,9 @@ LRESULT CALLBACK HostProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         SetFocus(s_edit);
         if (wp) SendMessageW(s_edit, EM_SETSEL, 0, -1);
         return 0;
+    case IM_CALL:
+        ((void (*)(void*))wp)((void*)lp);
+        return 0;
     case WM_COMMAND:
         if (HIWORD(wp) == EN_CHANGE && !g_echoOff) {
             int len = GetWindowTextLengthW(s_edit);
@@ -289,11 +292,16 @@ float CountAreaW() {  // fixed width: the text box does not move while the count
 }  // namespace
 
 // ------------------------------------------------------------------------------------------------ matching
-void FindUpdate(bool keepCurrent) {
-    uint32_t prev = (g.curMatch >= 0 && (size_t)g.curMatch < g.matches.size()) ? g.matches[g.curMatch] : UINT32_MAX;
+static uint32_t CurrentMatch() {
+    return (g.curMatch >= 0 && (size_t)g.curMatch < g.matches.size()) ? g.matches[g.curMatch] : UINT32_MAX;
+}
+
+// The matches of the query in the current text. true = there are some and g.curMatch is set: the one at or after prev
+// (keepCurrent), else the first at or below the top of the viewport.
+static bool FindMatches(bool keepCurrent, uint32_t prev) {
     g.matches.clear();
     g.curMatch = -1;
-    if (g.findQuery.empty() || g.doc.text.empty()) { Invalidate(); return; }
+    if (g.findQuery.empty() || g.doc.text.empty()) return false;
     const std::wstring* hay = &g.doc.text;
     std::wstring needle = g.findQuery;
     if (!g.cfg.findCase) {
@@ -312,7 +320,7 @@ void FindUpdate(bool keepCurrent) {
         pos += needle.size();
         if (g.matches.size() >= 100000) break;
     }
-    if (g.matches.empty()) { Invalidate(); return; }
+    if (g.matches.empty()) return false;
     if (keepCurrent && prev != UINT32_MAX) {
         auto it = std::lower_bound(g.matches.begin(), g.matches.end(), prev);
         g.curMatch = it == g.matches.end() ? 0 : (int)(it - g.matches.begin());
@@ -321,7 +329,22 @@ void FindUpdate(bool keepCurrent) {
         auto it = std::lower_bound(g.matches.begin(), g.matches.end(), top);
         g.curMatch = it == g.matches.end() ? 0 : (int)(it - g.matches.begin());
     }
-    FindStep(0);
+    return true;
+}
+
+void FindUpdate(bool keepCurrent) {
+    if (FindMatches(keepCurrent, CurrentMatch())) FindStep(0);
+    else Invalidate();
+}
+
+// An edit replaced the text [beg, oldEnd) with [beg, newEnd): the marks follow it, and the current match stays the one
+// it was - shifted with the text after the edit, the first one after the edit's start when the edit took it - but the
+// view stays where the reader is working (§12.6).
+void FindRefresh(uint32_t beg, uint32_t oldEnd, uint32_t newEnd) {
+    uint32_t prev = CurrentMatch();
+    if (prev != UINT32_MAX && prev >= beg) prev = prev >= oldEnd ? prev - oldEnd + newEnd : beg;
+    FindMatches(true, prev);
+    Invalidate();
 }
 
 void FindStep(int dir) {
@@ -371,10 +394,14 @@ void FindClose() {
 }
 
 void FindRelayoutInput() {
-    if (g_host) PushSetup(g.findOpen);
+    if (g_host) PushSetup(g.findOpen && !g.barSliding);  // hidden while edit mode's bar slides past it (R18)
 }
 
 bool FindInputFocused() { return g_host && g_fieldFocused; }
+
+bool InputCall(void (*fn)(void*), void* arg) {
+    return EnsureInput() && PostMessageW(g_host, IM_CALL, (WPARAM)fn, (LPARAM)arg);
+}
 
 void FindFocusInput() {
     if (g_host) PostMessageW(g_host, IM_FOCUS, 0, 0);
@@ -431,7 +458,9 @@ void FindOnInput(WPARAM ev, LPARAM lp) {
 
 // ------------------------------------------------------------------------------------------------ bar
 void FindPartRect(int part, float* l, float* t, float* r, float* b) {
-    float w = std::max(260.f, std::min(480.f, ViewW() - 24.f)), h = 40.f, x = std::max(4.f, ViewW() - w - 20.f), y = 12.f;
+    // under edit mode's bar and a strip, when they are there (§12.1)
+    float w = std::max(260.f, std::min(480.f, ViewW() - 24.f)), h = 40.f, x = std::max(4.f, ViewW() - w - 20.f);
+    float y = 12.f + EditInset() + g.stripH;
     float bs = 28.f, by = y + 6.f;
     float closeL = x + w - 6.f - bs, nextL = closeL - 2.f - bs, prevL = nextL - 2.f - bs;
     float countW = CountAreaW(), countL = prevL - 6.f - countW;
@@ -560,7 +589,7 @@ void DrawFindBar() {
 void DrawFindMarks(float x0, float x1) {
     size_t nb = g.doc.blocks.size();
     if (!nb || g.docH <= 0 || g.matches.empty()) return;
-    float trackT = 2.f, trackH = ViewH() - 4.f, s = Scale();
+    float trackT = ScrollTrackTop(), trackH = ViewH() - 2.f - trackT, s = Scale();
     auto yOf = [&](uint32_t pos, size_t& bi) {
         while (bi + 1 < nb && g.doc.blocks[bi + 1].textOff <= pos) bi++;
         const Block& b = g.doc.blocks[bi];

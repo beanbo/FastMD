@@ -1,0 +1,199 @@
+Inserts and table operations (docs/EDIT-MODE.md §8.8, §8.9): a table, a formula, a diagram, a picture, a rule - after
+the current block with blank lines on both sides, each line with the block's continuation prefix, or in a phantom
+row that becomes them; rows and columns added, deleted and aligned on the rows' pipes. src holds the caret ‸ (or a
+selection ⟦ … ⟧); want the source afterwards; phantom where a phantom row stands then. Each case also runs with CRLF line
+ends, inside a quote and inside a list item unless its flags say otherwise.
+
+=== table_after (§8.8: after the block, the caret in the first header cell)
+src: abc‸\n
+do: Table(2,3)
+want: abc\n\n| ‸ |  |  |\n| --- | --- | --- |\n|  |  |  |\n
+
+=== table_default_rows (rows include the header row)
+src: abc‸\n
+do: Table(3,2)
+want: abc\n\n| ‸ |  |\n| --- | --- |\n|  |  |\n|  |  |\n
+
+=== table_before_next (a blank line after it too, when the next line is not blank)
+src: a‸\nb\n
+flags: nolist noquote
+do: Table(1,1)
+want: a\nb\n\n| ‸ |\n| --- |\n
+
+=== table_between (blank lines on both sides, the next block untouched)
+src: a‸\n\nb\n
+flags: nolist
+do: Table(1,1)
+want: a\n\n| ‸ |\n| --- |\n\nb\n
+
+=== table_in_cell_after (§8.1: in a cell: after the table)
+src: | x‸ |\n| --- |\n
+do: Table(1,1)
+want: | x |\n| --- |\n\n| ‸ |\n| --- |\n
+
+=== table_phantom (§8.8: in a phantom the phantom becomes the table)
+src: abc‸\n
+flags: nolist
+do: Enter; Table(1,2)
+want: abc\n\n| ‸ |  |\n| --- | --- |\n
+
+=== formula_inline (§8.8: `$x$` at the caret, a blank apart from a letter)
+src: cost‸\n
+flags: nolist
+tex: off
+do: Formula
+want: cost $x$‸\n
+
+=== formula_selection (§8.8: the selection in one block as its TeX)
+src: a ⟦b+c⟧ d\n
+tex: off
+do: Formula
+want: a $b+c$‸ d\n
+
+=== formula_block (§8.8: `$$`, `x`, `$$` after the block)
+src: abc‸\n
+tex: off
+do: FormulaBlock
+want: abc\n\n$$\n‸x\n$$\n
+
+=== formula_block_atom (with TeX the block is an object: the caret on it, at its first line's start)
+src: abc‸\n
+tex: on
+flags: nolist noquote
+do: FormulaBlock
+want: abc\n\n‸$$\nx\n$$\n
+
+=== diagram_flowchart (§8.8: a Mermaid block of template 0)
+src: abc‸\n
+tex: off
+flags: noquote nolist
+do: Diagram(0)
+want: abc\n\n```mermaid\n‸flowchart TD\n    A[Start] --> B{Choice}\n    B -->|Yes| C[Do it]\n    B -->|No| D[End]\n```\n
+
+=== diagram_mindmap (template 7: nesting by two more blanks)
+src: abc‸\n
+tex: off
+flags: noquote nolist
+do: Diagram(7)
+want: abc\n\n```mermaid\n‸mindmap\n    root((Idea))\n      Branch A\n      Branch B\n```\n
+
+=== hr_after (§8.8, UX-3: a rule after the block, a phantom row after the rule with the caret in it)
+src: abc‸\n
+do: Hr
+want: abc\n\n---‸\n
+phantom: after 1 in
+
+=== hr_then_type (typing in that phantom: a paragraph after the rule)
+src: abc‸\n
+do: Hr; type "x"
+want: abc\n\n---\n\nx‸\n
+
+=== hr_phantom (in a phantom: the rule, then the phantom after it)
+src: abc‸\n
+flags: nolist
+do: Enter; Hr
+want: abc\n\n---‸\n
+phantom: after 1 in
+
+=== image_inline (§8.8: a picture in the line at the caret - in the middle of it; at its end: review4.txt)
+src: see ‸x\n
+do: Image("a.png","pic")
+want: see ![pic](a.png)‸x\n
+
+=== image_after_code (§8.8: after a code block: a paragraph of its own - a picture block, the caret on it)
+src: ```\nco‸de\n```\n
+flags: nolist noquote
+do: Image("a.png","pic")
+want: ```\ncode\n```\n\n‸![pic](a.png)\n
+
+=== table_row_above (§8.9)
+src: | a | b |\n| --- | --- |\n| c‸ | d |\n
+do: Table.RowAbove
+want: | a | b |\n| --- | --- |\n|  |  |\n| c‸ | d |\n
+
+=== table_row_above_header_refused (§8.9: never above the header)
+src: | a‸ | b |\n| --- | --- |\n
+do: Table.RowAbove
+want: | a‸ | b |\n| --- | --- |\n
+state: refused=table
+
+=== table_row_below
+src: | a | b |\n| --- | --- |\n| c‸ | d |\n
+do: Table.RowBelow
+want: | a | b |\n| --- | --- |\n| c‸ | d |\n|  |  |\n
+
+=== table_row_below_header (§8.9: under the header: after the delimiter row)
+src: | a‸ | b |\n| --- | --- |\n| c | d |\n
+do: Table.RowBelow
+want: | a‸ | b |\n| --- | --- |\n|  |  |\n| c | d |\n
+
+=== table_col_left
+src: | a | b |\n| --- | --- |\n| c‸ | d |\n
+do: Table.ColLeft
+want: |  | a | b |\n| --- | --- | --- |\n|  | c‸ | d |\n
+
+=== table_col_right
+src: | a | b |\n| --- | --- |\n| c‸ | d |\n
+do: Table.ColRight
+want: | a |  | b |\n| --- | --- | --- |\n| c‸ |  | d |\n
+
+=== table_col_right_no_trailing_pipe (§8.9: a row without a trailing pipe gets one)
+src: a | b\n--- | ---\nc | d‸\n
+do: Table.ColRight
+want: a | b |  |\n--- | --- | --- |\nc | d‸ |  |\n
+
+=== table_col_left_no_leading_pipe (a row without a leading pipe gets `|  |` at its start)
+src: a | b\n--- | ---\nc‸ | d\n
+do: Table.ColLeft
+want: |  |a | b\n| --- |--- | ---\n|  |c‸ | d\n
+
+=== table_short_row (§8.9: a row too short to have the cell is left alone)
+src: | a | b |\n| --- | --- |\n| c |\n| d | e‸ |\n
+do: Table.ColRight
+want: | a | b |  |\n| --- | --- | --- |\n| c |\n| d | e‸ |  |\n
+
+=== table_del_row (§8.9: the caret to the same column of the row that takes its place)
+src: | a | b |\n| --- | --- |\n| c | d‸ |\n| e | f |\n
+do: Table.DelRow
+want: | a | b |\n| --- | --- |\n| e | ‸f |\n
+
+=== table_del_last_row
+src: | a | b |\n| --- | --- |\n| c‸ | d |\n
+do: Table.DelRow
+want: | ‸a | b |\n| --- | --- |\n
+
+=== table_del_col
+src: | a | b |\n| --- | --- |\n| c‸ | d |\n
+do: Table.DelCol
+want: | b |\n| --- |\n| ‸d |\n
+
+=== table_del_last_col (the last cell takes the pipe before it)
+src: | a | b |\n| --- | --- |\n| c | d‸ |\n
+do: Table.DelCol
+want: | a |\n| --- |\n| c‸ |\n
+
+=== table_align_center (§8.9: `:---:`)
+src: | a | b |\n| --- | --- |\n| c‸ | d |\n
+do: Table.AlignC
+want: | a | b |\n| :---: | --- |\n| c‸ | d |\n
+
+=== table_align_right_wide (the width kept when it can be)
+src: | a | b |\n| ------ | --- |\n| c‸ | d |\n
+do: Table.AlignR
+want: | a | b |\n| -----: | --- |\n| c‸ | d |\n
+
+=== table_align_left
+src: | a | b |\n| :---: | --- |\n| c‸ | d |\n
+do: Table.AlignL
+want: | a | b |\n| :---- | --- |\n| c‸ | d |\n
+
+=== table_del (§8.9: the whole table; the caret to the end of the block before)
+src: p\n\n| a | b |\n| --- | --- |\n| c‸ | d |\n
+do: Table.Del
+want: p‸\n
+
+=== table_del_only_block (nothing before it: a phantom where it was)
+src: | a‸ |\n| --- |\n
+flags: nolist noquote
+do: Table.Del
+want: ‸

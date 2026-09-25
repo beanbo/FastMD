@@ -1,0 +1,33 @@
+Typing in tables (docs/EDIT-MODE.md §7.10): a pipe is escaped, a cell a short row lacks is written when typed into.
+Enter, Tab and Shift+Tab in cells are in enter.txt and tab.txt. Format as in enter.txt; `click(t,b,c)` puts the caret at
+text position t of block b, cell c (an empty or missing cell has no source offset of its own).
+
+=== table_pipe_escaped (§7.10: a typed | is written \|)
+src: | a‸ | b |\n|---|---|\n
+do: type "|"
+want: | a\\|‸ | b |\n|---|---|\n
+
+=== table_missing_cell (§7.10: `| x |` completed by typing into its second cell)
+src: | a | b |\n|---|---|\n| x |‸\n
+do: type "y"
+want: | a | b |\n|---|---|\n| x | y‸ |\n
+
+=== table_missing_cells (§7.10: every missing cell up to the one typed into is written)
+src: | a | b | c |\n|---|---|---|\n| x |‸\n
+do: click(4,0,5); type "z"
+want: | a | b | c |\n|---|---|---|\n| x |  | z‸ |\n
+
+=== table_missing_pipe (§7.10: a row without a trailing pipe gets it first)
+src: | a | b |\n|---|---|\n| x‸\n
+do: click(3,0,3); type "y"
+want: | a | b |\n|---|---|\n| x | y‸ |\n
+
+=== table_empty_cell (§6.3.1: an empty cell sitting on its pipe gets a trailing blank)
+src: | a | b |\n|---|---|\n| x |‸|\n
+do: type "y"
+want: | a | b |\n|---|---|\n| x |y‸ |\n
+
+=== table_cell_bs_nothing (§7.7, §7.10: Backspace at a cell's start never removes a pipe)
+src: | a | ‸b |\n|---|---|\n
+do: BS
+want: | a‸ | b |\n|---|---|\n

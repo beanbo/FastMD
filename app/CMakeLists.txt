@@ -1,9 +1,13 @@
 cmake_minimum_required(VERSION 3.25)
 # the one place the version lives: src/version.h (generated) feeds the exe resource and the settings window
-project(FastMD VERSION 1.2.0 LANGUAGES C CXX RC)
+project(FastMD VERSION 1.3.0 LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# Every target names its optimisation level itself (edit mode's sources build with /O1, the rest with /O2): CMake's
+# default /O2 in the Release flags would clash with that
+string(REPLACE "/O2" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+string(REPLACE "/O2" "" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
 # static CRT: no VC runtime DLLs to load or ship
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 option(FASTMD_CFG "Control Flow Guard (+ /GS)" ON)
@@ -27,11 +31,10 @@ endif()
 configure_file(src/version.h.in ${CMAKE_BINARY_DIR}/generated/version.h @ONLY)
 
 add_executable(FastMD WIN32
-    src/view.cpp src/window.cpp src/loader.cpp src/parse.cpp src/html.cpp src/net.cpp src/svg.cpp src/formulas.cpp
-    src/layout.cpp src/canvas_gdi.cpp src/canvas_print.cpp src/print.cpp
+    src/view.cpp src/window.cpp src/loader.cpp src/parse.cpp src/html.cpp
+    src/layout.cpp src/canvas_gdi.cpp
     src/highlight.cpp src/theme.cpp src/util.cpp
-    src/find.cpp src/toc.cpp src/home.cpp src/store.cpp src/shell.cpp src/settings_ui.cpp src/strings.cpp
-    src/copy.cpp src/drag.cpp src/crash.cpp src/update.cpp src/uia.cpp src/tasks.cpp
+    src/find.cpp src/toc.cpp src/home.cpp src/strings.cpp
     third_party/md4c/md4c.c
     res/fastmd.rc)
 
@@ -41,6 +44,30 @@ target_compile_definitions(FastMD PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN N
 target_compile_options(FastMD PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus /EHsc
     $<$<CONFIG:Release>:/O2 /Oi /GL /Gy /DNDEBUG> ${FASTMD_SEC_C})
 set_source_files_properties(third_party/md4c/md4c.c PROPERTIES COMPILE_OPTIONS "/wd4244;/wd4267")
+
+# Edit mode's sources favour size (docs/EDIT-MODE.md §1 principle 3): none of them is on a hot path except the map
+# queries, which are measured, and the exe pays ~1.5 ms per MB on every launch whether edit mode is used or not. They
+# are compiled on their own with /O1 (the rest of the program keeps /O2) and linked into the exe with everything else.
+# The screen-reader provider joins them: it runs only while a screen reader asks, one call at a time.
+add_library(fastmd_edit OBJECT src/editcore.cpp src/editops.cpp src/editfile.cpp src/edit.cpp src/editbar.cpp src/editpop.cpp
+    src/uia.cpp)
+# The cold half of reading mode goes the same way (Phase 3a): the updater, the settings window, the shell's dialogs,
+# links and clipboard, printing and its canvas, the crash handler, dragging out and copying run on a click or after the
+# first frame - never on the way to it, never while scrolling (the gear is one icon a frame); so do the downloads, the
+# glue of the SVG, TeX and Mermaid libraries (the work is in the DLLs, on workers) and the reading-mode task tick; and
+# (Phase 3b) the settings and positions store - a handful of registry reads on the way to the first frame, the rest
+# after it. The parser, layout, view, canvas, window, loader, start screen, highlighter, theme, strings, find and outline
+# keep /O2.
+add_library(fastmd_cold OBJECT src/update.cpp src/settings_ui.cpp src/shell.cpp src/print.cpp src/canvas_print.cpp
+    src/crash.cpp src/drag.cpp src/copy.cpp src/net.cpp src/svg.cpp src/formulas.cpp src/tasks.cpp src/store.cpp)
+foreach(lib fastmd_edit fastmd_cold)
+    target_include_directories(${lib} PRIVATE ${CMAKE_BINARY_DIR}/generated)
+    target_compile_definitions(${lib} PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS
+        MD4C_USE_UTF16)
+    target_compile_options(${lib} PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus /EHsc
+        $<$<CONFIG:Release>:/O1 /Oi /GL /Gy /DNDEBUG> ${FASTMD_SEC_C})
+    target_sources(FastMD PRIVATE $<TARGET_OBJECTS:${lib}>)
+endforeach()
 # the version resource is generated from version.h, and the resource compiler's dependencies are not scanned:
 # without this a version bump left the old number inside the exe
 set_source_files_properties(res/fastmd.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_BINARY_DIR}/generated/version.h)
@@ -51,12 +78,12 @@ target_link_options(FastMD PRIVATE
     /MANIFEST:EMBED /MANIFESTINPUT:${FASTMD_MANIFEST}
     /DELAYLOAD:dwrite.dll /DELAYLOAD:ole32.dll /DELAYLOAD:shell32.dll /DELAYLOAD:imm32.dll
     /DELAYLOAD:windowscodecs.dll /DELAYLOAD:comdlg32.dll /DELAYLOAD:winhttp.dll
-    /DELAYLOAD:winspool.drv /DELAYLOAD:uiautomationcore.dll
+    /DELAYLOAD:winspool.drv /DELAYLOAD:uiautomationcore.dll /DELAYLOAD:uxtheme.dll
     # /MANIFEST:EMBED with our own manifest: incremental linking would expect a separate .manifest file (Debug)
     /INCREMENTAL:NO
     $<$<CONFIG:Release>:/LTCG /OPT:REF /OPT:ICF> ${FASTMD_SEC_L})
 target_link_libraries(FastMD PRIVATE user32 gdi32 dwmapi dwrite ole32 shell32 imm32 windowscodecs comdlg32 advapi32
-    winhttp winspool uiautomationcore delayimp)
+    winhttp winspool uiautomationcore uxtheme delayimp)
 
 # ---------------------------------------------------------------------------------------------- fastmd-svg.dll
 # SVG (badges, diagrams) is drawn by lunasvg + plutovg. They live in a DLL, not in the exe: CreateProcess pays
@@ -155,8 +182,9 @@ endif()
 option(FASTMD_FUZZ "Build the fuzz harness" OFF)
 option(FASTMD_ASAN "Build it with AddressSanitizer" OFF)
 if(FASTMD_FUZZ)
+    # editcore.cpp: every input is also parsed with edit mode's map and checked by MapSelfCheck
     add_executable(fastmd-fuzz tests/fuzz/fuzz.cpp src/parse.cpp src/html.cpp src/highlight.cpp src/util.cpp
-        src/theme.cpp third_party/md4c/md4c.c)
+        src/theme.cpp src/editcore.cpp src/editops.cpp third_party/md4c/md4c.c)
     target_include_directories(fastmd-fuzz PRIVATE ${CMAKE_BINARY_DIR}/generated src)
     target_compile_definitions(fastmd-fuzz PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
         _CRT_SECURE_NO_WARNINGS MD4C_USE_UTF16 FASTMD_NO_APP)
@@ -164,6 +192,23 @@ if(FASTMD_FUZZ)
         $<$<BOOL:${FASTMD_ASAN}>:/fsanitize=address>)
     target_link_options(fastmd-fuzz PRIVATE /DEBUG /INCREMENTAL:NO)
     target_link_libraries(fastmd-fuzz PRIVATE user32 advapi32 shlwapi)
+endif()
+
+# --------------------------------------------------------------------------------------------- fastmd-edit-tests
+# Edit mode's window-free core (docs/EDIT-MODE.md §14.1): golden cases from tests/edit/cases and property sweeps over
+# the corpus, on the same parser the app uses but with no window and no `g`. The exit code is the number of failures.
+#   pwsh -File tests/edit/run.ps1
+option(FASTMD_TESTS "Build the edit-mode unit tests" ON)
+if(FASTMD_TESTS)
+    add_executable(fastmd-edit-tests tests/edit/edit_tests.cpp src/editcore.cpp src/editops.cpp src/editfile.cpp src/parse.cpp src/html.cpp
+        src/highlight.cpp src/util.cpp src/theme.cpp third_party/md4c/md4c.c)
+    target_include_directories(fastmd-edit-tests PRIVATE ${CMAKE_BINARY_DIR}/generated src)
+    target_compile_definitions(fastmd-edit-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        _CRT_SECURE_NO_WARNINGS MD4C_USE_UTF16 FASTMD_NO_APP FASTMD_APP_DIR="${CMAKE_SOURCE_DIR}")
+    target_compile_options(fastmd-edit-tests PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus /EHsc
+        $<$<CONFIG:Release>:/O2 /Oi /DNDEBUG>)
+    target_link_options(fastmd-edit-tests PRIVATE /INCREMENTAL:NO)
+    target_link_libraries(fastmd-edit-tests PRIVATE user32 advapi32 shlwapi)
 endif()
 
 # ------------------------------------------------------------------------------------------- fastmd-preview.dll

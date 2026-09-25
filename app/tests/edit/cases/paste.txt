@@ -1,0 +1,69 @@
+Plain-text paste (docs/EDIT-MODE.md §7.11): the pasted text is Markdown source; its line ends become the file's, its
+lines get the block's prefixes, a cell and an ATX heading keep it on one line. Format as in enter.txt.
+
+=== paste_quote (§7.11: `one⏎⏎two` into `> quo‸ted`)
+src: > quo‸ted\n
+do: Paste("one\n\ntwo")
+want: > quoone\n>\n> two‸ted\n
+
+=== paste_cell (§7.11: into a cell line ends become <br>)
+src: | a‸ |\n|---|\n
+do: Paste("one\n\ntwo")
+want: | aone<br><br>two‸ |\n|---|\n
+
+=== paste_cell_pipe (§7.10, §7.11: and a pipe \|)
+src: | a‸ |\n|---|\n
+do: Paste("x|y")
+want: | ax\\|y‸ |\n|---|\n
+
+=== paste_atx (§7.11: into an ATX heading line ends become blanks)
+src: # Ti‸tle\n
+do: Paste("one\n\ntwo")
+want: # Tione  two‸tle\n
+
+=== paste_para (§7.11: lines 2… get the block's continuation prefix)
+src: ab‸cd\n
+do: Paste("x\ny")
+want: abx\ny‸cd\n
+
+=== paste_line_ends (§7.11, D15: any line end becomes the file's)
+src: ab‸cd\n
+do: Paste("x\r\ny\rz")
+want: abx\ny\nz‸cd\n
+
+=== paste_code (§7.11: in code the pasted indentation is kept after the prefix)
+src: ```\nab‸cd\n```\n
+do: Paste("x\n  y")
+want: ```\nabx\n  y‸cd\n```\n
+
+=== paste_markdown (§7.11: the text is Markdown source, not escaped; the caret goes where typing continues)
+src: ab‸\n
+do: Paste(" **x**")
+want: ab **x‸**\n
+
+=== paste_no_escape (§7.11: no §7.4 escaping of pasted source)
+src: ab‸cd\n
+flags: nolist
+do: Paste("\n# x\n")
+want: ab\n# x\n‸cd\n
+
+=== paste_over_selection (§7.9, §7.11: over a selection the paste replaces it)
+src: a⟦bc⟧d\n
+do: Paste("X")
+want: aX‸d\n
+
+=== paste_over_blocks (§7.9, §7.11: over a selection across blocks too)
+src: ab⟦c\n\nde⟧f\n
+do: Paste("X")
+want: abX‸f\n
+
+=== paste_empty_item (§6.3.1, §7.11: into an empty item it gets its blank)
+src: - a\n-‸\n
+flags: nolist
+do: Paste("x")
+want: - a\n- x‸\n
+
+=== paste_surrogates (§7.1: a lone surrogate becomes U+FFFD; a pair stays)
+src: a‸\n
+do: Paste("😀\uD83Dz")
+want: a😀�z‸\n

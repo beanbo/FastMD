@@ -119,8 +119,11 @@ bool WriteEntries(const std::wstring& dir, const std::vector<PosEntry>& list) {
     return ok && MoveFileExW(tmp.c_str(), dst.c_str(), MOVEFILE_REPLACE_EXISTING);
 }
 
+// Most recently opened first, in a stable insertion sort: the file is written in this order, so the list comes nearly
+// sorted - and std::stable_sort's code is kilobytes of the exe
 void SortAndTrim(std::vector<PosEntry>& list) {
-    std::stable_sort(list.begin(), list.end(), [](const PosEntry& a, const PosEntry& b) { return a.opened > b.opened; });
+    for (size_t i = 1; i < list.size(); i++)
+        for (size_t k = i; k > 0 && list[k].opened > list[k - 1].opened; k--) std::swap(list[k], list[k - 1]);
     if (list.size() > kMaxPositions) list.resize(kMaxPositions);
 }
 
@@ -144,6 +147,30 @@ void SetLastUpdateCheck(uint64_t t) {
     if (!k) return;
     SetDword(k, L"UpdateSeenLo", (DWORD)(t & 0xFFFFFFFF));
     SetDword(k, L"UpdateSeenHi", (DWORD)(t >> 32));
+    RegCloseKey(k);
+}
+
+// the newest release a check found, with its installer and hash: later windows show it without asking GitHub again
+void LoadFoundUpdate(std::wstring& version, std::wstring& url, std::wstring& shaUrl) {
+    HKEY k = OpenKey(false);
+    version = GetString(k, L"UpdateVersion");
+    url = GetString(k, L"UpdateUrl");
+    shaUrl = GetString(k, L"UpdateShaUrl");
+    if (k) RegCloseKey(k);
+}
+
+void SaveFoundUpdate(const std::wstring& version, const std::wstring& url, const std::wstring& shaUrl) {
+    HKEY k = OpenKey(true);
+    if (!k) return;
+    if (version.empty()) {
+        RegDeleteValueW(k, L"UpdateVersion");
+        RegDeleteValueW(k, L"UpdateUrl");
+        RegDeleteValueW(k, L"UpdateShaUrl");
+    } else {
+        SetString(k, L"UpdateVersion", version);
+        SetString(k, L"UpdateUrl", url);
+        SetString(k, L"UpdateShaUrl", shaUrl);
+    }
     RegCloseKey(k);
 }
 
@@ -202,6 +229,7 @@ void LoadConfig(Config& c, std::wstring* findQuery) {
     c.editor = GetString(k, L"Editor");
     c.findCase = GetDword(k, L"FindCase", 0) != 0;
     c.findWord = GetDword(k, L"FindWord", 0) != 0;
+    c.autosave = GetDword(k, L"Autosave", 1) != 0;
     if (findQuery) *findQuery = GetString(k, L"FindQuery");
     c.sizeW = (int)std::clamp(GetDword(k, L"Width", 1000), 400ul, 4000ul);  // v0.1: client size only
     c.sizeH = (int)std::clamp(GetDword(k, L"Height", 800), 300ul, 3000ul);
@@ -225,8 +253,23 @@ void SaveConfig(const Config& c, const std::wstring& findQuery) {
     SetString(k, L"Editor", c.editor);
     SetDword(k, L"FindCase", c.findCase);
     SetDword(k, L"FindWord", c.findWord);
+    SetDword(k, L"Autosave", c.autosave);
     SetString(k, L"FindQuery", findQuery.substr(0, 256));
     RegCloseKey(k);
+}
+
+uint32_t RegGetDword(const wchar_t* name, uint32_t def) {
+    HKEY k = OpenKey(false);
+    DWORD v = GetDword(k, name, def);
+    if (k) RegCloseKey(k);
+    return v;
+}
+
+void RegSetDword(const wchar_t* name, uint32_t v) {
+    if (HKEY k = OpenKey(true)) {
+        SetDword(k, name, v);
+        RegCloseKey(k);
+    }
 }
 
 bool RegReadBinary(const wchar_t* name, void* data, DWORD size) {

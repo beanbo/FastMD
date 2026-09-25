@@ -1,0 +1,124 @@
+Tab and Shift+Tab (docs/EDIT-MODE.md §7.8), and the Tab rules of §6.5: list items nest and come out, a paragraph after
+a list item joins it, code is indented, cells are stepped through with their text selected. Format as in enter.txt.
+
+=== tab_nest_item (§7.8: nested under the item before it; the first of a nested ordered list is numbered 1)
+src: 1. a\n2. ‸b\n
+do: Tab
+want: 1. a\n   1. ‸b\n
+
+=== tab_nest_bullet (§7.8: a bullet item gains the item before's content column)
+src: - a\n- ‸b\n  more\n
+do: Tab
+want: - a\n  - ‸b\n    more\n
+
+=== tab_nest_joins_sublist (§7.8: after a nested list the item joins it, its number kept)
+src: 1. a\n   1. x\n2. ‸b\n
+do: Tab
+want: 1. a\n   1. x\n   2. ‸b\n
+
+=== tab_first_item_nothing (§7.8: no item before it in its list: nothing)
+src: - ‸a\n- b\n
+do: Tab
+want: - ‸a\n- b\n
+
+=== tab_items_selected (§7.8: every selected item nests)
+src: - a\n- ⟦b\n- c⟧\n
+do: Tab
+want: - a\n  - ⟦b\n  - c⟧\n
+
+=== stab_outdent (§7.8: one level out; the items after it become its children, numbered from 1)
+src: 1. a\n   1. x\n   2. ‸y\n   3. z\n2. b\n
+do: S-Tab
+want: 1. a\n   1. x\n2. ‸y\n   1. z\n2. b\n
+
+=== stab_outdent_bullet (§7.8: a nested bullet item, its continuation lines too)
+src: - a\n  - ‸b\n    more\n
+do: S-Tab
+want: - a\n- ‸b\n  more\n
+
+=== stab_top_item (§7.8: at the top level the item becomes a paragraph, as Backspace on a first item)
+src: - ‸a\n- b\n
+flags: nolist
+do: S-Tab
+want: ‸a\n\n- b\n
+
+=== stab_top_middle_item (§7.8: a middle item: blank lines part it from the items on both sides)
+src: - a\n- ‸b\n- c\n
+flags: nolist
+do: S-Tab
+want: - a\n\n‸b\n\n- c\n
+
+=== tab_para_into_item (§7.8, UX-1: a paragraph after a list item joins it as a paragraph of its own)
+src: - a\n\n‸b\nc\n
+flags: nolist
+do: Tab
+want: - a\n\n  ‸b\n  c\n
+
+=== tab_para_nothing (§6.5, §7.8: Tab in any other paragraph does nothing)
+src: abc\n\n‸def\n
+flags: nolist
+do: Tab
+want: abc\n\n‸def\n
+
+=== tab_heading_nothing (§7.8: nor in a heading)
+src: # ‸Head\n
+flags: nolist
+do: Tab
+want: # ‸Head\n
+
+=== stab_para_nothing (§7.8: Shift+Tab in a paragraph does nothing)
+src: - a\n\n‸b\n
+flags: nolist
+do: S-Tab
+want: - a\n\n‸b\n
+
+=== tab_code (§7.8: four blanks at the caret in code)
+src: ```\nco‸de\n```\n
+do: Tab
+want: ```\nco    ‸de\n```\n
+
+=== tab_code_tabs (§7.8: a tab where the block's indentation uses tabs)
+src: ```\n\tx\nco‸de\n```\n
+do: Tab
+want: ```\n\tx\nco\t‸de\n```\n
+
+=== tab_code_lines (§7.8: a selection over several lines: each line indented after the container prefix)
+src: ```\n⟦ab\ncd⟧\n```\n
+do: Tab
+want: ```\n    ⟦ab\n    cd⟧\n```\n
+
+=== stab_code (§7.8: Shift+Tab takes up to four blanks off the line's start)
+src: ```\n      co‸de\n```\n
+do: S-Tab
+want: ```\n  co‸de\n```\n
+
+=== stab_code_tab (§7.8: or one tab)
+src: ```\n\tco‸de\n```\n
+do: S-Tab
+want: ```\nco‸de\n```\n
+
+=== tab_cell_next (§7.8, UX-24: the next cell, its text selected)
+src: | a‸ | bc |\n|---|---|\n
+do: Tab
+want: | a | ⟦bc⟧ |\n|---|---|\n
+
+=== tab_last_cell (§7.8: after the last cell a new row, the caret in its first cell)
+src: | a | b‸ |\n|---|---|\n
+do: Tab
+want: | a | b |\n|---|---|\n| ‸ |  |\n
+
+=== stab_cell_prev (§7.8: the previous cell, its text selected)
+src: | ab | ‸c |\n|---|---|\n
+do: S-Tab
+want: | ⟦ab⟧ | c |\n|---|---|\n
+
+=== stab_first_cell_nothing (§7.8: before the first cell nothing)
+src: | ‸ab | c |\n|---|---|\n
+do: S-Tab
+want: | ‸ab | c |\n|---|---|\n
+
+=== tab_phantom_after_item (§6.7, §7.8: a phantom after a list item takes the item's continuation prefix)
+src: - a\n- ‸\n
+flags: nolist
+do: Enter; Tab; type "x"
+want: - a\n\n  x‸\n

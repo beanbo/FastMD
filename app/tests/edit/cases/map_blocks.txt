@@ -1,0 +1,426 @@
+Map goldens, blocks (docs/EDIT-MODE.md §4.4, block table). Each map: block is the whole map of its source, as
+fastmd-edit-tests --update writes it and a reviewer checked it: b<n> = a block and its source record (line, content
+beg..end, the end of its last content line, the end of its last line) with the source slices «prefix⟨content⟩rest|
+outer»; s = its segments (text t+len, kind, source); span = its spans; c<n> = containers; img<n> = picture ranges;
+order = the blocks in source order.
+
+=== map_paragraph (§4.4 paragraph)
+src: First line\nsecond line\n\nAnother paragraph.\n
+map:
+  b0 P - line=0 beg=0 end=22 le=22 outer=22 "First line second line" «⟨First line\nsecond line⟩»
+    s 0+10 P 0..10 «First line»
+    s 10+1 TEXT 10..11 «\n» " "
+    s 11+11 P 11..22 «second line»
+  b1 P - line=24 beg=24 end=42 le=42 outer=42 "Another paragraph." «⟨Another paragraph.⟩»
+    s 22+18 P 24..42 «Another paragraph.»
+  order 0 1
+
+=== map_atx (§4.4 ATX heading, closing sequence)
+src: # Title #\n\n##   Spaced   ##  \n\n###\n
+map:
+  b0 H1 ATX line=0 beg=2 end=7 le=9 outer=9 "Title" «# ⟨Title⟩ #»
+    s 0+5 P 2..7 «Title»
+  b1 H2 ATX line=11 beg=16 end=22 le=29 outer=29 "Spaced" «##   ⟨Spaced⟩   ##  »
+    s 5+6 P 16..22 «Spaced»
+  b2 H3 ATX line=31 beg=34 end=34 le=34 outer=34 "" «###⟨⟩»
+  order 0 1 2
+
+=== map_setext (§4.4 setext heading, underline)
+src: Title\n=====\n\nSub title\nspans two lines\n---  \n\ntext\n
+map:
+  b0 H1 SETEXT line=0 beg=0 end=5 le=5 outer=11 "Title" «⟨Title⟩|\n=====»
+    s 0+5 P 0..5 «Title»
+  b1 H2 SETEXT line=13 beg=13 end=38 le=38 outer=44 "Sub title spans two lines" «⟨Sub title\nspans two lines⟩|\n---  »
+    s 5+9 P 13..22 «Sub title»
+    s 14+1 TEXT 22..23 «\n» " "
+    s 15+15 P 23..38 «spans two lines»
+  b2 P - line=46 beg=46 end=50 le=50 outer=50 "text" «⟨text⟩»
+    s 30+4 P 46..50 «text»
+  order 0 1 2
+
+=== map_setext_in_quote (§4.4 a setext underline behind a quote marker)
+src: > Title\n> ===\n
+flags: noquote
+map:
+  b0 H1 SETEXT line=0 beg=2 end=7 le=7 outer=13 in=c0 pre="> " blank=">" "Title" «> ⟨Title⟩|\n> ===»
+    s 0+5 P 2..7 «Title»
+  c0 QUOTE up=-1 b0..0
+  order 0
+
+=== map_mixed_eol (§4.4 CRLF, LF and a lone CR in one file: every line keeps its own ending)
+src: crlf line\r\nlf line\ncr line\r\r\n```\nx\r\ny\n```\r\n
+flags: nocrlf
+map:
+  b0 P - line=0 beg=0 end=26 le=26 outer=26 "crlf line lf line cr line" «⟨crlf line\r\nlf line\ncr line⟩»
+    s 0+9 P 0..9 «crlf line»
+    s 9+1 TEXT 9..11 «\r\n» " "
+    s 10+7 P 11..18 «lf line»
+    s 17+1 TEXT 18..19 «\n» " "
+    s 18+7 P 19..26 «cr line»
+  b1 CODE FENCED line=29 beg=33 end=37 le=37 outer=41 aux=32 "x\ny" «```\n⟨x\r\ny⟩|\n```»
+    s 25+1 P 33..34 «x»
+    s 26+1 TEXT 34..36 «\r\n» "\n"
+    s 27+1 P 36..37 «y»
+  order 0 1
+
+=== map_trailing_blanks (§4.4 lineEnd holds a last line's trailing blanks, F1)
+src: last line   \n\nnext\n
+map:
+  b0 P - line=0 beg=0 end=9 le=12 outer=12 "last line" «⟨last line⟩   »
+    s 0+9 P 0..9 «last line»
+  b1 P - line=14 beg=14 end=18 le=18 outer=18 "next" «⟨next⟩»
+    s 9+4 P 14..18 «next»
+  order 0 1
+
+=== map_fenced (§4.4 fenced code: content, info string, closing fence)
+src: ```js title="x"\nlet a = 1;\n  let b;\n```\n\n~~~~\ntilde\n~~~~~\n
+map:
+  b0 CODE FENCED line=0 beg=16 end=35 le=35 outer=39 aux=15 "let a = 1;\n  let b;" «```js title="x"\n⟨let a = 1;\n  let b;⟩|\n```»
+    s 0+10 P 16..26 «let a = 1;»
+    s 10+1 TEXT 26..27 «\n» "\n"
+    s 11+2 P 27..29 «  »
+    s 13+6 P 29..35 «let b;»
+  b1 CODE FENCED line=41 beg=46 end=51 le=51 outer=57 aux=45 "tilde" «~~~~\n⟨tilde⟩|\n~~~~~»
+    s 19+5 P 46..51 «tilde»
+  order 0 1
+
+=== map_fenced_empty (§4.4 fenced code with no content line, and with one empty line, F4)
+src: ```\n```\n\n```\n\n```\n\n```\na\n\n\n```\n
+map:
+  b0 CODE FENCED|NOCONTENT line=0 beg=3 end=3 le=3 outer=7 aux=3 "" «```⟨⟩|\n```»
+  b1 CODE FENCED line=9 beg=13 end=13 le=13 outer=17 aux=12 "" «```\n⟨⟩|\n```»
+  b2 CODE FENCED line=19 beg=23 end=26 le=26 outer=30 aux=22 "a\n\n" «```\n⟨a\n\n⟩|\n```»
+    s 0+1 P 23..24 «a»
+    s 1+1 TEXT 24..25 «\n» "\n"
+    s 2+1 TEXT 25..26 «\n» "\n"
+  order 0 1 2
+
+=== map_fenced_unclosed (§4.4 unclosed fence, F14f)
+src: text\n\n```py\nx = 1\n
+map:
+  b0 P - line=0 beg=0 end=4 le=4 outer=4 "text" «⟨text⟩»
+    s 0+4 P 0..4 «text»
+  b1 CODE FENCED|UNCLOSED line=6 beg=12 end=17 le=17 outer=17 aux=11 "x = 1" «```py\n⟨x = 1⟩»
+    s 4+5 P 12..17 «x = 1»
+  order 0 1
+
+=== map_fenced_unclosed_quote (§4.4 unclosed fence in a quote)
+src: > ```\n> code\n\nafter\n
+map:
+  b0 CODE FENCED|UNCLOSED line=0 beg=8 end=12 le=12 outer=12 aux=5 in=c0 pre="> " blank=">" "code" «> ```\n> ⟨code⟩»
+    s 0+4 P 8..12 «code»
+  b1 P - line=14 beg=14 end=19 le=19 outer=19 "after" «⟨after⟩»
+    s 4+5 P 14..19 «after»
+  c0 QUOTE up=-1 b0..0
+  order 0 1
+
+=== map_indented_code (§4.4 indented code)
+src: para\n\n    code line\n      deeper\n\n    after gap\n
+map:
+  b0 P - line=0 beg=0 end=4 le=4 outer=4 "para" «⟨para⟩»
+    s 0+4 P 0..4 «para»
+  b1 CODE - line=6 beg=10 end=47 le=47 outer=47 "code line\n  deeper\n\nafter gap" «    ⟨code line\n      deeper\n\n    after gap⟩»
+    s 4+9 P 10..19 «code line»
+    s 13+1 TEXT 19..24 «\n    » "\n"
+    s 14+2 P 24..26 «  »
+    s 16+6 P 26..32 «deeper»
+    s 22+1 TEXT 32..33 «\n» "\n"
+    s 23+1 TEXT 33..38 «\n    » "\n"
+    s 24+9 P 38..47 «after gap»
+  order 0 1
+
+=== map_code_tabs (§4.4 tabs in code indentation, F3)
+src: \tone tab\n\t\ttwo tabs\n  \tmixed\n
+flags: nolist noquote
+map:
+  b0 CODE - line=0 beg=1 end=28 le=28 outer=28 "one tab\n    two tabs\nmixed" «\t⟨one tab\n\t\ttwo tabs\n  \tmixed⟩» nostop=9,10,11
+    s 0+7 P 1..8 «one tab»
+    s 7+1 TEXT 8..10 «\n\t» "\n"
+    s 8+4 TEXT 10..11 «\t» "    "
+    s 12+8 P 11..19 «two tabs»
+    s 20+1 TEXT 19..23 «\n  \t» "\n"
+    s 21+5 P 23..28 «mixed»
+  order 0
+
+=== map_code_tabs_in_list (§4.4 a tab split between a list item and the code, SEGF_SPLITTAB)
+src: - item\n\n\t\tcode\n
+flags: nolist noquote
+map:
+  b0 P - line=0 beg=2 end=6 le=6 outer=6 in=c0 pre="  " "item" «- ⟨item⟩»
+    s 0+4 P 2..6 «item»
+  b1 CODE - line=8 beg=9 end=14 le=14 outer=14 in=c0 pre="  " "  code" «\t⟨\tcode⟩» nostop=5
+    s 4+2 TEXT 9..10 SPLITTAB «\t» "  "
+    s 6+4 P 10..14 «code»
+  c0 ITEM up=-1 b0..1 mark=0+1 '-' col=2 loose
+  order 0 1
+
+=== map_hr (§4.4 horizontal rules)
+src: a\n\n---\n\n* * *\n\n___\n
+map:
+  b0 P - line=0 beg=0 end=1 le=1 outer=1 "a" «⟨a⟩»
+    s 0+1 P 0..1 «a»
+  b1 HR OBJECT line=3 beg=3 end=6 le=6 outer=6 "" «⟨---⟩»
+  b2 HR OBJECT line=8 beg=8 end=13 le=13 outer=13 "" «⟨* * *⟩»
+  b3 HR OBJECT line=15 beg=15 end=18 le=18 outer=18 "" «⟨___⟩»
+  order 0 1 2 3
+
+=== map_injected_hr (§4.4 the HR md4c injects after reference definitions, P8, F14e)
+src: [a]: /url\n---\n\ntext [a]\n
+map:
+  b0 HR OBJECT line=10 beg=10 end=13 le=13 outer=13 "" «⟨---⟩»
+  b1 P - line=15 beg=15 end=23 le=23 outer=23 "text a" «⟨text [a]⟩»
+    s 0+5 P 15..20 «text »
+    s 5+1 P 21..22 «a»
+    span A t5..6 o20..21 c22..23 REF «[»«]»
+  order 0 1
+
+=== map_refdefs (§4.4 reference definitions before a paragraph: the paragraph starts after them)
+src: [a]: /u\n[b]: /v "title"\ntext [a] and [b]\n\n[c]: /w\n
+map:
+  b0 P - line=24 beg=24 end=40 le=40 outer=40 "text a and b" «⟨text [a] and [b]⟩»
+    s 0+5 P 24..29 «text »
+    s 5+1 P 30..31 «a»
+    s 6+5 P 32..37 « and »
+    s 11+1 P 38..39 «b»
+    span A t5..6 o29..30 c31..32 REF «[»«]»
+    span A t11..12 o37..38 c39..40 REF «[»«]»
+  order 0
+
+=== map_html_block (§4.4 an HTML block: every block made from it shares one raw record)
+src: before\n\n<div align="center">\n<p>one</p>\n<p>two <b>bold</b></p>\n</div>\n\nafter\n
+map:
+  b0 P - line=0 beg=0 end=6 le=6 outer=6 "before" «⟨before⟩»
+    s 0+6 P 0..6 «before»
+  b1 P RAW|HTML line=8 beg=8 end=69 le=69 outer=69 raw=b1 "one" «⟨<div align="center">\n<p… <b>bold</b></p>\n</div>⟩»
+  b2 P RAW|HTML line=8 beg=8 end=69 le=69 outer=69 raw=b1 "two bold" «⟨<div align="center">\n<p… <b>bold</b></p>\n</div>⟩»
+  b3 P - line=71 beg=71 end=76 le=76 outer=76 "after" «⟨after⟩»
+    s 17+5 P 71..76 «after»
+  order 0 1 2 3
+
+=== map_html_comment (§4.4 an HTML comment block makes no block)
+src: a\n\n<!-- hidden\ncomment -->\n\nb\n
+map:
+  b0 P - line=0 beg=0 end=1 le=1 outer=1 "a" «⟨a⟩»
+    s 0+1 P 0..1 «a»
+  b1 P - line=28 beg=28 end=29 le=29 outer=29 "b" «⟨b⟩»
+    s 1+1 P 28..29 «b»
+  order 0 1
+
+=== map_html_table (§4.4 an HTML table: a raw block, no cell sources)
+src: <table>\n<tr><td>a</td><td>b</td></tr>\n</table>\n
+map:
+  b0 TABLE RAW|HTML line=0 beg=0 end=46 le=46 outer=46 raw=b0 "ab" «⟨<table>\n<tr><td>a</td><td>b</td></tr>\n</table>⟩»
+  order 0
+
+=== map_picture_only (§4.4 a paragraph that is only a picture: an object atom)
+src: ![Logo](img/logo.png "The logo")\n\n![ref pic][r]\n\n[r]: img/r.png\n
+map:
+  b0 IMAGE OBJECT line=0 beg=0 end=32 le=32 outer=32 "Logo" «⟨![Logo](img/logo.png "The logo")⟩»
+  b1 IMAGE OBJECT line=34 beg=34 end=47 le=47 outer=47 "ref pic" «⟨![ref pic][r]⟩»
+  img0 m0 outer=0..32 src=8..20 alt=2..6 «img/logo.png»
+  img1 m0 outer=34..47 src=-..- alt=36..43
+  order 0 1
+
+=== map_display_formula (§4.4 a display formula: an object atom with TeX, code text without)
+src: $$\\frac{a}{b}$$\n\ntext\n
+tex: on
+map:
+  b0 IMAGE OBJECT line=0 beg=0 end=15 le=15 outer=15 "\frac{a}{b}" «⟨$$\frac{a}{b}$$⟩»
+  b1 P - line=17 beg=17 end=21 le=21 outer=21 "text" «⟨text⟩»
+    s 11+4 P 17..21 «text»
+  img0 m2 outer=0..15 src=2..13 alt=-..- «\frac{a}{b}»
+  order 0 1
+
+=== map_display_formula_notex (§4.4 the same without the TeX library)
+src: $$\\frac{a}{b}$$\n\ntext\n
+tex: off
+map:
+  b0 P - line=0 beg=0 end=15 le=15 outer=15 "\frac{a}{b}" «⟨$$\frac{a}{b}$$⟩»
+    s 0+11 P 2..13 «\frac{a}{b}»
+    span MATHD t0..11 o0..2 c13..15 «$$»«$$»
+  b1 P - line=17 beg=17 end=21 le=21 outer=21 "text" «⟨text⟩»
+    s 11+4 P 17..21 «text»
+  order 0 1
+
+=== map_mermaid (§4.4 a Mermaid diagram: an object atom; its source is the content lines)
+src: ```mermaid\ngraph TD;\n  A-->B;\n```\n\nafter\n
+tex: on
+map:
+  b0 IMAGE FENCED|OBJECT line=0 beg=11 end=29 le=29 outer=33 aux=10 "graph TD;\n  A-->B;" «```mermaid\n⟨graph TD;\n  A-->B;⟩|\n```»
+  b1 P - line=35 beg=35 end=40 le=40 outer=40 "after" «⟨after⟩»
+    s 18+5 P 35..40 «after»
+  img0 m3 outer=0..33 src=11..29 alt=-..- «graph TD;\n  A-->B;»
+  order 0 1
+
+=== map_mermaid_off (§4.4 Mermaid without the library: plain code)
+src: ```mermaid\ngraph TD;\n```\n
+tex: off
+map:
+  b0 CODE FENCED line=0 beg=11 end=20 le=20 outer=24 aux=10 "graph TD;" «```mermaid\n⟨graph TD;⟩|\n```»
+    s 0+9 P 11..20 «graph TD;»
+  order 0
+
+=== map_front_table (§4.4 front matter as a property table: one raw object atom)
+src: ---\ntitle: Hello\nauthor: "Me"\n---\n\n# Heading\n
+flags: noquote nolist
+map:
+  b0 TABLE RAW|FRONT line=0 beg=4 end=29 le=29 outer=33 raw=b0 "titleHelloauthorMe" «---\n⟨title: Hello\nauthor: "Me"⟩|\n---»
+  b1 H1 ATX line=35 beg=37 end=44 le=44 outer=44 "Heading" «# ⟨Heading⟩»
+    s 18+7 P 37..44 «Heading»
+  order 0 1
+
+=== map_front_yaml (§4.4 front matter as YAML: one raw object atom)
+src: ---\ntags:\n  - a\n  - b\n...\n\nText.\n
+flags: noquote nolist
+map:
+  b0 CODE RAW|FRONT line=0 beg=4 end=21 le=21 outer=25 raw=b0 "tags:\n  - a\n  - b" «---\n⟨tags:\n  - a\n  - b⟩|\n...»
+  b1 P - line=27 beg=27 end=32 le=32 outer=32 "Text." «⟨Text.⟩»
+    s 17+5 P 27..32 «Text.»
+  order 0 1
+
+=== map_alert_md4c (§4.4 an alert md4c parses: a synthesized title)
+src: > [!NOTE]\n> Useful information.\n> More.\n\nafter\n
+map:
+  b0 P SYNTH in=c0 "  Note"
+  b1 P - line=10 beg=12 end=39 le=39 outer=39 in=c0 pre="> " blank=">" "Useful information. More." «> ⟨Useful information.\n> More.⟩»
+    s 7+19 P 12..31 «Useful information.»
+    s 26+1 TEXT 31..34 «\n> » " "
+    s 27+5 P 34..39 «More.»
+  b2 P - line=41 beg=41 end=46 le=46 outer=46 "after" «⟨after⟩»
+    s 32+5 P 41..46 «after»
+  c0 ALERT up=-1 b0..1
+  order 1 2
+
+=== map_alert_oneline (§4.4 a one-line alert, TryAlert: the content starts after the tag, F24)
+src: > [!TIP] Do this *now*.\n\nafter\n
+map:
+  b0 P SYNTH in=c0 "  Tip"
+  b1 P - line=0 beg=9 end=23 le=23 outer=23 in=c0 pre="> " blank=">" "Do this now." «> [!TIP] ⟨Do this *now*.⟩»
+    s 6+8 P 9..17 «Do this »
+    s 14+3 P 18..21 «now»
+    s 17+1 P 22..23 «.»
+    span EM t14..17 o17..18 c21..22 ENTER «*»«*»
+  b2 P - line=25 beg=25 end=30 le=30 outer=30 "after" «⟨after⟩»
+    s 18+5 P 25..30 «after»
+  c0 ALERT up=-1 b0..1
+  order 1 2
+
+=== map_footnotes (§4.4 footnote definitions out of order, the section HR, the back arrow)
+src: One[^b] and two[^a].\n\n[^a]: First *def*.\n[^b]: Second def.\n[^c]: Never used.\n\nEnd.\n
+map:
+  b0 P - line=0 beg=0 end=20 le=20 outer=20 "One[1] and two[2]." «⟨One[^b] and two[^a].⟩» nostop=4,5,15,16
+    s 0+3 P 0..3 «One»
+    s 3+3 TEXT 3..7 «[^b]» "[1]"
+    s 6+8 P 7..15 « and two»
+    s 14+3 TEXT 15..19 «[^a]» "[2]"
+    s 17+1 P 19..20 «.»
+    span FNREF t3..6 o3..7 c7..7 «[^b]»«»
+    span FNREF t14..17 o15..19 c19..19 «[^a]»«»
+  b1 P - line=78 beg=78 end=82 le=82 outer=82 "End." «⟨End.⟩»
+    s 18+4 P 78..82 «End.»
+  b2 HR SYNTH ""
+  b3 P FOOTNOTE line=41 beg=47 end=58 le=58 outer=58 aux=41 in=c0 "Second def. ↩" «[^b]: ⟨Second def.⟩» nostop=34,35
+    s 22+11 P 47..58 «Second def.»
+    s 33+2 SYNTH 58..58 «» " ↩"
+  b4 P FOOTNOTE line=22 beg=28 end=40 le=40 outer=40 aux=22 in=c1 "First def. ↩" «[^a]: ⟨First *def*.⟩» nostop=46,47
+    s 35+6 P 28..34 «First »
+    s 41+3 P 35..38 «def»
+    s 44+1 P 39..40 «.»
+    s 45+2 SYNTH 40..40 «» " ↩"
+    span EM t41..44 o34..35 c38..39 ENTER «*»«*»
+  c0 FOOTNOTE up=-1 b3..3 mark=41
+  c1 FOOTNOTE up=-1 b4..4 mark=22
+  order 0 4 3 1
+
+=== map_empty_items (§4.4 empty list items, BS_EMPTYITEM)
+src: -\n- \n-   \n1.\n\n- [ ]\n- [x]\n- [ ] \n
+map:
+  b0 P EMPTYITEM line=0 beg=1 end=1 le=1 outer=1 in=c0 pre="  " "" «-⟨⟩»
+  b1 P EMPTYITEM line=2 beg=4 end=4 le=4 outer=4 in=c1 pre="  " "" «- ⟨⟩»
+  b2 P EMPTYITEM line=5 beg=9 end=9 le=9 outer=9 in=c2 pre="  " "" «-   ⟨⟩»
+  b3 P EMPTYITEM line=10 beg=12 end=12 le=12 outer=12 in=c3 pre="   " "" «1.⟨⟩»
+  b4 P EMPTYITEM line=14 beg=19 end=19 le=19 outer=19 in=c4 pre="  " "" «- [ ]⟨⟩»
+  b5 P EMPTYITEM line=20 beg=25 end=25 le=25 outer=25 in=c5 pre="  " "" «- [x]⟨⟩»
+  b6 P EMPTYITEM line=26 beg=32 end=32 le=32 outer=32 in=c6 pre="  " "" «- [ ] ⟨⟩»
+  c0 ITEM up=-1 b0..0 mark=0+1 '-' col=2
+  c1 ITEM up=-1 b1..1 mark=2+1 '-' col=2
+  c2 ITEM up=-1 b2..2 mark=5+1 '-' col=2
+  c3 ITEM up=-1 b3..3 mark=10+2 1'.' col=3
+  c4 ITEM up=-1 b4..4 mark=14+1 '-' col=2 task=17
+  c5 ITEM up=-1 b5..5 mark=20+1 '-' col=2 task=23
+  c6 ITEM up=-1 b6..6 mark=26+1 '-' col=2 task=29
+  order 0 1 2 3 4 5 6
+
+=== map_table (§4.4 a table: cells, rows, pipes, the delimiter row, alignment)
+src: | Name | Value |\n|:-----|------:|\n| a    | 1     |\n|      | x \\| y |\n
+map:
+  b0 TABLE - line=0 beg=0 end=68 le=68 outer=68 "NameValuea1x | y" «⟨| Name | Value |\n|:----…    |\n|      | x \| y |⟩»
+    s 0+4 P 2..6 «Name»
+    s 4+5 P 9..14 «Value»
+    s 9+1 P 36..37 «a»
+    s 10+1 P 43..44 «1»
+    s 11+2 P 60..62 «x »
+    s 13+1 TEXT 62..64 «\|» "|"
+    s 14+2 P 64..66 « y»
+    cell 0,0 t0+4 2..6 «Name»
+    cell 0,1 t4+5 9..14 «Value»
+    cell 1,0 t9+1 36..37 «a»
+    cell 1,1 t10+1 43..44 «1»
+    cell 2,0 t11+0 58..58 «»
+    cell 2,1 t11+5 60..66 «x \| y»
+    row 0 0/0..16 pipes 0 7 15
+    row 1 17/17..33 pipes 17 24 32
+    row 2 34/34..50 pipes 34 41 49
+    row 3 51/51..68 pipes 51 58 67
+  order 0
+
+=== map_table_short_rows (§4.4 missing cells and rows without outer pipes, F20)
+src: a | b | c\n--|---|--\n1 | 2\nx\n
+map:
+  b0 TABLE - line=0 beg=0 end=27 le=27 outer=27 "abc12x" «⟨a | b | c\n--|---|--\n1 | 2\nx⟩»
+    s 0+1 P 0..1 «a»
+    s 1+1 P 4..5 «b»
+    s 2+1 P 8..9 «c»
+    s 3+1 P 20..21 «1»
+    s 4+1 P 24..25 «2»
+    s 5+1 P 26..27 «x»
+    cell 0,0 t0+1 0..1 «a»
+    cell 0,1 t1+1 4..5 «b»
+    cell 0,2 t2+1 8..9 «c»
+    cell 1,0 t3+1 20..21 «1»
+    cell 1,1 t4+1 24..25 «2»
+    cell 1,2 t5+0 missing@25
+    cell 2,0 t5+1 26..27 «x»
+    cell 2,1 t6+0 missing@27
+    cell 2,2 t6+0 missing@27
+    row 0 0/0..9 pipes 2 6
+    row 1 10/10..19 pipes 12 16
+    row 2 20/20..25 pipes 22
+    row 3 26/26..27 pipes
+  order 0
+
+=== map_nul_in_code (§4.4 a NUL in a code block is one atom, the text after it plain - the NUL is in the text once)
+src: ```\n\0x\n```\n
+map:
+  b0 CODE FENCED line=0 beg=4 end=6 le=6 outer=10 aux=3 "�x" «```\n⟨\0x⟩|\n```»
+    s 0+1 TEXT 4..5 «\0» "�"
+    s 1+1 P 5..6 «x»
+  order 0
+
+=== map_table_in_quote (§4.4 a table inside a quote)
+src: > | h1 | h2 |\n> |----|----|\n> | c  |    |\n
+flags: noquote
+map:
+  b0 TABLE - line=0 beg=2 end=41 le=41 outer=41 in=c0 pre="> " blank=">" "h1h2c" «> ⟨| h1 | h2 |\n> |----|----|\n> | c  |    |⟩»
+    s 0+2 P 4..6 «h1»
+    s 2+2 P 9..11 «h2»
+    s 4+1 P 32..33 «c»
+    cell 0,0 t0+2 4..6 «h1»
+    cell 0,1 t2+2 9..11 «h2»
+    cell 1,0 t4+1 32..33 «c»
+    cell 1,1 t5+0 40..40 «»
+    row 0 0/2..13 pipes 2 7 12
+    row 1 14/16..27 pipes 16 21 26
+    row 2 28/30..41 pipes 30 35 40
+  c0 QUOTE up=-1 b0..0
+  order 0

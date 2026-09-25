@@ -15,7 +15,7 @@ void Relayout() {
     RecomputeY();
 }
 
-void Command(UINT) {}
+void Command(UINT, UINT) {}
 void ApplySettings(uint32_t, bool) {}
 void ApplyTheme() {}
 
@@ -45,6 +45,10 @@ void DrawHome() {}
 void HomeRebuild() {}
 int HomeItemAt(float, float) { return -1; }
 
+// ---------------------------------------------------------------------------------------------- editbar.cpp
+void DrawEditChrome(int) {}  // the pane never edits: no toolbar, no strips, no pencil
+int EditChromeRects(float (*)[4], int) { return 0; }
+
 // ---------------------------------------------------------------------------------------------- settings_ui.cpp
 void DrawSettingsButton() {}
 bool SettingsButtonRect(float*, float*, float*, float*) { return false; }
@@ -67,6 +71,6 @@ bool DocHasRemoteImages() { return false; }
 void ScheduleImageScaling() {}
 void StartMeasure() {}
 void StartBackgroundWork() {}
-HANDLE Spawn(LPTHREAD_START_ROUTINE, void*, int, SIZE_T) { return nullptr; }
+HANDLE Spawn(LPTHREAD_START_ROUTINE, void*, int, SIZE_T, WorkerKind) { return nullptr; }
 void OpenDocument(const std::wstring&, bool, float, bool) {}
 void ReloadDocument() {}

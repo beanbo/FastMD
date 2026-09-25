@@ -1,0 +1,334 @@
+Block commands (docs/EDIT-MODE.md §8.4-§8.7): paragraph and heading styles, lists, quotes, code blocks - per text block
+the caret or the selection touches, and in a phantom row its style (§6.7). src holds the caret ‸ or a selection ⟦ … ⟧;
+want the source afterwards; phantom where a phantom row stands then. Each case also runs with CRLF line ends, inside a
+quote and inside a list item unless its flags say otherwise.
+
+=== h2_lines_join (§8.4's example: `line one⏎line two` + Ctrl+2 → `## line one line two`)
+src: ‸line one\nline two\n
+do: H2
+want: ## ‸line one line two\n
+
+=== h2_hard_break (§8.4: a hard break becomes <br>)
+src: one\\\ntw‸o\n
+do: H2
+want: ## one<br>tw‸o\n
+
+=== h2_twice_text (§8.4: Ctrl+n on a heading of level n returns it to a paragraph)
+src: ## ti‸tle\n
+do: H2
+want: ti‸tle\n
+
+=== h1_from_h3 (§8.4: ATX m → n changes the # run only; the closing sequence stays)
+src: ### ti‸tle ###\n
+do: H1
+want: # ti‸tle ###\n
+
+=== h2_from_setext (§8.4: setext → ATX, the underline gone)
+src: Ti‸tle\n===\n
+do: H2
+want: ## Ti‸tle\n
+
+=== p_from_setext
+src: Ti‸tle\n---\n
+do: P
+want: Ti‸tle\n
+
+=== p_escapes (§8.4's example: `# 1. Intro` → `1\. Intro`)
+src: # ‸1. Intro\n
+do: P
+want: ‸1\\. Intro\n
+
+=== p_closing_sequence (the closing sequence goes too)
+src: ## ti‸tle ##\n
+do: P
+want: ti‸tle\n
+
+=== h2_alert_one_line (§8.4, F24: a one-line alert's tag goes onto its own line first)
+src: > [!NOTE] Remember‸ this\n
+flags: noquote nolist
+do: H2
+want: > [!NOTE]\n> ## Remember‸ this\n
+
+=== h2_in_item (§8.4: `- ## x` is valid)
+src: - it‸em\n
+flags: nolist
+do: H2
+want: - ## it‸em\n
+
+=== h1_selection_blocks (§8.1: every text block the selection touches)
+src: ⟦a\n\nb⟧\n
+flags: nolist
+do: H1
+want: # ⟦a\n\n# b⟧\n
+
+=== h1_skips_code (a code block in the selection keeps its lines)
+src: ⟦a\n\n```\nx\n```\n\nb⟧\n
+flags: nolist
+do: H1
+want: # ⟦a\n\n```\nx\n```\n\n# b⟧\n
+
+=== p_empty_heading_phantom (§6.7: an empty heading made a paragraph: a phantom row in its place)
+src: abc\n\n##‸\n\ndef\n
+flags: nolist
+do: H2
+want: abc‸\n\ndef\n
+phantom: after 0 in
+
+=== style_phantom (§6.7, §8.1: in a phantom the command sets its style; typing writes it)
+src: abc‸\n
+flags: nolist
+do: Enter; H3; type "x"
+want: abc\n\n### x‸\n
+
+=== style_phantom_state
+src: abc‸\n
+flags: nolist
+do: Enter; H3
+want: abc‸\n
+phantom: after 0 in style 3
+
+=== style_in_cell_refused (§8.1: no block style in a table)
+src: | a‸ |\n| --- |\n
+do: H1
+want: | a‸ |\n| --- |\n
+state: refused=context
+
+=== bullet_lines (§8.5's example: `Buy milk⏎and eggs` → `- Buy milk⏎  and eggs`)
+src: Buy milk‸\nand eggs\n
+flags: nolist
+do: Bullet
+want: - Buy milk‸\n  and eggs\n
+
+=== bullet_blocks_tight (§8.5's example: `a⏎⏎b` → `- a⏎- b`)
+src: ⟦a\n\nb⟧\n
+flags: nolist
+do: Bullet
+want: - ⟦a\n- b⟧\n
+
+=== number_blocks (§8.5: numbered in order)
+src: ⟦a\n\nb\n\nc⟧\n
+flags: nolist
+do: Number
+want: 1. ⟦a\n2. b\n3. c⟧\n
+
+=== number_lines (continuation lines indented to the content: three columns)
+src: a‸\nb\n
+flags: nolist
+do: Number
+want: 1. a‸\n   b\n
+
+=== task_on (§8.5: `- [ ] `)
+src: ‸a\n
+flags: nolist
+do: Task
+want: - [ ] ‸a\n
+
+=== bullet_heading (a heading becomes a list item holding it)
+src: # ti‸tle\n
+flags: nolist
+do: Bullet
+want: - # ti‸tle\n
+
+=== bullet_off (§8.5's example: off - the markers go, blank lines keep the paragraphs apart)
+src: ⟦- a\n- b⟧\n
+flags: nolist
+do: Bullet
+want: ⟦a\n\nb⟧\n
+
+=== bullet_off_one (off for the caret's item; a blank line parts it from the item left before it)
+src: - a\n- ‸b\n
+flags: nolist
+do: Bullet
+want: - a\n\n‸b\n
+
+=== bullet_off_first (a blank line parts it from the item left after it)
+src: - ‸a\n- b\n
+flags: nolist
+do: Bullet
+want: ‸a\n\n- b\n
+
+=== bullet_off_continuation (continuation lines lose the content indent)
+src: - a‸\n  b\n
+flags: nolist
+do: Bullet
+want: a‸\nb\n
+
+=== bullet_off_children (§8.5: children lose the content indent too)
+src: - a‸\n  - b\n
+flags: nolist
+do: Bullet
+want: a‸\n- b\n
+
+=== number_change_list (§8.5: with a caret the whole list level changes kind)
+src: - a\n- ‸b\n- c\n
+flags: nolist
+do: Number
+want: 1. a\n2. ‸b\n3. c\n
+
+=== number_change_reindent (§8.5: continuation lines follow the marker's width)
+src: - a‸\n  cont\n
+flags: nolist
+do: Number
+want: 1. a‸\n   cont\n
+
+=== bullet_change_keeps_box (§8.5: a [x] is kept between bulleted and numbered tasks)
+src: 1. [x] ‸a\n
+flags: nolist
+do: Bullet
+want: - [x] ‸a\n
+
+=== task_on_list (§8.5: task on a list: the whole level gets boxes)
+src: - ‸a\n- b\n
+flags: nolist
+do: Task
+want: - [ ] ‸a\n- [ ] b\n
+
+=== task_off (§8.5: off - every block a task item: the marker goes with its box)
+src: - [ ] ‸a\n
+flags: nolist
+do: Task
+want: ‸a\n
+
+=== bullet_on_task (§8.5: task ↔ plain - a bulleted task made a bulleted item loses its box)
+src: - [ ] ‸a\n- [x] b\n
+flags: nolist
+do: Bullet
+want: - ‸a\n- b\n
+
+=== number_on_task (bullet ↔ number of a task list: the boxes stay)
+src: - [x] ‸a\n
+flags: nolist
+do: Number
+want: 1. [x] ‸a\n
+
+=== bullet_joins_list (§8.5: right after a list of that kind: its next item; a tight list stays tight)
+src: - a\n\nb‸\n
+flags: nolist
+do: Bullet
+want: - a\n- b‸\n
+
+=== number_joins_list (the next number)
+src: 1. a\n2. b\n\nc‸\n
+flags: nolist
+do: Number
+want: 1. a\n2. b\n3. c‸\n
+
+=== bullet_phantom (§6.7: in a phantom: its style)
+src: abc‸\n
+flags: nolist
+do: Enter; Bullet; type "x"
+want: abc\n\n- x‸\n
+
+=== quote_on (§8.6's example: `a⏎⏎b` → `> a⏎>⏎> b`)
+src: ⟦a\n\nb⟧\n
+flags: nolist noquote
+do: Quote
+want: > ⟦a\n>\n> b⟧\n
+
+=== quote_on_item (after the container prefix: a quote in the item)
+src: - ‸a\n
+flags: nolist noquote
+do: Quote
+want: - > ‸a\n
+
+=== quote_off (§8.6: off - one `>` level goes)
+src: > ‸a\n> b\n
+do: Quote
+want: ‸a\nb\n
+
+=== quote_off_middle (§8.6: in the middle of the quote it splits; a blank line of it on each side)
+src: > a\n>\n> ‸b\n>\n> c\n
+do: Quote
+want: > a\n>\n‸b\n>\n> c\n
+
+=== quote_off_adds_blank (a blank line of the quote is put in where none parts it)
+src: > # H\n> ‸text\n
+flags: noquote
+do: Quote
+want: > # H\n>\n‸text\n
+
+=== quote_off_alert (§8.6: an alert loses its tag line with its quote level)
+src: > [!NOTE]\n> ‸Text\n
+flags: noquote nolist
+do: Quote
+want: ‸Text\n
+
+=== quote_phantom
+src: abc‸\n
+flags: nolist
+do: Enter; Quote; type "x"
+want: abc\n\n> x‸\n
+
+=== fence_wrap (§8.7, Phase 4 notes: text blocks → one fence of their source lines, emphasis and addresses kept)
+src: **bold** te‸xt\nline2\n
+flags: nolist
+do: Fence
+want: ```\n**bold** te‸xt\nline2\n```\n
+
+=== fence_wrap_blocks (a blank line between the blocks; the caret where the selection's focus was)
+src: ⟦a\n\n# b⟧\n
+flags: nolist
+do: Fence
+want: ```\na\n\nb‸\n```\n
+
+=== fence_longer (§8.7: a fence longer than any backtick run inside)
+src: a ````x```` ‸c\n
+flags: nolist
+do: Fence
+want: `````\na ````x```` ‸c\n`````\n
+
+=== fence_unwrap (§8.7: in a code block: a paragraph per non-empty line, escaped)
+src: ```\nfoo‸\n\nbar *x*\n```\n
+flags: nolist
+do: Fence
+want: ‸foo\n\nbar \\*x\\*\n
+
+=== fence_unwrap_escapes (§7.4 at the new lines' starts)
+src: ```\n# not a heading‸\n```\n
+flags: nolist
+do: Fence
+want: ‸\\# not a heading\n
+
+=== fence_phantom (§8.7: an empty phantom → an empty fence pair, the caret on its content line)
+src: abc‸\n
+flags: nolist
+do: Enter; Fence
+want: abc\n\n```\n‸\n```\n
+
+=== fence_in_cell_after (§8.1: in a table cell: an empty fence after the table)
+src: | a‸ |\n| --- |\n
+flags: nolist
+do: Fence
+want: | a |\n| --- |\n\n```\n‸\n```\n
+
+=== lang_fenced (§8.7: the info string of the opening fence)
+src: ```js\nco‸de\n```\n
+do: Lang("py")
+want: ```py\nco‸de\n```\n
+
+=== lang_off
+src: ```js\nco‸de\n```\n
+do: Lang("")
+want: ```\nco‸de\n```\n
+
+=== lang_indented (§8.7: an indented block becomes a fenced one)
+src: para\n\n    co‸de\n
+flags: nolist
+do: Lang("js")
+want: para\n\n```js\n‸code\n```\n
+
+=== fence_keeps_phantom (§6.7, §8.7, the final gate: a phantom after a paragraph stays after the fence it becomes - left where the text ended, the letter typed into it went into the code)
+src: abc de‸\n
+flags: nolist
+do: Enter; Back; Fence; Phantom; type "z"
+want: ```\nabc de\n```\n\nz‸\n
+
+=== unfence_keeps_phantom (§6.7, §8.7, the final gate: code unwrapped, the phantom after it stays after the last paragraph)
+src: ```\nab\n\ncd‸\n```\n
+do: C-Enter; Back; Fence; Phantom; type "z"
+want: ab\n\ncd\n\nz‸\n
+
+=== lang_keeps_phantom (§6.7, §8.7, the final gate: a phantom after code stays after its closing fence - left inside it, the letter typed into it broke the fence)
+src: ```\nco‸de\n```\n
+do: C-Enter; Back; Lang("js"); Phantom; type "z"
+want: ```js\ncode\n```\n\nz‸\n

@@ -62,6 +62,9 @@ struct BlockLayout {
 float BlockHeightEstimate(const Doc& d, const Typography& t, const Block& b, float width, bool* exact);
 BlockLayout* LayoutBlock(const Doc& d, const Typography& t, uint32_t index, float width);
 int ImageSize(Doc& d, uint32_t imageIndex, int* w, int* h);  // reads PNG/JPEG/GIF/BMP header; thread-safe
+// Called by a measure thread for itself: it then reads no picture header that can block (a network drive, a cloud
+// file not on this disk), so an edit that waits for it waits one block at most (EDIT-MODE.md §5.1).
+void SetMeasureThread();
 float ImageDisplayHeight(const Image& im, float width);
 // A Mermaid diagram is drawn at its own size and scrolled sideways when it does not fit: shrinking a diagram to the
 // text column is what makes its labels unreadable. Printing and the Explorer pane cannot scroll, so there it fits.

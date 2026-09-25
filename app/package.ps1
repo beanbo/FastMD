@@ -42,7 +42,9 @@ To associate .md without the installer: right-click inside the window -> "Open .
 confirm in Settings -> Default apps.
 
 Keys: Ctrl+F find, Ctrl+Shift+O outline, Ctrl+P print, Ctrl+Shift+P export to PDF, Ctrl+C / Ctrl+Shift+C copy as
-text or as Markdown, Shift+arrows select, Ctrl+, settings, Ctrl+E open in editor, Ctrl+Alt+Left/Right column width.
+text or as Markdown, Shift+arrows select, Ctrl+, settings, Ctrl+E open in an external editor, Ctrl+Alt+Left/Right
+column width. Edit mode: double-click on text or F2; Esc or the X on the toolbar leaves it; edits are saved to the
+file automatically (Settings -> Autosave edits).
 
 The files beside the exe are loaded only when a document needs them: fastmd-svg.dll for SVG, fastmd-tex.dll for
 formulas, fastmd-mermaid.dll for diagrams, fastmd-preview.dll for the Explorer preview pane and thumbnails.
@@ -59,8 +61,9 @@ FastMD $ver - молниеносный просмотрщик Markdown для Wi
 FastMD…» и подтвердить выбор в «Параметрах».
 
 Клавиши: Ctrl+F поиск, Ctrl+Shift+O оглавление, Ctrl+P печать, Ctrl+Shift+P экспорт в PDF, Ctrl+C / Ctrl+Shift+C
-копировать текстом или как Markdown, Shift+стрелки выделение, Ctrl+, настройки, Ctrl+E редактор,
-Ctrl+Alt+←/→ ширина колонки.
+копировать текстом или как Markdown, Shift+стрелки выделение, Ctrl+, настройки, Ctrl+E внешний редактор,
+Ctrl+Alt+←/→ ширина колонки. Режим правки: двойной щелчок по тексту или F2; выйти — Esc или ✕ на панели; правки
+сохраняются в файл сами (Настройки -> «Автосохранение правок»).
 
 Библиотеки рядом с exe подгружаются только когда нужны: fastmd-svg.dll для SVG, fastmd-tex.dll для формул,
 fastmd-mermaid.dll для диаграмм, fastmd-preview.dll для панели просмотра и эскизов в Проводнике.

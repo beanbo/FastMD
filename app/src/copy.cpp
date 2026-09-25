@@ -189,19 +189,28 @@ static void BuildRich(std::string& html, std::string& rtf) {
 
 // The source of the selection, as the author wrote it: the map says where each piece of text came from.
 std::wstring SelectionMarkdown() {
+    if (g.editing) {  // edit mode's map says exactly which source the selection stands for
+        std::wstring md = EditSelectionSource();
+        return md.empty() ? SelectionText() : md;
+    }
     if (!HasSelection() || g.src.empty() || g.doc.srcMap.empty()) return SelectionText();
     uint32_t from = SelFrom(), to = SelTo();
-    auto srcOf = [&](uint32_t pos, bool end) -> size_t {
+    auto srcOf = [&](uint32_t pos) -> size_t {
         auto it = std::upper_bound(g.doc.srcMap.begin(), g.doc.srcMap.end(), std::pair<uint32_t, uint32_t>{pos, UINT32_MAX});
-        if (it == g.doc.srcMap.begin()) return end ? g.src.size() : 0;
+        // Text before the first mapped chunk (an alert title at the top) has no place in the source. Its end used to be
+        // the end of the file, so such a selection copied the whole document; now it has none, and a selection made
+        // only of such text is copied as the text it shows.
+        if (it == g.doc.srcMap.begin()) return 0;
         --it;
         size_t off = it->second + (pos - it->first);  // inside a chunk text and source move together
         return std::min(off, g.src.size());
     };
-    size_t a = srcOf(from, false), b = srcOf(to, true);
+    size_t a = srcOf(from), b = srcOf(to);
     if (b <= a) return SelectionText();
-    while (a > 0 && g.src[a - 1] != L'\n' && a - 1 > 0 && b - a < 4000) a--;  // start at the line the selection began on
-    while (b < g.src.size() && g.src[b] != L'\n') b++;
+    // start at the line the selection began on - the file's first line included (the walk used to stop one character
+    // short of the start of the file, and "# Title" came out as " Title")
+    while (a > 0 && g.src[a - 1] != L'\n' && g.src[a - 1] != L'\r' && b - a < 4000) a--;
+    while (b < g.src.size() && g.src[b] != L'\n' && g.src[b] != L'\r') b++;  // to the end of its line, not into its CRLF
     std::wstring out;
     for (size_t i = a; i < b; i++) {  // the clipboard wants CRLF
         if (g.src[i] == L'\n' && (i == a || g.src[i - 1] != L'\r')) out.push_back(L'\r');
@@ -243,25 +252,31 @@ void SelectionRichFormats(std::wstring& text, std::string& cfHtml, std::string& 
 }
 
 // text + CF_HTML + RTF in one go
-void CopySelectionRich() {
+bool CopySelectionRich() {
+    // edit mode: FastMD's own format too - the selection's source, balanced - which a paste in FastMD takes first (§7.11)
+    const std::wstring md = EditPrivateSlice();
     std::wstring text;
     std::string cfHtml, rtf;
     SelectionRichFormats(text, cfHtml, rtf);
-    if (text.empty()) return;
-    if (!OpenClipboard(g.hwnd)) return;
+    if (text.empty()) return false;
+    if (!OpenClipboardRetry()) return false;
     EmptyClipboard();
     auto set = [](UINT fmt, const void* data, size_t bytes) {
-        if (!fmt || !bytes) return;
+        if (!fmt || !bytes) return false;
         if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
             memcpy(GlobalLock(h), data, bytes);
             GlobalUnlock(h);
-            if (!SetClipboardData(fmt, h)) GlobalFree(h);
+            if (SetClipboardData(fmt, h)) return true;
+            GlobalFree(h);
         }
+        return false;
     };
-    set(CF_UNICODETEXT, text.c_str(), (text.size() + 1) * sizeof(wchar_t));
+    bool ok = set(CF_UNICODETEXT, text.c_str(), (text.size() + 1) * sizeof(wchar_t));
     static UINT fmtHtml = RegisterClipboardFormatW(L"HTML Format");
     static UINT fmtRtf = RegisterClipboardFormatW(L"Rich Text Format");
     set(fmtHtml, cfHtml.c_str(), cfHtml.size() + 1);
     set(fmtRtf, rtf.c_str(), rtf.size() + 1);
+    if (!md.empty()) set(RegisterClipboardFormatW(L"FastMD Markdown"), md.c_str(), (md.size() + 1) * sizeof(wchar_t));
     CloseClipboard();
+    return ok;
 }

@@ -28,7 +28,15 @@ void DrawButton() {
 }
 }  // namespace
 
-bool TocAvailable() { return !g.path.empty() && !g.doc.headings.empty(); }
+static int g_frozen = -1;  // while editing: whether the document had headings at entry (-1 = not frozen)
+
+bool TocAvailable() { return g_frozen >= 0 ? g_frozen != 0 : !g.path.empty() && !g.doc.headings.empty(); }
+// An edit that adds or removes the only heading must not dock or undock the panel under the reader: the column would
+// move and every layout go (§12.7, R21). Leaving lets it follow the headings again (EditExit's re-parse re-lays out).
+void TocFreeze(bool on) {
+    g_frozen = -1;
+    if (on) g_frozen = TocAvailable() ? 1 : 0;
+}
 bool TocWideEnough() { return ViewW() >= kPanelW + kMinDocW + 2 * Metrics::kPadX; }
 bool TocDocked() { return Visible() && TocWideEnough(); }
 // on screen over the text; "open" alone is not enough: with no headings (start screen, a document without them) the
@@ -36,22 +44,52 @@ bool TocDocked() { return Visible() && TocWideEnough(); }
 bool TocOverlayOpen() { return Visible() && !TocWideEnough(); }
 float TocPanelW() { return kPanelW; }
 
+// an item's text as the list shows it: the heading's text on one line
+static bool SameText(const std::wstring& item, const Block& b) {
+    if (item.size() != b.textLen) return false;
+    for (uint32_t k = 0; k < b.textLen; k++) {
+        wchar_t c = g.doc.text[b.textOff + k];
+        if (item[k] != (c == L'\n' || c == L'\t' ? L' ' : c)) return false;
+    }
+    return true;
+}
+
+// Every edit swaps the model, and most leave the headings as they were: then the items, their layouts and the list's
+// scroll stay exactly as they are. When the headings did change, an item that kept its level and text keeps its layout,
+// and while editing the list is not centred on the current heading again - it would jump under the reader's typing
+// (§12.7, R21).
 void TocSync() {
     if (g.tocSerial == g.docSerial) return;
-    for (auto& it : g.toc) SafeRelease(it.layout);
+    g.tocSerial = g.docSerial;
+    const auto& hs = g.doc.headings;
+    size_t n = 0;
+    bool same = true;
+    for (const Heading& h : hs) {
+        if (h.block >= g.doc.blocks.size()) continue;
+        const TocItem* it = n < g.toc.size() ? &g.toc[n] : nullptr;
+        same = same && it && it->block == h.block && it->level == h.level && SameText(it->text, g.doc.blocks[h.block]);
+        n++;
+    }
+    if (same && n == g.toc.size()) return;
+    std::vector<TocItem> old = std::move(g.toc);
     g.toc.clear();
-    g_minLevel = 6;
-    for (const Heading& h : g.doc.headings) {
+    int minLevel = 6;
+    for (const Heading& h : hs) {
         if (h.block >= g.doc.blocks.size()) continue;
         const Block& b = g.doc.blocks[h.block];
         std::wstring t(g.doc.text, b.textOff, b.textLen);
         for (auto& c : t) if (c == L'\n' || c == L'\t') c = L' ';
         g.toc.push_back(TocItem{h.block, h.level, std::move(t), nullptr});
-        g_minLevel = std::min<int>(g_minLevel, h.level);
+        minLevel = std::min<int>(minLevel, h.level);
     }
-    g.tocSerial = g.docSerial;
+    // a layout depends on the item's text, its level and the smallest level (indent and weight)
+    if (minLevel == g_minLevel)
+        for (size_t k = 0; k < g.toc.size() && k < old.size(); k++)
+            if (old[k].level == g.toc[k].level && old[k].text == g.toc[k].text) std::swap(old[k].layout, g.toc[k].layout);
+    for (auto& it : old) SafeRelease(it.layout);
+    g_minLevel = minLevel;
     g.tocScroll = std::clamp(g.tocScroll, 0.f, MaxListScroll());
-    g_lastCur = -2;
+    if (!g.editing) g_lastCur = -2;
 }
 
 void TocSetOpen(bool open) {
@@ -71,7 +109,7 @@ void TocSetOpen(bool open) {
 int TocCurrent() {
     auto& hs = g.doc.headings;
     if (hs.empty() || g.Y.size() != g.doc.blocks.size()) return -1;
-    float line = g.scrollY + 48.f;
+    float line = g.scrollY + std::max(48.f, g.editing ? EditRevealTop() + 4.f : 0.f);  // (under edit mode's bar, §12.1)
     bool atEnd = g.scrollY >= MaxScroll() - 1.f && MaxScroll() > 0;
     if (atEnd) line = g.scrollY + ViewH() * 0.5f;  // the last sections never reach the top
     int cur = 0;
@@ -84,8 +122,8 @@ int TocCurrent() {
 
 void DrawToc() {
     // icons (Segoe Fluent Icons) stay out of the first frame: the font is loaded right after it (AfterFirstFrame repaints)
-    if (!Visible()) {
-        if (TocAvailable() && !g.firstFrame) DrawButton();
+    if (!Visible()) {  // edit mode's bar has its own outline button; a reading-mode strip leaves this corner free
+        if (TocAvailable() && !g.firstFrame && g.barT <= 0) DrawButton();
         return;
     }
     TocSync();
@@ -168,7 +206,7 @@ bool TocHit(float x, float y, int* item) {
 }
 
 bool TocButtonRect(float* l, float* t, float* r, float* b) {
-    if (Visible() || !TocAvailable() || g.firstFrame) return false;
+    if (Visible() || !TocAvailable() || g.firstFrame || g.barT > 0) return false;
     *l = kBtnX;
     *t = kBtnY;
     *r = kBtnX + kBtn;
@@ -177,7 +215,7 @@ bool TocButtonRect(float* l, float* t, float* r, float* b) {
 }
 
 bool TocButtonHit(float x, float y) {
-    return !Visible() && TocAvailable() && x >= kBtnX && x < kBtnX + kBtn && y >= kBtnY && y < kBtnY + kBtn;
+    return !Visible() && TocAvailable() && g.barT <= 0 && x >= kBtnX && x < kBtnX + kBtn && y >= kBtnY && y < kBtnY + kBtn;
 }
 
 void TocClick(int item) {

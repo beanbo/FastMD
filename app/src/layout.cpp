@@ -137,6 +137,11 @@ void Typography::Release() {
 // ------------------------------------------------------------------------------------------------ images
 static SRWLOCK g_imgLock = SRWLOCK_INIT;
 
+uint32_t NewPixelSerial() {
+    static std::atomic<uint32_t> serial{0};
+    return ++serial;
+}
+
 static bool ReadImageHeader(const wchar_t* path, int* w, int* h) {
     HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
     if (f == INVALID_HANDLE_VALUE) return false;
@@ -176,11 +181,29 @@ static bool ReadImageHeader(const wchar_t* path, int* w, int* h) {
     return false;
 }
 
+static thread_local bool t_measureThread = false;
+void SetMeasureThread() { t_measureThread = true; }
+
+// a picture file whose header a measure thread must not read: on a share (an unreachable one blocks for its timeout)
+// or a cloud file that is not on this disk (reading it downloads all of it)
+static bool SlowPicture(const std::wstring& path) {
+    if (IsNetworkPath(path)) return true;
+    DWORD a = GetFileAttributesW(path.c_str());
+    return a != INVALID_FILE_ATTRIBUTES &&
+           (a & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS));
+}
+
 int ImageSize(Doc& d, uint32_t idx, int* w, int* h) {
     Image& im = d.images[idx];
     AcquireSRWLockShared(&g_imgLock);
     int cw = im.w, ch = im.h;
     ReleaseSRWLockShared(&g_imgLock);
+    if (cw == -1 && t_measureThread && !im.path.empty() && SlowPicture(im.path)) {
+        // unknown for now, and not remembered as such: the picture worker's decode gives the size (ShowEntry), or the
+        // UI thread reads it when the block is laid out there
+        *w = *h = 0;
+        return 0;
+    }
     if (cw == -1) {
         cw = ch = 0;  // 0 = failed / remote
         if (!im.path.empty()) {
@@ -275,11 +298,11 @@ struct InlineImage final : IDWriteInlineObject {
                                    IUnknown*) override {
         Canvas* c = CanvasOfRenderer(renderer);
         if (!c || index >= doc->images.size()) return S_OK;
-        Image& im0 = const_cast<Doc*>(doc)->images[index];
-        Image& im = im0.canon >= 0 ? const_cast<Doc*>(doc)->images[im0.canon] : im0;
-        if (im.state.load() == 2) {
+        Image& im = const_cast<Doc*>(doc)->images[index];
+        if (im.state == RS_OK) {
             c->DrawImage(im, x, y, x + w, y + h);
-        } else if (im.state.load() == 3 && im.mathKind && !im.alt.empty() && factory && fmt) {
+            if (im.renderFailed) c->StrokeRoundRect(x - 1.f, y - 1.f, x + w + 1.f, y + h + 1.f, 2.f, 1.f, P_ALERT_CAUTION);  // (§2.10)
+        } else if (im.state == RS_FAILED && im.mathKind && !im.alt.empty() && factory && fmt) {
             // a formula the engine could not typeset: its source, as the author wrote it
             IDWriteTextLayout* L = nullptr;
             if (SUCCEEDED(factory->CreateTextLayout(im.alt.c_str(), (UINT32)im.alt.size(), fmt,
@@ -395,6 +418,15 @@ static TableLayout* LayoutTable(const Doc& d, const Typography& t, const Table& 
             tl->cells[r * tb.cols + c] = L;
         }
     }
+    // While editing (only edit mode parses with a map), a column with nothing in it yet - a table just put in - gets room
+    // for its header's placeholder and the first words: at its reading width it is a sliver a caret can hardly be put
+    // into (Phase 4 notes)
+    if (d.hasMap)
+        for (uint32_t c = 0; c < tb.cols; c++) {
+            bool empty = true;
+            for (uint32_t r = 0; r < tb.rows && empty; r++) empty = !d.cells[tb.cellOff + r * tb.cols + c].textLen;
+            if (empty) colNat[c] = colMin[c] = std::max(colNat[c], std::ceil(4.f * t.lineH[R_BODY]) + padX);
+        }
     float sumNat = 0, sumMin = 0;
     for (uint32_t c = 0; c < tb.cols; c++) { sumNat += colNat[c]; sumMin += colMin[c]; }
     tl->colW.resize(tb.cols);

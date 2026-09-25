@@ -1,0 +1,243 @@
+Inline formatting (docs/EDIT-MODE.md §8.2, §7.3, §7.5): bold, italic, strikethrough and inline code on a selection -
+added to the pieces that lack it, or taken off when every character has it -, and as a pending format for the next
+typed character; the sticky end of a span; `_` spans written with `*` where they would stand inside a word (F9-2). src
+holds the caret ‸ or a selection ⟦ … ⟧ (anchor first); want the source afterwards with the selection (its start after
+a delimiter put in right there, its end before one) or the caret; state: pending=<on>[/<off>] (B I S C, ! sticky).
+Each case also runs with CRLF line ends, inside a quote and inside a list item unless its flags say otherwise.
+
+=== bold_add (§8.2: the selection gets the format; its ends inside the new delimiters)
+src: a ⟦word⟧ b\n
+do: Bold
+want: a **⟦word⟧** b\n
+
+=== italic_add
+src: a ⟦word⟧ b\n
+do: Italic
+want: a *⟦word⟧* b\n
+
+=== strike_add
+src: a ⟦word⟧ b\n
+do: Strike
+want: a ~~⟦word⟧~~ b\n
+
+=== code_add
+src: a ⟦word⟧ b\n
+do: Code
+want: a `⟦word⟧` b\n
+
+=== bold_add_blanks_outside (§7.5 step 1: the blanks at the selection's edges stay outside the delimiters)
+src: a⟦ word ⟧b\n
+do: Bold
+want: a⟦ **word** ⟧b\n
+
+=== bold_remove_whole (§8.2 step 2: every character has it: taken off)
+src: a **⟦word⟧** b\n
+do: Bold
+want: a ⟦word⟧ b\n
+
+=== bold_remove_middle (§8.2: the span is split around the piece)
+src: **ab⟦cd⟧ef**\n
+do: Bold
+want: **ab**⟦cd⟧**ef**\n
+
+=== bold_remove_head (§8.2: at the span's edge only that delimiter moves)
+src: **⟦ab⟧cd**\n
+do: Bold
+want: ⟦ab⟧**cd**\n
+
+=== bold_remove_tail
+src: **ab⟦cd⟧**\n
+do: Bold
+want: **ab**⟦cd⟧\n
+
+=== italic_across_bold_edge (§8.2's example: the pieces are cut at the bold span's edge)
+src: **bo⟦ld te⟧xt**\n
+do: Italic
+want: **bo*⟦ld te⟧*xt**\n
+
+=== italic_pieces_at_edge (§8.2's example: `**bold** text` select `ld te`)
+src: **bo⟦ld** te⟧xt\n
+do: Italic
+want: **bo*⟦ld*** *te⟧*xt\n
+
+=== bold_grows_over_code (§8.2's example: a piece that touches a code span takes it whole)
+src: see `co⟦de` mo⟧re\n
+do: Bold
+want: see **`co⟦de` mo⟧**re\n
+
+=== bold_word_edge (§7.5 step 4: a delimiter that cannot open there moves out to the word's start)
+src: don⟦'t⟧ go\n
+do: Bold
+want: **don⟦'t⟧** go\n
+
+=== bold_merges_left (§7.5 step 2: a span of the same kind that ends where the new one starts takes it in)
+src: **a**⟦b⟧ c\n
+do: Bold
+want: **a⟦b⟧** c\n
+
+=== bold_merges_right
+src: a ⟦b⟧**c**\n
+do: Bold
+want: a **⟦b⟧c**\n
+
+=== bold_takes_inner_bold (§8.2: a span of the same kind inside the selection goes into the new one)
+src: ⟦a **b** c⟧\n
+do: Bold
+want: **⟦a b c⟧**\n
+
+=== italic_underscore_split (§7.5's example, F9-2: `_` would stand inside a word - written with `*`)
+src: _ab⟦cd⟧ef_\n
+do: Italic
+want: *ab*⟦cd⟧*ef*\n
+
+=== italic_underscore_head (F9-2: the moved opener would be inside the word too)
+src: _⟦ab⟧cd_ x\n
+do: Italic
+want: ⟦ab⟧*cd* x\n
+
+=== italic_underscore_keeps (a `_` delimiter that stays at a word's edge stays `_`)
+src: _ab ⟦cd⟧_\n
+do: Italic
+want: _ab_ ⟦cd⟧\n
+
+=== code_add_rendered (§8.2 step 4: the piece's rendered text in a backtick run - escapes, entities and emphasis gone)
+src: ⟦a **b** \\* &amp; c⟧\n
+do: Code
+want: `⟦a b * & c⟧`\n
+
+=== code_add_backtick (§7.5 step 3: a run longer than any inside, padded where the text starts or ends with one)
+src: say ⟦a`b⟧ now\n
+do: Code
+want: say ``⟦a`b⟧`` now\n
+
+=== code_remove_middle (§8.2 step 4: code taken off the middle of a code span)
+src: `a⟦b⟧c`\n
+do: Code
+want: `a`⟦b⟧`c`\n
+
+=== code_remove_escapes (§8.2 step 4: the unwrapped text is written with its Markdown characters escaped)
+src: x `⟦a*b_c⟧` y\n
+do: Code
+want: x ⟦a\\*b\\_c⟧ y\n
+
+=== code_around_picture (§8.2 step 4: a picture stays itself beside the code)
+src: ⟦a ![i](p.png) b⟧\n
+tex: on
+flags: nolist
+do: Code
+want: `⟦a` ![i](p.png) `b⟧`\n
+
+=== strike_across_blocks (§8.1: a selection over several blocks: a piece per block)
+src: ⟦ab\n\ncd⟧\n
+flags: nolist
+do: Strike
+want: ~~⟦ab~~\n\n~~cd⟧~~\n
+
+=== bold_in_cells (§8.2 step 1: a piece per cell)
+src: | ⟦a | b⟧ |\n| --- | --- |\n
+do: Bold
+want: | **⟦a** | **b⟧** |\n| --- | --- |\n
+
+=== bold_in_code_block_refused (§8.1: no inline format in code)
+src: ```\nco‸de\n```\n
+do: Bold
+want: ```\nco‸de\n```\n
+state: refused=context
+
+=== pending_on (§8.2: no selection - the next non-blank character takes it)
+src: ab ‸cd\n
+do: Bold; type "x"
+want: ab **x‸**cd\n
+state: pending=none
+
+=== pending_on_then_more (typing on goes on inside the new span)
+src: ab ‸\n
+do: Bold; type "x"; type "y"
+want: ab **xy‸**\n
+
+=== pending_blank_first (§7.3: blanks typed while pending go in plain; the format stays pending)
+src: ab‸\n
+do: Bold; type " "; type "x"
+want: ab **x‸**\n
+
+=== pending_state (the toggle alone: nothing written, the format pending)
+src: ab ‸cd\n
+do: Italic
+want: ab ‸cd\n
+state: pending=I
+
+=== pending_cancel (§8.2: a second toggle takes the pending bit back)
+src: ab ‸cd\n
+do: Bold; Bold
+want: ab ‸cd\n
+state: pending=none
+
+=== pending_two (§8.2: two formats pending wrap the text together)
+src: ab ‸\n
+do: Bold; Italic; type "x"
+want: ab ***x‸***\n
+
+=== pending_punctuation (§7.3's example: `(` cannot open there - plain, and the format stays pending)
+src: foo‸\n
+do: Bold; type "("; type "x"
+want: foo(**x‸**\n
+state: pending=none
+
+=== pending_off_split (§8.2's example: `**ab‸cd**` Ctrl+B, `x` → `**ab**x‸**cd**`)
+src: **ab‸cd**\n
+do: Bold; type "x"
+want: **ab**x‸**cd**\n
+
+=== pending_off_state
+src: **ab‸cd**\n
+do: Bold
+want: **ab‸cd**\n
+state: pending=/B
+
+=== pending_at_span_end (§8.2: at the span's end the caret steps over its closer - typing goes on plain)
+src: a **bold‸**\n
+do: Bold; type "x"
+want: a **bold**x‸\n
+
+=== pending_off_at_start (at the span's start the text goes before its opener)
+src: **‸ab** c\n
+flags: nolist
+do: Bold; type "x"
+want: x‸**ab** c\n
+
+=== pending_merges_left (§7.5 step 2: right after a span of that kind the text joins it)
+src: **ab**‸ c\n
+do: Bold; type "x"
+want: **abx‸** c\n
+
+=== pending_in_phantom (§8.1: a phantom takes a pending format too)
+src: abc‸\n
+flags: nolist
+do: Enter; Bold; type "x"
+want: abc\n\n**x‸**\n
+
+=== sticky_mid (§7.3's sticky end, in the middle of a paragraph)
+src: a **bold‸** tail\n
+do: type " "; type "x"
+want: a **bold x‸** tail\n
+
+=== sticky_state (the blank at a span's end leaves it sticky)
+src: a *it‸* b\n
+do: type " "
+want: a *it* ‸ b\n
+state: pending=I!
+
+=== sticky_two_blanks (more blanks: still sticky; the next character takes them all in)
+src: a **b‸**\n
+do: type " "; type " "; type "x"
+want: a **b  x‸**\n
+
+=== underscore_typed_before (F9-2: a word typed right before a `_` span: the span is written with `*`)
+src: x ‸_ab_\n
+do: type "y"
+want: x y‸*ab*\n
+
+=== underscore_deleted_blank (F9-2: a blank deleted before a `_` span brings it next to a word: `*`)
+src: foo ‸_bar_\n
+do: BS
+want: foo‸*bar*\n

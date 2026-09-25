@@ -78,24 +78,30 @@ void LoadImagesSync() {
     IWICImagingFactory* wic = nullptr;
     for (size_t i = 0; i < imgs.size(); i++) {
         Image& im = imgs[i];
+        im.state = RS_FAILED;  // until it has pixels
+        // the same source twice is drawn once: a later entry shares the first one's pixels, and its size
+        size_t c = i;
+        for (size_t k = 0; k < i && c == i; k++)
+            if (imgs[k].mathKind == im.mathKind && (im.mathKind ? imgs[k].math == im.math : imgs[k].path == im.path))
+                c = k;
+        if (c != i) {
+            const Image& o = imgs[c];
+            im.state = o.state;
+            im.pix = o.pix;
+            if (im.mathKind || im.w <= 0) { im.w = o.w; im.h = o.h; }
+            im.ascent = o.ascent;
+            continue;
+        }
+        if (!im.mathKind && im.path.empty()) continue;  // from the network: the pane does not go there
+        auto pix = std::make_shared<Pixels>();
         std::vector<uint8_t> svg;
         float mw = 0, mh = 0, asc = 0;
-        if (im.mathKind) {  // a formula or a diagram: the same source twice is drawn once
-            size_t c = i;
-            for (size_t k = 0; k < i; k++)
-                if (imgs[k].mathKind == im.mathKind && imgs[k].math == im.math) { c = k; break; }
-            im.canon = (int)c;
-            if (c != i) continue;
+        if (im.mathKind) {  // a formula or a diagram
             bool ok = im.mathKind == 3 ? MermaidSvg(im.math, dark, svg)
                                        : TexSvg(im.math, im.mathKind == 2, fontPx, color, svg, &mw, &mh, &asc);
-            if (!ok) { im.state = 3; continue; }
-        } else if (!im.path.empty()) {
-            size_t c = i;
-            for (size_t k = 0; k < i; k++)
-                if (!imgs[k].mathKind && imgs[k].path == im.path) { c = k; break; }
-            im.canon = (int)c;
-            if (c != i) continue;
-            if (!ReadFileBytes(im.path.c_str(), svg, 16u << 20)) { im.state = 3; continue; }
+            if (!ok) continue;
+        } else {
+            if (!ReadFileBytes(im.path.c_str(), svg, 16u << 20)) continue;
             if (!IsSvgData(svg.data(), svg.size())) {  // an ordinary picture: WIC, if COM is up in this host
                 if (!wic) CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
                 IWICBitmapDecoder* dec = nullptr;
@@ -110,37 +116,35 @@ void LoadImagesSync() {
                                                      nullptr, 0, WICBitmapPaletteTypeCustom)) &&
                           SUCCEEDED(conv->GetSize(&w, &h)) && w > 0 && h > 0;
                 if (ok) {
-                    std::vector<uint32_t> px((size_t)w * h);
-                    ok = SUCCEEDED(conv->CopyPixels(nullptr, w * 4, (UINT)(px.size() * 4), (BYTE*)px.data()));
+                    pix->px.resize((size_t)w * h);
+                    ok = SUCCEEDED(conv->CopyPixels(nullptr, w * 4, (UINT)(pix->px.size() * 4), (BYTE*)pix->px.data()));
                     if (ok) {
-                        im.px.swap(px);
-                        im.pxW = (int)w;
-                        im.pxH = (int)h;
+                        pix->pxW = (int)w;
+                        pix->pxH = (int)h;
+                        pix->serial = NewPixelSerial();
+                        im.pix = std::move(pix);
+                        im.state = RS_OK;
                         if (im.w <= 0) { im.w = (int)w; im.h = (int)h; }
                     }
                 }
                 SafeRelease(conv);
                 SafeRelease(fr);
                 SafeRelease(dec);
-                im.state = ok ? 2 : 3;
                 continue;
             }
-        } else {
-            im.state = 3;  // from the network: the pane does not go there
-            continue;
         }
         // vector art, from a file or from a formula
-        if ((mw <= 0 || mh <= 0) && !SvgMeasure(svg.data(), svg.size(), &mw, &mh)) { im.state = 3; continue; }
+        if ((mw <= 0 || mh <= 0) && !SvgMeasure(svg.data(), svg.size(), &mw, &mh)) continue;
         int w = std::clamp((int)std::lround(mw), 1, 4096), h = std::clamp((int)std::lround(mh), 1, 4096);
-        std::vector<uint32_t> px;
-        if (!SvgRender(svg.data(), svg.size(), w, h, px)) { im.state = 3; continue; }
-        im.px.swap(px);
-        im.pxW = w;
-        im.pxH = h;
+        if (!SvgRender(svg.data(), svg.size(), w, h, pix->px)) continue;
+        pix->pxW = w;
+        pix->pxH = h;
+        pix->svg.swap(svg);
+        pix->serial = NewPixelSerial();
+        im.pix = std::move(pix);
+        im.state = RS_OK;
         if (im.mathKind || im.w <= 0) { im.w = w; im.h = h; }
         im.ascent = asc > 0 ? asc : (float)h;
-        im.svg.swap(svg);
-        im.state = 2;
     }
     SafeRelease(wic);
 }
