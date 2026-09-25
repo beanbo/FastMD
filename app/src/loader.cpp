@@ -447,7 +447,7 @@ static uint64_t g_useTick = 0;                 // RenderEntry::lastUse
 
 // A formula is typeset in the text colour at the text size, a diagram in the theme's colours, so its pixels belong to
 // that context; a picture from a file looks the same in every one (context 0).
-static uint32_t MathContext() {
+uint32_t MathContext() {
     const uint32_t parts[] = {(uint32_t)g.cfg.fontSize, g_pal[P_TEXT], (uint32_t)PaletteIsDark()};
     uint32_t h = 2166136261u;
     for (uint32_t v : parts) h = (h ^ v) * 16777619u;
@@ -484,6 +484,26 @@ static void PostImages(std::vector<RenderResult>*& batch) {
     batch = nullptr;
 }
 
+// A formula or a diagram (plan 4.1, 4.2): its source becomes SVG, and from there it is a vector picture like any other,
+// drawn at `scale` pixels per DIP (the preview worker draws at the screen's, §9.4) - its longer side at most 4096 (both
+// sides clamped on their own would squash a big diagram: it is scaled down whole). r gets the layout size in DIP.
+bool RenderMath(uint8_t kind, const std::string& src, float fontPx, uint32_t rgb, bool dark, float scale, Pixels& pix,
+                RenderResult& r) {
+    float mw = 0, mh = 0, asc = 0;
+    bool ok = kind == 3 ? MermaidSvg(src, dark, pix.svg) : TexSvg(src, kind == 2, fontPx, rgb, pix.svg, &mw, &mh, &asc);
+    if (ok && (mw <= 0 || mh <= 0)) ok = SvgMeasure(pix.svg.data(), pix.svg.size(), &mw, &mh);
+    if (!ok || mw < 1.f || mh < 1.f) return false;
+    const float kd = std::min(1.f, 4096.f / std::max(mw, mh)), kp = std::min(scale * kd, 4096.f / std::max(mw, mh));
+    const int w = std::max(1, (int)std::lround(mw * kp)), h = std::max(1, (int)std::lround(mh * kp));
+    if (!SvgRender(pix.svg.data(), pix.svg.size(), w, h, pix.px)) return false;
+    pix.pxW = w;
+    pix.pxH = h;
+    r.w = std::max(1, (int)std::lround(mw * kd));
+    r.h = std::max(1, (int)std::lround(mh * kd));
+    r.ascent = asc > 0 ? asc * kd : (float)r.h;
+    return r.ok = true;
+}
+
 // One job, on the worker: the source becomes pixels, or a failure. True when it went to the network (the picture is
 // then handed over as soon as it arrives rather than with the next batch).
 static bool RenderImage(const ImageJob& job, IWICImagingFactory*& wic, RenderResult& r, bool& fetched) {
@@ -493,23 +513,7 @@ static bool RenderImage(const ImageJob& job, IWICImagingFactory*& wic, RenderRes
     r.math = job.kind != 0;
     auto pix = std::make_shared<Pixels>();
     if (job.kind) {
-        // A formula or a diagram (plan 4.1, 4.2): its source becomes SVG, and from there it is a vector picture like
-        // any other.
-        float mw = 0, mh = 0, asc = 0;
-        bool ok = job.kind == 3 ? MermaidSvg(job.math, job.dark, pix->svg)
-                                : TexSvg(job.math, job.kind == 2, job.fontPx, job.rgb, pix->svg, &mw, &mh, &asc);
-        if (ok && (mw <= 0 || mh <= 0)) ok = SvgMeasure(pix->svg.data(), pix->svg.size(), &mw, &mh);
-        if (ok && mw >= 1.f && mh >= 1.f) {
-            // Both sides clamped on their own would squash a big diagram; scale it down whole instead.
-            float k = std::min(1.f, 4096.f / std::max(mw, mh));
-            int w = std::max(1, (int)std::lround(mw * k)), h = std::max(1, (int)std::lround(mh * k));
-            if (SvgRender(pix->svg.data(), pix->svg.size(), w, h, pix->px)) {
-                pix->pxW = r.w = w;
-                pix->pxH = r.h = h;
-                r.ascent = asc > 0 ? asc : (float)h;
-                r.ok = true;
-            }
-        }
+        RenderMath(job.kind, job.math, job.fontPx, job.rgb, job.dark, 1.f, *pix, r);
     } else {
         std::wstring path = job.path;
         if (!job.url.empty()) {
@@ -639,8 +643,21 @@ static void QueueImageJobs(std::vector<ImageJob>& jobs) {
     if (g_jobEvent) SetEvent(g_jobEvent);
 }
 
-// Puts what the table knows about a source on one entry of the document; true when that changes what is drawn.
-static bool ShowEntry(Image& im, const RenderEntry& e, const std::wstring& key) {
+// Puts what the table knows about a source on one entry of the document; true when that changes what is drawn. keep: a
+// failure keeps the picture shown, outlined as one that no longer renders (the formula a popup edits, §9.4) - or shows
+// the one it brought: the popup's last good source drawn for the context of now.
+static bool ShowEntry(Image& im, const RenderEntry& e, const std::wstring& key, bool keep = false) {
+    if (e.state == RS_FAILED && keep && im.state == RS_OK && im.pix) {
+        bool was = im.renderFailed;
+        im.renderFailed = true;
+        if (!e.pix || e.pix == im.pix) return !was;
+        im.pix = e.pix;
+        im.sc.reset();
+        im.w = e.w;
+        im.h = e.h;
+        im.ascent = e.ascent;
+        return true;
+    }
     if (im.state == e.state && im.pix == e.pix) return false;
     if (e.state == RS_PENDING) {  // nothing new yet: a picture already shown stays until its successor arrives
         if (im.state == RS_NONE) im.state = RS_PENDING;
@@ -744,7 +761,12 @@ void CarryRenders(const Doc& oldD, Doc& nd, uint32_t editBeg, uint32_t oldEnd, u
             im.h = oi->h;
         }
         auto it = g.renders.find(key);
-        if (it != g.renders.end()) {
+        // a formula being edited that does not render keeps showing the picture it replaces (§9.4: outlined) - through a
+        // theme switch too, while its popup is open
+        const bool edited = im.mathKind && im.outerBeg != UINT32_MAX &&
+                            ((editBeg != UINT32_MAX && im.outerBeg <= newEnd && im.outerEnd >= editBeg) || EditPopupHolds(im));
+        const bool failed = edited && it != g.renders.end() && it->second.state == RS_FAILED;
+        if (it != g.renders.end() && !failed) {
             ShowEntry(im, it->second, key);
             if (oi && oi->pix == im.pix && oi->sc) {  // its own display-size copy, not the one the table kept last
                 im.sc = oi->sc;
@@ -765,7 +787,7 @@ void CarryRenders(const Doc& oldD, Doc& nd, uint32_t editBeg, uint32_t oldEnd, u
             im.ascent = oi->ascent;
             im.pxFor = oi->pxFor;
             im.state = RS_OK;
-            im.renderFailed = oi->renderFailed;
+            im.renderFailed = oi->renderFailed || failed;
             im.wantW = oi->wantW;
             im.wantH = oi->wantH;
             continue;
@@ -783,7 +805,7 @@ void CarryRenders(const Doc& oldD, Doc& nd, uint32_t editBeg, uint32_t oldEnd, u
             im.ascent = was.ascent;
             im.pxFor = was.pxFor;
             im.state = RS_OK;
-            im.renderFailed = was.renderFailed;
+            im.renderFailed = was.renderFailed || failed;
             im.wantW = was.wantW;
             im.wantH = was.wantH;
             break;
@@ -810,12 +832,13 @@ void StartImages() {
             bool remote = !im.mathKind && !im.url.empty();
             // a picture that may not be fetched (the setting says ask or never), or that has no file: nothing to render
             if (remote ? !remoteOk : !im.mathKind && im.path.empty()) e.state = RS_FAILED;
-            else jobs.push_back(ImageJob{keys[i], im.mathKind ? mctx : 0, g.loadGen.load(), im.mathKind, im.math, im.path,
-                                         im.url, fontPx, rgb, dark});
+            else if (!im.mathKind || !EditPreviewClaim(im, keys[i]))  // (the formula a popup edits: the preview worker's)
+                jobs.push_back(ImageJob{keys[i], im.mathKind ? mctx : 0, g.loadGen.load(), im.mathKind, im.math, im.path,
+                                        im.url, fontPx, rgb, dark});
             it = g.renders.emplace(keys[i], std::move(e)).first;
         }
         it->second.lastUse = ++g_useTick;
-        if (ShowEntry(im, it->second, keys[i])) changed[i] = any = true;
+        if (ShowEntry(im, it->second, keys[i], im.renderFailed)) changed[i] = any = true;
     }
     if (!jobs.empty()) QueueImageJobs(jobs);
     if (any) RefreshImageBlocks(changed);
@@ -852,7 +875,7 @@ void OnImagesLoaded(std::vector<RenderResult>* batch) {
         e.failSize = r.failSize;
         e.error = std::move(r.error);
         for (size_t i = 0; i < keys.size(); i++)
-            if (keys[i] == r.key && ShowEntry(g.doc.images[i], e, r.key)) changed[i] = any = true;
+            if (keys[i] == r.key && ShowEntry(g.doc.images[i], e, r.key, r.keep)) changed[i] = any = true;
     }
     delete batch;
     if (any) RefreshImageBlocks(changed);

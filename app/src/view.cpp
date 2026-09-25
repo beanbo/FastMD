@@ -698,10 +698,22 @@ static void DrawBlock(uint32_t i, float y) {
         bool wide = iw > w + 0.5f;  // a diagram too wide for the column: draw it whole and let the block scroll
         float ix = wide ? x - HScrollOf(i) : x;
         if (wide) g.canvas->PushClip(x, y, right, y + L->height);
-        if (im.state == RS_OK) g.canvas->DrawImage(im, ix, y, ix + iw, y + L->height);
-        else {
+        if (im.state == RS_OK) {
+            g.canvas->DrawImage(im, ix, y, ix + iw, y + L->height);
+            // a source that no longer renders keeps its last good picture, outlined in the caution colour (§2.10)
+            if (im.renderFailed) g.canvas->StrokeRoundRect(ix - 1.f, y - 1.f, ix + iw + 1.f, y + L->height + 1.f, 2.f, 1.f, P_ALERT_CAUTION);
+        } else {
             g.canvas->FillRoundRect(ix, y, ix + iw, y + L->height, 6.f, P_PLACEHOLDER);
             if (L->text && im.w <= 0) g.canvas->Text(L->text, ix + 12.f, y + 9.f, P_MUTED);
+            // a formula or diagram that cannot be drawn shows its source instead of a blank box (§9.4)
+            IDWriteTextLayout* s = nullptr;
+            if (im.state == RS_FAILED && im.mathKind >= 2 && !im.alt.empty() &&
+                SUCCEEDED(g.dwf->CreateTextLayout(im.alt.data(), (UINT32)im.alt.size(), g.typo.fmt[R_CODE], iw - 24.f, 1e6f, &s))) {
+                g.canvas->PushClip(ix, y, ix + iw, y + L->height);
+                g.canvas->Text(s, ix + 12.f, y + 9.f, P_MUTED);
+                g.canvas->PopClip();
+                s->Release();
+            }
         }
         if (wide) {
             g.canvas->PopClip();
@@ -770,20 +782,20 @@ float SpaceAdvance(uint32_t bi) {
     return m.widthIncludingTrailingWhitespace;
 }
 
-// the selected object atom: a 1 px accent outline 2 px outside its box (§12.2), no caret
-static void DrawAtomOutline(float top, float bottom) {
+// An object atom's box in client DIP - a picture or formula in a line: its character's; a block of its own (an HTML
+// block drawn as several: all of them) - when it is laid out (the paint path never lays out)
+bool AtomRect(int32_t bi, int32_t image, float box[4]) {
     size_t n = g.doc.blocks.size();
-    int32_t bi = g.selAtomBlock;
-    if (bi < 0 || (size_t)bi >= n || BlockHidden(g.doc.blocks[bi])) return;
+    if (bi < 0 || (size_t)bi >= n || (size_t)bi >= g.cache.size() || g.Y.size() != n || BlockHidden(g.doc.blocks[bi])) return false;
     float l, t, r, b;
-    if (g.selAtomImage >= 0) {  // a picture or formula in the line: the box of its one character
+    if (image >= 0) {  // a picture or formula in the line: the box of its one character
         const Block& bl = g.doc.blocks[bi];
         uint32_t at = UINT32_MAX;
         int32_t cell = -1;
         auto scan = [&](uint32_t runOff, uint32_t runCount, int32_t c) {
             for (uint32_t k = 0; k < runCount && at == UINT32_MAX; k++) {
                 const Run& run = g.doc.runs[runOff + k];
-                if ((run.flags & F_IMAGE) && run.image == (uint32_t)g.selAtomImage) { at = run.start; cell = c; }
+                if ((run.flags & F_IMAGE) && run.image == (uint32_t)image) { at = run.start; cell = c; }
             }
         };
         scan(bl.runOff, bl.runCount, -1);
@@ -795,7 +807,7 @@ static void DrawAtomOutline(float top, float bottom) {
         float x0, y0, h0, x1, y1, h1;
         if (at == UINT32_MAX || !g.cache[bi] || !CaretGeomAt(at, bi, cell, &x0, &y0, &h0, false) ||
             !CaretGeomAt(at + 1, bi, cell, &x1, &y1, &h1, false))
-            return;
+            return false;
         l = x0;
         r = std::max(x1, x0 + 4.f);
         t = y0 - g.scrollY;
@@ -813,8 +825,18 @@ static void DrawAtomOutline(float top, float bottom) {
         t = g.Y[bi] - g.scrollY;
         b = g.Y[last] + g.H[last] - g.scrollY;
     }
-    if (b + 3.f < top || t - 3.f > bottom) return;
-    g.canvas->StrokeRoundRect(l - 2.f, t - 2.f, r + 2.f, b + 2.f, 2.f, 1.f, P_ACCENT);
+    box[0] = l;
+    box[1] = t;
+    box[2] = r;
+    box[3] = b;
+    return true;
+}
+
+// the selected object atom: a 1 px accent outline 2 px outside its box (§12.2), no caret
+static void DrawAtomOutline(float top, float bottom) {
+    float r[4];
+    if (!AtomRect(g.selAtomBlock, g.selAtomImage, r) || r[3] + 3.f < top || r[1] - 3.f > bottom) return;
+    g.canvas->StrokeRoundRect(r[0] - 2.f, r[1] - 2.f, r[2] + 2.f, r[3] + 2.f, 2.f, 1.f, P_ACCENT);
 }
 
 // A styled phantom row (§6.7) shows what it will be: a list's marker (a bullet, `1.`, an empty box) left of where the

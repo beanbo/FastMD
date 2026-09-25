@@ -5101,6 +5101,689 @@ def test_edit_hr():
     return ok
 
 
+# ------------------------------------------------------------------------------------------------ edit mode, phase 3b
+EM_SETSEL, EM_REPLACESEL, WM_DROPFILES = 0x00B1, 0x00C2, 0x0233
+POPUP = {"NONE": 0, "OK": 1, "ERROR": 2, "PENDING": 3}
+
+
+def popup_set(hwnd, text, field=0):
+    """the popup field's text replaced as if typed (§9.2, T23): EM_SETSEL(0, -1) + EM_REPLACESEL raise EN_CHANGE"""
+    e = q(hwnd, "EDIT_POPUP", field)
+    if not e:
+        return False
+    u32.SendMessageW(e, EM_SETSEL, 0, -1)
+    buf = ctypes.create_unicode_buffer(text.replace("\n", "\r\n"))
+    u32.SendMessageW(e, EM_REPLACESEL, 1, ctypes.addressof(buf))
+    return True
+
+
+def popup_text(hwnd, field=0):
+    e = q(hwnd, "EDIT_POPUP", field)
+    if not e:
+        return None
+    buf = ctypes.create_unicode_buffer(4096)
+    u32.SendMessageW(e, WM_GETTEXT, 4096, ctypes.addressof(buf))
+    return buf.value.replace("\r\n", "\n")
+
+
+def popup_open(hwnd, timeout=3.0):
+    return wait_for(lambda: q(hwnd, "EDIT_POPUP", 0) != 0, timeout, 0.05)
+
+
+def popup_settled(hwnd, timeout=8.0):
+    """the popup's text is in the source and its picture has arrived (or failed)"""
+    return wait_for(lambda: q(hwnd, "EDIT_POPUP_STATE") in (POPUP["OK"], POPUP["ERROR"]) and not q(hwnd, "EDIT_BUSY") & (16 | 256),
+                    timeout, 0.05)
+
+
+def clipboard_formats(items):
+    """several formats on the clipboard at once, as another program (or FastMD) would put them: [(format, bytes)]"""
+    owner = clip_owner()
+    for _ in range(20):
+        if u32.OpenClipboard(owner):
+            break
+        time.sleep(0.05)
+    else:
+        return False
+    try:
+        u32.EmptyClipboard()
+        for fmt, data in items:
+            h = k32.GlobalAlloc(0x0002, len(data))
+            p = k32.GlobalLock(h)
+            ctypes.memmove(p, data, len(data))
+            k32.GlobalUnlock(h)
+            u32.SetClipboardData(fmt, h)
+        return True
+    finally:
+        u32.CloseClipboard()
+
+
+def hdrop(files, x=0, y=0):
+    """a DROPFILES block (CF_HDROP, WM_DROPFILES): the header, then the paths, wide, NUL-separated"""
+    import struct
+    return struct.pack("<IiiII", 20, x, y, 0, 1) + ("".join(str(f) + "\0" for f in files) + "\0").encode("utf-16-le")
+
+
+def clipboard_wide(name):
+    """a registered clipboard format holding UTF-16 text (FastMD's own "FastMD Markdown")"""
+    fmt = u32.RegisterClipboardFormatW(name)
+    if not fmt or not open_clipboard():
+        return ""
+    try:
+        h = u32.GetClipboardData(fmt)
+        if not h:
+            return ""
+        p = k32.GlobalLock(h)
+        s = ctypes.wstring_at(p)
+        k32.GlobalUnlock(h)
+        return s
+    finally:
+        u32.CloseClipboard()
+
+
+def toast_said(hwnd, ru, en):
+    """the last toast's text, in the UI's language (Q_LAST_PROMPT lp 2: its hash)"""
+    return q(hwnd, "LAST_PROMPT", 2) & 0xFFFFFFFF == src_hash(en if q(hwnd, "LANG") == 1 else ru)
+
+
+def popover_pair(hwnd, name, opener):
+    """a popover in dark and light: a theme switch closes it (§2.4), so it opens in each theme; it is left open, light"""
+    cmd(hwnd, "THEME_DARK", 0.6)
+    cmd(hwnd, opener, 0.5)
+    popup_open(hwnd)
+    shot(hwnd, name + "-dark")
+    cmd(hwnd, "POPUP_CANCEL", 0.3)
+    cmd(hwnd, "THEME_LIGHT", 0.6)
+    cmd(hwnd, opener, 0.5)
+    ok = popup_open(hwnd)
+    shot(hwnd, name)
+    return ok
+
+
+def atom_after(hwnd, block, chars):
+    """the caret to a paragraph's start, over `chars` characters (an object in the line counts one), then Backspace: the
+    object before the caret selected; returns the caret's point before the Backspace (the object's right edge)"""
+    click(hwnd, q(hwnd, "TEXT_LEFT") + 2, q(hwnd, "BLOCK_Y", block) + 10, 0.2)
+    post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+    for _ in range(chars):
+        post(hwnd, WM_KEYDOWN, VK["right"], 0, 0.03)
+    time.sleep(0.2)
+    xy = caret_xy(hwnd)
+    post(hwnd, WM_KEYDOWN, VK["back"], 0, 0.3)
+    return xy
+
+
+POPUP_DOC = ("# Всплывающие окна\n\nФормула в строке $a+b$ тут.\n\n$$\nx^2\n$$\n\n```mermaid\ngraph TD\n    A --> B\n```\n\n"
+             "<div>HTML блок</div>\n\nКартинка ![кот](img/diagram0.png) в строке.\n\n" +
+             "".join(f"Абзац {k} для прокрутки документа вниз.\n\n" for k in range(40)) + "Последний абзац.\n")
+
+
+def test_edit_popups():
+    """§9, §2.10 (3b): a click on a formula opens its source popup; its text re-renders the formula (the preview
+    worker: Q_RENDERS + 1); broken TeX shows the error and keeps the last good picture outlined (Q_MATH lp 3); Esc puts
+    the text back with no undo step; Ctrl+Enter keeps it as one; an emptied formula goes with its $…$; every diagram
+    template renders; a picture's popup edits its alt text and path; a wheel scroll that hides the object closes the
+    popup and keeps its text; WM_CLOSE right after a change saves it (D20); the popups in light and dark"""
+    ok = True
+    doc = OUT / "edit-popups.md"
+    doc.write_bytes(POPUP_DOC.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_TEST_HOOKS": "1"})
+    try:
+        text = POPUP_DOC
+        enter_edit(hwnd, 1, dx=1)
+        wait_for(lambda: q(hwnd, "MATH", 1) >= 3, 10.0, 0.1)
+        # the formula's box: right of it the caret stands after "Формула в строке " and the formula
+        xy = atom_after(hwnd, 1, 18)
+        selected = q(hwnd, "EDIT_ATOM") == 0
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.2)  # (deselected: the click selects it again, and opens it)
+        if xy:
+            click(hwnd, xy[0] - 6, xy[1], 0.3)
+        opened = popup_open(hwnd)
+        ok &= check("edit 3b: a click on a formula opens its source popup (Q_EDIT_POPUP), showing the TeX",
+                    selected and opened and popup_text(hwnd) == "a+b" and q(hwnd, "EDIT_POPUP_STATE") == POPUP["OK"],
+                    f"selected {selected}, popup {q(hwnd, 'EDIT_POPUP', 0):#x}, text {popup_text(hwnd)!r}")
+        shot(hwnd, "131-edit-popup-formula")
+        shot_dark(hwnd, "131-edit-popup-formula-dark")
+        r0, undo0 = q(hwnd, "RENDERS"), q(hwnd, "UNDO_DEPTH")
+        popup_set(hwnd, "a+b+c")
+        settled = popup_settled(hwnd)
+        ok &= check("edit 3b: the popup's text goes into the source and the preview worker renders it (Q_RENDERS + 1, state 1)",
+                    settled and q(hwnd, "RENDERS") == r0 + 1 and q(hwnd, "SRC_HASH", 0) == src_hash(text.replace("$a+b$", "$a+b+c$", 1))
+                    and q(hwnd, "EDIT_POPUP_STATE") == POPUP["OK"], f"renders +{q(hwnd, 'RENDERS') - r0}, state {q(hwnd, 'EDIT_POPUP_STATE')}")
+        popup_set(hwnd, "\\frac{")
+        popup_settled(hwnd)
+        broken = q(hwnd, "EDIT_POPUP_STATE") == POPUP["ERROR"] and q(hwnd, "MATH", 3) == 1
+        shot(hwnd, "132-edit-popup-error")
+        shot_dark(hwnd, "132-edit-popup-error-dark")
+        settle(hwnd)
+        kept = q(hwnd, "MATH", 3) == 1 and q(hwnd, "MATH", 2) == 0 and q(hwnd, "EDIT_POPUP_STATE") == POPUP["ERROR"]
+        ok &= check("edit 3b: broken TeX: the error line (state 2), the last good picture kept and outlined (Q_MATH lp 3 == 1), "
+                    "through a theme switch there and back", broken and kept,
+                    f"broken {broken}, then state {q(hwnd, 'EDIT_POPUP_STATE')}, stale {q(hwnd, 'MATH', 3)}, failed {q(hwnd, 'MATH', 2)}")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.5)  # (the document's Esc: the popup cancels, as its own Esc does)
+        ok &= check("edit 3b: Esc puts back the text the popup opened with, and leaves no undo step",
+                    q(hwnd, "EDIT_POPUP", 0) == 0 and q(hwnd, "SRC_HASH", 0) == src_hash(text) and q(hwnd, "UNDO_DEPTH") == undo0,
+                    f"popup {q(hwnd, 'EDIT_POPUP', 0)}, undo {q(hwnd, 'UNDO_DEPTH')} vs {undo0}")
+        # its own Esc (the key the popup's field gets), then Ctrl+Enter's command keeps the text as one step
+        atom_after(hwnd, 1, 18)
+        cmd(hwnd, "ATOM_EDIT", 0.4)
+        popup_open(hwnd)
+        popup_set(hwnd, "y")
+        post(q(hwnd, "EDIT_POPUP", 0), WM_KEYDOWN, VK["esc"], 0, 0.5)
+        own_esc = q(hwnd, "EDIT_POPUP", 0) == 0 and q(hwnd, "SRC_HASH", 0) == src_hash(text)
+        atom_after(hwnd, 1, 18)
+        post(hwnd, WM_KEYDOWN, VK["return"], 0, 0.4)  # (Enter on a selected object opens its source, §2.7)
+        popup_open(hwnd)
+        popup_set(hwnd, "c")
+        popup_settled(hwnd)
+        cmd(hwnd, "POPUP_DONE", 0.4)
+        text = text.replace("$a+b$", "$c$", 1)
+        ok &= check("edit 3b: the field's Esc cancels; Enter opens it again, Ctrl+Enter keeps the text as one undo step, the "
+                    "caret after the formula", own_esc and q(hwnd, "EDIT_POPUP", 0) == 0 and q(hwnd, "SRC_HASH", 0) == src_hash(text)
+                    and q(hwnd, "UNDO_DEPTH") == undo0 + 1 and q(hwnd, "EDIT_ATOM") == -1,
+                    f"own Esc {own_esc}, undo {q(hwnd, 'UNDO_DEPTH')}, atom {q(hwnd, 'EDIT_ATOM')}")
+        # a click beside the popup (on the heading) keeps its text, as one undo step
+        atom_after(hwnd, 1, 18)
+        cmd(hwnd, "ATOM_EDIT", 0.4)
+        popup_open(hwnd)
+        popup_set(hwnd, "d")
+        popup_settled(hwnd)
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 30, q(hwnd, "BLOCK_Y", 0) + 14, 0.5)
+        beside = q(hwnd, "EDIT_POPUP", 0) == 0 and q(hwnd, "SRC_HASH", 0) == src_hash(text.replace("$c$", "$d$", 1)) and \
+            q(hwnd, "UNDO_DEPTH") == undo0 + 2
+        cmd(hwnd, "UNDO", 0.4)
+        ok &= check("edit 3b: a click beside the popup keeps its text as one undo step", beside and
+                    q(hwnd, "SRC_HASH", 0) == src_hash(text), f"undo {q(hwnd, 'UNDO_DEPTH')}")
+        # an inline formula emptied goes with its $…$ and one blank
+        atom_after(hwnd, 1, 18)
+        cmd(hwnd, "ATOM_EDIT", 0.4)
+        popup_open(hwnd)
+        popup_set(hwnd, "")
+        time.sleep(0.3)
+        cmd(hwnd, "POPUP_DONE", 0.5)
+        gone = q(hwnd, "SRC_HASH", 0) == src_hash(text.replace("строке $c$ тут", "строке тут", 1))
+        cmd(hwnd, "UNDO", 0.4)
+        ok &= check("edit 3b: an inline formula emptied in its popup goes, with its $…$ and one blank; undo brings it back",
+                    gone and q(hwnd, "SRC_HASH", 0) == src_hash(text), f"gone {gone}")
+        # a diagram's popup (the block after the display formula)
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 30, q(hwnd, "BLOCK_Y", 3) + 30, 0.5)
+        dia = popup_open(hwnd) and popup_text(hwnd) == "graph TD\n    A --> B"
+        shot(hwnd, "133-edit-popup-diagram")
+        shot_dark(hwnd, "133-edit-popup-diagram-dark")
+        popup_set(hwnd, "graph LR\n    A --> B")
+        popup_settled(hwnd)
+        cmd(hwnd, "POPUP_DONE", 0.4)
+        text = text.replace("graph TD\n    A --> B", "graph LR\n    A --> B", 1)
+        ok &= check("edit 3b: a click on a diagram opens its lines; the change is written back", dia and
+                    q(hwnd, "SRC_HASH", 0) == src_hash(text), f"dia {dia}, len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
+        # the picture's popup: alt text and path, each a field
+        atom_after(hwnd, 5, 10)
+        cmd(hwnd, "ATOM_EDIT", 0.4)
+        pic = popup_open(hwnd) and popup_text(hwnd, 0) == "кот" and popup_text(hwnd, 1) == "img/diagram0.png"
+        shot(hwnd, "134-edit-popup-image")
+        shot_dark(hwnd, "134-edit-popup-image-dark")
+        popup_set(hwnd, "собака", 0)
+        popup_set(hwnd, "img/Новая картинка.png", 1)
+        popup_settled(hwnd)
+        cmd(hwnd, "POPUP_DONE", 0.4)
+        text = text.replace("![кот](img/diagram0.png)", "![собака](<img/Новая картинка.png>)", 1)
+        ok &= check("edit 3b: a picture's popup edits its alt text and its path (a path with blanks in <…>)",
+                    pic and q(hwnd, "SRC_HASH", 0) == src_hash(text), f"pic {pic}, len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
+        cmd(hwnd, "UNDO", 0.4)
+        text = text.replace("![собака](<img/Новая картинка.png>)", "![кот](img/diagram0.png)", 1)
+        # the HTML block's popup
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 30, q(hwnd, "BLOCK_Y", 4) + 8, 0.5)
+        html = popup_open(hwnd) and popup_text(hwnd) == "<div>HTML блок</div>"
+        cmd(hwnd, "POPUP_CANCEL", 0.3)
+        ok &= check("edit 3b: a click on an HTML block opens its source", html, f"{popup_text(hwnd)!r}")
+        # a wheel scroll that takes the object out of sight closes the popup, keeping its text
+        atom_after(hwnd, 1, 18)
+        cmd(hwnd, "ATOM_EDIT", 0.4)
+        popup_open(hwnd)
+        popup_set(hwnd, "keep")
+        time.sleep(0.3)
+        for _ in range(6):
+            wheel(hwnd, 400, 400, -3, wait=0.15)
+        closed = wait_for(lambda: q(hwnd, "EDIT_POPUP", 0) == 0, 3.0, 0.1)
+        text = text.replace("$c$", "$keep$", 1)
+        ok &= check("edit 3b: a wheel scroll that hides the formula closes its popup and keeps the text, still editing",
+                    closed and q(hwnd, "SRC_HASH", 0) == src_hash(text) and q(hwnd, "EDITING") == 1,
+                    f"closed {closed}, len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
+        ok &= check("edit 3b: saved as it reads", saved_text(hwnd, doc) == text)
+        # every diagram template, inserted at the end with its popup kept, is drawn
+        testkey(hwnd, VK["end"], KM_CTRL, 0.3)
+        for k in range(9):
+            cmd_arg(hwnd, "INS_DIAGRAM", k, 0.4)
+            popup_open(hwnd)
+            cmd(hwnd, "POPUP_DONE", 0.3)
+        drawn = wait_for(lambda: q(hwnd, "MATH", 0) == 12 and q(hwnd, "MATH", 1) == 12, 15.0, 0.2)
+        ok &= check("edit 3b: the nine diagram templates, inserted, are drawn (Q_MATH lp 2 == 0)",
+                    drawn and q(hwnd, "MATH", 2) == 0, f"{q(hwnd, 'MATH', 0)} objects, {q(hwnd, 'MATH', 1)} drawn, "
+                    f"{q(hwnd, 'MATH', 2)} failed")
+        for _ in range(9):
+            cmd(hwnd, "UNDO", 0.2)
+        ok &= check("edit 3b: ... and undone", saved_text(hwnd, doc) == text)
+        cmd(hwnd, "EDIT_EXIT", 0.5)
+    finally:
+        close_edit(proc, hwnd)
+    # D20: a change the popup holds when the window closes 50 ms later is saved
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        enter_edit(hwnd, 1, dx=1)
+        atom_after(hwnd, 1, 18)
+        cmd(hwnd, "ATOM_EDIT", 0.4)
+        popup_open(hwnd)
+        popup_set(hwnd, "zz")
+        post(hwnd, WM_CLOSE, 0, 0, 0.05)
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            pass
+        ok &= check("edit 3b: WM_CLOSE 50 ms after a change in the popup saves it (D20), with exit code 0",
+                    proc.poll() == 0 and "$zz$" in doc.read_bytes().decode("utf-8"), f"rc {proc.poll()}")
+    finally:
+        close_edit(proc, hwnd)
+    # the front matter's popup: longer than the field, so it scrolls (dark scrollbars in the dark theme); a --- line
+    # would end the block, so it is refused with a line that says why; a click beside the popup keeps what it holds
+    yaml = "".join(f"key{k}: value {k}\n" for k in range(20))
+    front = f"---\n{yaml}---\n\n# Заголовок\n\nТекст после свойств.\n"
+    doc = OUT / "edit-popup-front.md"
+    doc.write_bytes(front.encode("utf-8"))
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000"})
+    try:
+        # (§2.7: a double click on an object in reading mode enters edit mode with its popup open)
+        dbl_click(hwnd, q(hwnd, "TEXT_LEFT") + 30, q(hwnd, "BLOCK_Y", 0) + 12, 0.2)
+        wait_for(lambda: q(hwnd, "EDITING") == 1 and q(hwnd, "EDIT_BAR") == 100, 3.0, 0.05)
+        undo0 = q(hwnd, "UNDO_DEPTH")
+        shown = popup_open(hwnd) and popup_text(hwnd) == yaml.rstrip("\n")
+        shot(hwnd, "139-edit-popup-front")
+        shot_dark(hwnd, "139-edit-popup-front-dark")
+        popup_set(hwnd, yaml + "---\nx: 1")
+        popup_settled(hwnd)
+        refused = q(hwnd, "EDIT_POPUP_STATE") == POPUP["ERROR"] and q(hwnd, "SRC_HASH", 0) == src_hash(front)
+        popup_set(hwnd, yaml.replace("value 0", "значение", 1).rstrip("\n"))
+        popup_settled(hwnd)
+        cmd(hwnd, "POPUP_DONE", 0.5)
+        front = front.replace("value 0", "значение", 1)
+        ok &= check("edit 3b: the front matter's popup (opened by a double click in reading mode, over the lower part of "
+                    "its tall block): its lines; a --- line refused with the reason; kept as one undo step",
+                    shown and refused and q(hwnd, "EDIT_POPUP", 0) == 0 and
+                    q(hwnd, "SRC_HASH", 0) == src_hash(front) and q(hwnd, "UNDO_DEPTH") == undo0 + 1,
+                    f"shown {shown}, refused {refused}, popup {q(hwnd, 'EDIT_POPUP', 0)}, len {q(hwnd, 'SRC_LEN', 0)} vs "
+                    f"{u16(front)}, undo {q(hwnd, 'UNDO_DEPTH')} vs {undo0}")
+        ok &= check("edit 3b: saved as it reads", saved_text(hwnd, doc) == front)
+    finally:
+        close_edit(proc, hwnd)
+    return ok
+
+
+LINK_DOC = ("# Ссылки\n\nТекст для первой ссылки здесь.\n\nЕсть [старая](http://old.example) ссылка.\n\n"
+            "Ссылка [по метке][ref] тут.\n\n[ref]: http://ref.example\n\nАвто <http://auto.example> тут.\n\n"
+            "```\nprint(1)\n```\n")
+
+
+def test_edit_link():
+    """§8.3 (3b): the link popover makes `[selection](url)`, an address with blanks in <…>; in a link it rewrites the
+    destination; a reference link's notice needs a first Enter; Remove link keeps the text; an autolink removed stays text
+    by an escape; the popover in light and dark"""
+    ok = True
+    doc = OUT / "edit-link.md"
+    doc.write_bytes(LINK_DOC.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_TEST_HOOKS": "1"})
+    try:
+        text = LINK_DOC
+        enter_edit(hwnd, 1, dx=1)
+        select_word(hwnd, 2)  # «первой »
+        opened = popover_pair(hwnd, "135-edit-link-popover", "LINK")
+        popup_set(hwnd, "https://new.example/путь")
+        cmd(hwnd, "POPUP_DONE", 0.5)
+        text = text.replace("для первой ссылки", "для [первой](https://new.example/путь) ссылки", 1)
+        ok &= check("edit 3b: the link popover wraps the selection: [text](url)", opened and q(hwnd, "SRC_HASH", 0) == src_hash(text),
+                    f"opened {opened}, len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
+        select_word(hwnd, 0)  # «Текст »
+        cmd(hwnd, "LINK", 0.5)
+        popup_open(hwnd)
+        popup_set(hwnd, "my file.md")
+        cmd(hwnd, "POPUP_DONE", 0.5)
+        text = text.replace("Текст для", "[Текст](<my file.md>) для", 1)
+        ok &= check("edit 3b: an address with blanks goes in <…>", q(hwnd, "SRC_HASH", 0) == src_hash(text),
+                    f"len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
+        # in an inline link: its address shown, and only the destination rewritten
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 2, q(hwnd, "BLOCK_Y", 2) + 10, 0.2)
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        for _ in range(7):
+            post(hwnd, WM_KEYDOWN, VK["right"], 0, 0.03)
+        cmd(hwnd, "LINK", 0.5)
+        shown = popup_open(hwnd) and popup_text(hwnd) == "http://old.example"
+        popup_set(hwnd, "http://new.example")
+        cmd(hwnd, "POPUP_DONE", 0.5)
+        text = text.replace("(http://old.example)", "(http://new.example)", 1)
+        ok &= check("edit 3b: in a link the popover shows its address and rewrites only the destination",
+                    shown and q(hwnd, "SRC_HASH", 0) == src_hash(text), f"shown {shown}")
+        cmd(hwnd, "LINK_REMOVE", 0.4)
+        text = text.replace("[старая](http://new.example)", "старая", 1)
+        ok &= check("edit 3b: Remove link: the delimiters go, the text stays", q(hwnd, "SRC_HASH", 0) == src_hash(text),
+                    f"len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
+        # a reference link: the notice, the first Enter confirms it, the second changes the definition
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 2, q(hwnd, "BLOCK_Y", 3) + 10, 0.2)
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        for _ in range(9):
+            post(hwnd, WM_KEYDOWN, VK["right"], 0, 0.03)
+        ref = popover_pair(hwnd, "136-edit-link-reference", "LINK") and popup_text(hwnd) == "http://ref.example"
+        popup_set(hwnd, "http://ref2.example")
+        cmd(hwnd, "POPUP_DONE", 0.4)
+        first = q(hwnd, "EDIT_POPUP", 0) != 0 and q(hwnd, "SRC_HASH", 0) == src_hash(text)
+        cmd(hwnd, "POPUP_DONE", 0.5)
+        text = text.replace("[ref]: http://ref.example", "[ref]: http://ref2.example", 1)
+        ok &= check("edit 3b: a reference link: its definition's address with the notice; the first Enter only confirms it, "
+                    "the second changes the definition", ref and first and q(hwnd, "SRC_HASH", 0) == src_hash(text),
+                    f"ref {ref}, first {first}")
+        # an autolink removed: escaped, so it does not link again
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 2, q(hwnd, "BLOCK_Y", 4) + 10, 0.2)
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        for _ in range(8):
+            post(hwnd, WM_KEYDOWN, VK["right"], 0, 0.03)
+        cmd(hwnd, "LINK_REMOVE", 0.4)
+        text = text.replace("<http://auto.example>", "http\\://auto.example", 1)
+        ok &= check("edit 3b: an autolink removed stays text: `<http://x>` → `http\\://x`", q(hwnd, "SRC_HASH", 0) == src_hash(text),
+                    f"len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
+        # the code-language popover (§8.7): the fence's info string
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 30, q(hwnd, "BLOCK_Y", 5) + 14, 0.3)
+        lang = popover_pair(hwnd, "138-edit-code-language", "CODE_LANG") and popup_text(hwnd) == ""
+        popup_set(hwnd, "python")
+        cmd(hwnd, "POPUP_DONE", 0.5)
+        text = text.replace("```\nprint(1)", "```python\nprint(1)", 1)
+        ok &= check("edit 3b: the code-language popover writes the fence's info string", lang and q(hwnd, "SRC_HASH", 0) == src_hash(text),
+                    f"lang {lang}, len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
+        ok &= check("edit 3b: saved as it reads", saved_text(hwnd, doc) == text)
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+    return ok
+
+
+IMAGE_DOC = "# Картинки\n\nАбзац перед картинками.\n\nВторой абзац.\n\nТретий абзац.\n"
+
+
+def test_edit_image():
+    """§8.8, §7.11, §2.8 (3b): the picture dialog (FASTMD_OPEN_FILE) puts `![name](<img/…>)` in; a dropped picture goes
+    in where it was dropped; CF_HDROP pasted puts pictures in, other files get a toast; a bitmap alone gets its toast and
+    changes nothing"""
+    ok = True
+    doc = OUT / "edit-image.md"
+    doc.write_bytes(IMAGE_DOC.encode("utf-8"))
+    pic = OUT / "img" / "Снимок экрана.png"
+    shutil.copy(OUT / "img" / "diagram0.png", pic)
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_OPEN_FILE": str(pic)})
+    try:
+        text = IMAGE_DOC
+        enter_edit(hwnd, 1, dx=1)
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.2)
+        prompts = q(hwnd, "LAST_PROMPT", 1)
+        cmd(hwnd, "INS_IMAGE", 0.6)
+        text = text.replace("перед картинками.", "перед картинками.![Снимок экрана](<img/Снимок экрана.png>)", 1)
+        ok &= check("edit 3b: the picture dialog (FASTMD_OPEN_FILE): ![stem](<relative path with blanks>) at the caret",
+                    q(hwnd, "SRC_HASH", 0) == src_hash(text) and q(hwnd, "LAST_PROMPT", 0) == 5 and
+                    q(hwnd, "LAST_PROMPT", 1) == prompts + 1, f"len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
+        # a dropped picture: where it was dropped (the end of the second paragraph)
+        y = q(hwnd, "BLOCK_Y", 2) + 10
+        data = hdrop([OUT / "img" / "diagram0.png"], q(hwnd, "TEXT_LEFT") + 600, y)
+        h = k32.GlobalAlloc(0x0042, len(data))
+        p = k32.GlobalLock(h)
+        ctypes.memmove(p, data, len(data))
+        k32.GlobalUnlock(h)
+        post(hwnd, WM_DROPFILES, h, 0, 0.6)
+        text = text.replace("Второй абзац.", "Второй абзац.![diagram0](img/diagram0.png)", 1)
+        ok &= check("edit 3b: a picture file dropped goes in where it was dropped", q(hwnd, "SRC_HASH", 0) == src_hash(text),
+                    f"len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
+        # CF_HDROP pasted: the pictures; another file only gets a toast
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 2, q(hwnd, "BLOCK_Y", 3) + 10, 0.2)
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.2)
+        clipboard_formats([(15, hdrop([OUT / "img" / "diagram0.png"]))])  # CF_HDROP
+        cmd(hwnd, "PASTE", 0.5)
+        text = text.replace("Третий абзац.", "Третий абзац.![diagram0](img/diagram0.png)", 1)
+        pasted = q(hwnd, "SRC_HASH", 0) == src_hash(text)
+        clipboard_formats([(15, hdrop([doc]))])
+        cmd(hwnd, "PASTE", 0.5)
+        only = toast_said(hwnd, "Вставить можно только картинки", "Only pictures can be pasted") and \
+            q(hwnd, "SRC_HASH", 0) == src_hash(text)
+        ok &= check("edit 3b: pasted picture files (CF_HDROP) go in; another file: the toast, nothing changes", pasted and only,
+                    f"pasted {pasted}, toast {only}")
+        # a bitmap alone: the toast that says what works instead, nothing changes
+        dib = bytes(ctypes.c_uint32(40)) + bytes(ctypes.c_int32(1)) + bytes(ctypes.c_int32(1)) + b"\x01\x00\x20\x00" + bytes(24) + b"\xff\xff\xff\xff"
+        clipboard_formats([(8, dib)])  # CF_DIB
+        cmd(hwnd, "PASTE", 0.5)
+        toast = toast_said(hwnd, "Вставка картинок из буфера пока не поддерживается — перетащите файл сюда",
+                           "Pasting pictures from the clipboard is not supported yet — drop the file here")
+        ok &= check("edit 3b: a bitmap alone on the clipboard: the toast, nothing changes",
+                    toast and q(hwnd, "SRC_HASH", 0) == src_hash(text), f"toast {toast}")
+        ok &= check("edit 3b: saved as it reads", saved_text(hwnd, doc) == text)
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+        if pic.exists():
+            pic.unlink()
+    return ok
+
+
+PRIVATE_DOC = "# Копирование\n\nТекст **жирный кусок** и хвост.\n\nКонец.\n"
+
+
+def test_edit_paste_private():
+    """§7.11 (3b): a copy in edit mode puts FastMD's own format on the clipboard - the selection's source balanced - and a
+    paste inside FastMD takes it first, so the markup stays balanced; the plain text is what other programs get"""
+    ok = True
+    doc = OUT / "edit-private.md"
+    doc.write_bytes(PRIVATE_DOC.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_TEST_HOOKS": "1"})
+    try:
+        text = PRIVATE_DOC
+        enter_edit(hwnd, 1, dx=1)
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        for _ in range(13):  # «Текст жирный »: into the bold
+            post(hwnd, WM_KEYDOWN, VK["right"], 0, 0.03)
+        for _ in range(8):  # «кусок и »: out of it
+            testkey(hwnd, VK["right"], KM_SHIFT, 0.03)
+        time.sleep(0.2)
+        cmd(hwnd, "COPY", 0.4)
+        private, plain = clipboard_wide("FastMD Markdown"), clipboard()
+        ok &= check("edit 3b: the copy holds the balanced source in FastMD's own format, and plain text for others",
+                    private == "**кусок** и " and plain == "кусок и ", f"private {private!r}, plain {plain!r}")
+        click(hwnd, q(hwnd, "TEXT_LEFT") + 2, q(hwnd, "BLOCK_Y", 2) + 10, 0.2)
+        post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.2)
+        cmd(hwnd, "PASTE", 0.5)
+        text = text.replace("Конец.", "Конец.**кусок** и ", 1)
+        ok &= check("edit 3b: pasted inside FastMD, the markup stays balanced", q(hwnd, "SRC_HASH", 0) == src_hash(text),
+                    f"len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}")
+        ok &= check("edit 3b: saved as it reads", saved_text(hwnd, doc) == text)
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+    return ok
+
+
+BINDINGS_DOC = "# Клавиши\n\nПервое слово тут.\n\nВторой абзац.\n"
+
+
+def test_edit_bindings():
+    """T5 (3b): the chords as real posted keys, with the modifiers in the keyboard state the app reads - Ctrl+Z / Y / B /
+    I / K / S / 1, Ctrl+Shift+7 / 8 / 9 / Q / K, Ctrl+T / M, Ctrl+`, Ctrl+Enter; each its effect on the source. The file
+    is reset and the app launched anew for a retry (a real keyboard state can be disturbed from outside)"""
+    ok = False
+    for attempt in range(2):
+        doc = OUT / "edit-bindings.md"
+        doc.write_bytes(BINDINGS_DOC.encode("utf-8"))
+        set_reg("EditHintShown", 1)
+        proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_TEST_HOOKS": "1"})
+        results = {}
+        try:
+            text = BINDINGS_DOC
+            enter_edit(hwnd, 1, dx=1)
+            select_word(hwnd, 0)  # «Первое »
+            base = q(hwnd, "SRC_HASH", 0)
+
+            def chord(name, vk, shift=False, want=None, undo=True, wait=0.4):
+                keys(hwnd, [vk], shift=shift, ctrl=True, wait=wait)
+                got = q(hwnd, "SRC_HASH", 0)
+                results[name] = want(got) if want else got != base
+                if undo and got != base:
+                    keys(hwnd, [ord("Z")], ctrl=True, wait=0.4)
+            chord("Ctrl+B", ord("B"), want=lambda h: h == src_hash(text.replace("Первое", "**Первое**", 1)))
+            chord("Ctrl+I", ord("I"), want=lambda h: h == src_hash(text.replace("Первое", "*Первое*", 1)))
+            chord("Ctrl+`", 0xC0, want=lambda h: h == src_hash(text.replace("Первое", "`Первое`", 1)))
+            chord("Ctrl+1", ord("1"), want=lambda h: h == src_hash(text.replace("Первое", "# Первое", 1)))
+            chord("Ctrl+Shift+7", ord("7"), shift=True, want=lambda h: h == src_hash(text.replace("Первое", "1. Первое", 1)))
+            chord("Ctrl+Shift+8", ord("8"), shift=True, want=lambda h: h == src_hash(text.replace("Первое", "- Первое", 1)))
+            chord("Ctrl+Shift+9", ord("9"), shift=True, want=lambda h: h == src_hash(text.replace("Первое", "- [ ] Первое", 1)))
+            chord("Ctrl+Shift+Q", ord("Q"), shift=True, want=lambda h: h == src_hash(text.replace("Первое", "> Первое", 1)))
+            chord("Ctrl+Shift+K", ord("K"), shift=True,
+                  want=lambda h: h == src_hash(text.replace("Первое слово тут.", "```\nПервое слово тут.\n```", 1)))
+            chord("Ctrl+T", ord("T"))
+            # Ctrl+Z / Ctrl+Y: the bold again, undone, redone
+            keys(hwnd, [ord("B")], ctrl=True, wait=0.4)
+            bold = q(hwnd, "SRC_HASH", 0)
+            keys(hwnd, [ord("Z")], ctrl=True, wait=0.4)
+            undone = q(hwnd, "SRC_HASH", 0) == base
+            keys(hwnd, [ord("Y")], ctrl=True, wait=0.4)
+            results["Ctrl+Z, Ctrl+Y"] = undone and q(hwnd, "SRC_HASH", 0) == bold
+            keys(hwnd, [ord("Z")], ctrl=True, wait=0.4)
+            # Ctrl+K: the link popover (Esc closes it); Ctrl+M: a formula with its popup (Esc keeps the formula)
+            select_word(hwnd, 0)
+            keys(hwnd, [ord("K")], ctrl=True, wait=0.5)
+            results["Ctrl+K"] = popup_open(hwnd, 2.0)
+            post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+            post(hwnd, WM_KEYDOWN, VK["end"], 0, 0.2)
+            keys(hwnd, [ord("M")], ctrl=True, wait=0.6)
+            results["Ctrl+M"] = popup_open(hwnd, 2.0) and q(hwnd, "SRC_HASH", 0) != base and q(hwnd, "EDIT_ATOM") >= 0
+            post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+            keys(hwnd, [ord("Z")], ctrl=True, wait=0.4)
+            # Ctrl+Enter: a new paragraph after the block (a phantom); Ctrl+S: a save
+            keys(hwnd, [VK["return"]], ctrl=True, wait=0.4)
+            results["Ctrl+Enter"] = q(hwnd, "EDIT_PHANTOM", 0) >= 0
+            post(hwnd, WM_KEYDOWN, VK["up"], 0, 0.2)
+            type_text(hwnd, "!", 0.3)
+            saves = q(hwnd, "SAVES")
+            keys(hwnd, [ord("S")], ctrl=True, wait=0.5)
+            results["Ctrl+S"] = q(hwnd, "SAVES") == saves + 1 and q(hwnd, "EDIT_DIRTY") == 0
+            post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+        finally:
+            close_edit(proc, hwnd)
+        ok = all(results.values()) and len(results) == 15
+        if ok or attempt:
+            break
+        print(f"  (a retry: {[k for k, v in results.items() if not v]})")
+    return check("edit 3b: the chords as real keys: " + ", ".join(k for k in results), ok,
+                 ", ".join(f"{k} {'ok' if v else 'FAIL'}" for k, v in results.items()))
+
+
+def test_edit_race_images():
+    """T13 (3b): the formulas a popup is typing, a picture from the network arriving after 2 s, a theme switch and 30
+    undos while the picture worker and the preview worker are slowed down (300 ms a job): the window lives, the three
+    drawable formulas and diagrams are drawn in the end, the renders stay bounded, the map is never wrong"""
+    import http.server
+    import socketserver
+    import threading
+    ok = True
+    png = (REPO / "bench" / "corpus" / "img" / "diagram0.png").read_bytes()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            time.sleep(2.0)
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(png)))
+            self.end_headers()
+            self.wfile.write(png)
+
+        def log_message(self, *a):
+            pass
+
+    srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    doc = OUT / "edit-race.md"
+    url = f"http://127.0.0.1:{srv.server_address[1]}/race-{time.time_ns()}.png"  # (never in the disk cache)
+    text = MATH_DOC.replace("Конец документа.", f"![сеть]({url})\n\nКонец документа.")
+    doc.write_bytes(text.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    set_reg("RemoteImages", 0)  # always
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_TEST_SLOW": "images:300,preview:300"})
+    try:
+        enter_edit(hwnd, 1, dx=1)
+        atom_after(hwnd, 1, 11)  # «В строке: » and the formula
+        cmd(hwnd, "ATOM_EDIT", 0.4)
+        popup_open(hwnd)
+        tex = "E = mc^2"
+        for k in range(30):  # 30 characters, a change each (the preview worker's latest job wins)
+            tex += "+abcdefghij"[k % 11]
+            popup_set(hwnd, tex)
+            time.sleep(0.03)
+        cmd(hwnd, "THEME_DARK", 0.2)  # (the popup stays; the first undo closes it, keeping its text, and takes it back)
+        for _ in range(30):
+            cmd(hwnd, "UNDO", 0.05)
+        cmd(hwnd, "THEME_LIGHT", 0.2)
+        done = wait_for(lambda: q(hwnd, "MATH", 1) == 3 and not q(hwnd, "EDIT_BUSY") & (16 | 32), 20.0, 0.2)
+        renders = q(hwnd, "RENDERS")
+        ok &= check("edit 3b: typing in a formula's popup, a theme switch and 30 undos while renders are pending: the window "
+                    "lives, the three drawable formulas and diagrams are drawn", proc.poll() is None and done and
+                    q(hwnd, "SRC_HASH", 0) == src_hash(text), f"drawn {q(hwnd, 'MATH', 1)}, busy {q(hwnd, 'EDIT_BUSY')}, "
+                    f"len {q(hwnd, 'SRC_LEN', 0)} vs {u16(text)}, undo {q(hwnd, 'UNDO_DEPTH')}")
+        ok &= check("edit 3b: ... after a bounded number of renders", 0 < renders <= 60, f"{renders}")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+        srv.shutdown()
+        del_reg("RemoteImages")
+    return ok
+
+
+BUBBLE_DOC = "# Пузырь\n\nАбзац со [ссылкой на документ](other.md) внутри.\n\nВторой абзац.\n"
+
+
+def test_edit_bubble():
+    """§2.11 (3b): with the caret in a link's text, a second after the typing, the bubble under the link: its address,
+    [Edit] (the link popover), [Remove]; it hides while typing; light and dark"""
+    ok = True
+    doc = OUT / "edit-bubble.md"
+    doc.write_bytes(BUBBLE_DOC.encode("utf-8"))
+    set_reg("EditHintShown", 1)
+    proc, hwnd = launch_edit(doc, {"FASTMD_AUTOSAVE_MS": "60000", "FASTMD_TEST_HOOKS": "1"})
+    try:
+        text = BUBBLE_DOC
+        enter_edit(hwnd, 1, dx=1)
+        post(hwnd, WM_KEYDOWN, VK["home"], 0, 0.1)
+        for _ in range(12):  # «Абзац со сс»: in the link
+            post(hwnd, WM_KEYDOWN, VK["right"], 0, 0.03)
+        shown = wait_for(lambda: q(hwnd, "EDIT_BUBBLE") == 1, 2.0, 0.1)
+        shot(hwnd, "137-edit-bubble")
+        shot_dark(hwnd, "137-edit-bubble-dark")
+        type_text(hwnd, "ы", 0.2)
+        hidden = q(hwnd, "EDIT_BUBBLE") == 0
+        back = wait_for(lambda: q(hwnd, "EDIT_BUBBLE") == 1, 3.0, 0.1)
+        text = text.replace("[ссылкой", "[ссыылкой", 1)
+        edit = tool_xy(hwnd, "LINK", 1)
+        if edit:
+            click(hwnd, *edit, 0.5)
+        popover = popup_open(hwnd, 2.0) and popup_text(hwnd) == "other.md"
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.3)
+        wait_for(lambda: q(hwnd, "EDIT_BUBBLE") == 1, 3.0, 0.1)
+        remove = tool_xy(hwnd, "LINK_REMOVE")
+        if remove:
+            click(hwnd, *remove, 0.5)
+        text = text.replace("[ссыылкой на документ](other.md)", "ссыылкой на документ", 1)
+        ok &= check("edit 3b: the link bubble: shown with the caret in a link, hidden while typing and back a second later; "
+                    "its [Edit] opens the popover with the address, [Remove] removes the link",
+                    shown and hidden and back and popover and q(hwnd, "SRC_HASH", 0) == src_hash(text) and q(hwnd, "EDIT_BUBBLE") == 0,
+                    f"shown {shown}, hidden {hidden}, back {back}, edit {edit}, popover {popover}, remove {remove}")
+        post(hwnd, WM_KEYDOWN, VK["esc"], 0, 0.4)
+    finally:
+        close_edit(proc, hwnd)
+    return ok
+
+
 def main():
     OUT.mkdir(exist_ok=True)
     reset_profile()
@@ -5140,7 +5823,10 @@ def main():
              ("edit_selection", test_edit_selection), ("edit_paste_plain", test_edit_paste_plain),
              ("edit_table_typing", test_edit_table_typing), ("edit_raw_typing", test_edit_raw_typing),
              ("edit_find", test_edit_find), ("edit_outline", test_edit_outline),
-             ("edit_commands", test_edit_commands), ("edit_table", test_edit_table), ("edit_hr", test_edit_hr)]
+             ("edit_commands", test_edit_commands), ("edit_table", test_edit_table), ("edit_hr", test_edit_hr),
+             ("edit_popups", test_edit_popups), ("edit_link", test_edit_link), ("edit_image", test_edit_image),
+             ("edit_paste_private", test_edit_paste_private), ("edit_bindings", test_edit_bindings),
+             ("edit_race_images", test_edit_race_images), ("edit_bubble", test_edit_bubble)]
     only = [n for n in os.environ.get("FASTMD_ONLY", "").split(",") if n]  # e.g. FASTMD_ONLY=update,settings
     for name, t in tests:
         if not only or name in only:

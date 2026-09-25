@@ -34,7 +34,7 @@ add_executable(FastMD WIN32
     src/view.cpp src/window.cpp src/loader.cpp src/parse.cpp src/html.cpp
     src/layout.cpp src/canvas_gdi.cpp
     src/highlight.cpp src/theme.cpp src/util.cpp
-    src/find.cpp src/toc.cpp src/home.cpp src/store.cpp src/strings.cpp
+    src/find.cpp src/toc.cpp src/home.cpp src/strings.cpp
     third_party/md4c/md4c.c
     res/fastmd.rc)
 
@@ -49,14 +49,17 @@ set_source_files_properties(third_party/md4c/md4c.c PROPERTIES COMPILE_OPTIONS "
 # queries, which are measured, and the exe pays ~1.5 ms per MB on every launch whether edit mode is used or not. They
 # are compiled on their own with /O1 (the rest of the program keeps /O2) and linked into the exe with everything else.
 # The screen-reader provider joins them: it runs only while a screen reader asks, one call at a time.
-add_library(fastmd_edit OBJECT src/editcore.cpp src/editops.cpp src/editfile.cpp src/edit.cpp src/editbar.cpp src/uia.cpp)
+add_library(fastmd_edit OBJECT src/editcore.cpp src/editops.cpp src/editfile.cpp src/edit.cpp src/editbar.cpp src/editpop.cpp
+    src/uia.cpp)
 # The cold half of reading mode goes the same way (Phase 3a): the updater, the settings window, the shell's dialogs,
 # links and clipboard, printing and its canvas, the crash handler, dragging out and copying run on a click or after the
 # first frame - never on the way to it, never while scrolling (the gear is one icon a frame); so do the downloads, the
-# glue of the SVG, TeX and Mermaid libraries (the work is in the DLLs, on workers) and the reading-mode task tick. The
-# parser, layout, view, canvas, window, loader, start screen, highlighter, theme, strings, find and outline keep /O2.
+# glue of the SVG, TeX and Mermaid libraries (the work is in the DLLs, on workers) and the reading-mode task tick; and
+# (Phase 3b) the settings and positions store - a handful of registry reads on the way to the first frame, the rest
+# after it. The parser, layout, view, canvas, window, loader, start screen, highlighter, theme, strings, find and outline
+# keep /O2.
 add_library(fastmd_cold OBJECT src/update.cpp src/settings_ui.cpp src/shell.cpp src/print.cpp src/canvas_print.cpp
-    src/crash.cpp src/drag.cpp src/copy.cpp src/net.cpp src/svg.cpp src/formulas.cpp src/tasks.cpp)
+    src/crash.cpp src/drag.cpp src/copy.cpp src/net.cpp src/svg.cpp src/formulas.cpp src/tasks.cpp src/store.cpp)
 foreach(lib fastmd_edit fastmd_cold)
     target_include_directories(${lib} PRIVATE ${CMAKE_BINARY_DIR}/generated)
     target_compile_definitions(${lib} PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS
@@ -75,12 +78,12 @@ target_link_options(FastMD PRIVATE
     /MANIFEST:EMBED /MANIFESTINPUT:${FASTMD_MANIFEST}
     /DELAYLOAD:dwrite.dll /DELAYLOAD:ole32.dll /DELAYLOAD:shell32.dll /DELAYLOAD:imm32.dll
     /DELAYLOAD:windowscodecs.dll /DELAYLOAD:comdlg32.dll /DELAYLOAD:winhttp.dll
-    /DELAYLOAD:winspool.drv /DELAYLOAD:uiautomationcore.dll
+    /DELAYLOAD:winspool.drv /DELAYLOAD:uiautomationcore.dll /DELAYLOAD:uxtheme.dll
     # /MANIFEST:EMBED with our own manifest: incremental linking would expect a separate .manifest file (Debug)
     /INCREMENTAL:NO
     $<$<CONFIG:Release>:/LTCG /OPT:REF /OPT:ICF> ${FASTMD_SEC_L})
 target_link_libraries(FastMD PRIVATE user32 gdi32 dwmapi dwrite ole32 shell32 imm32 windowscodecs comdlg32 advapi32
-    winhttp winspool uiautomationcore delayimp)
+    winhttp winspool uiautomationcore uxtheme delayimp)
 
 # ---------------------------------------------------------------------------------------------- fastmd-svg.dll
 # SVG (badges, diagrams) is drawn by lunasvg + plutovg. They live in a DLL, not in the exe: CreateProcess pays

@@ -10,6 +10,9 @@
 // The formatting and insert buttons are drawn disabled until their commands arrive (3a); the popovers are 3a's.
 #include "app.h"
 
+// Drawn once a frame and hit once a mouse move, nothing that the frame's time would notice: nothing is inlined, for
+// size (§1 principle 3; see editcore.cpp)
+#pragma inline_depth(0)
 namespace {
 float U() { return 1.f / std::max(0.25f, g.cfg.zoom); }  // one DIP of the screen, in canvas units
 const float kBarH = 44.f, kBtn = 30.f, kGap = 2.f, kDivM = 6.f, kPadL = 8.f, kRight = 14.f;
@@ -378,7 +381,9 @@ bool g_grid = false;  // the table popover as the size grid
 int g_popHot = -1;    // the hot row (from 0); the grid's hot cell: rows << 4 | columns (from 1)
 float g_popL = 0;     // the left edge: under its button, or under "…" when it came from there
 
-void OverText() { g.editOverText = g_hot >= 0 || g_pop; }  // drawn over the text: frames in full
+bool g_bubbleOn = false;  // the link bubble was drawn in the last frame
+// drawn over the text - a tooltip, a popover, a popup, the bubble: frames in full
+void OverText() { g.editOverText = g_hot >= 0 || g_pop || EditPopup() || g_bubbleOn; }
 
 std::vector<PopRow> Rows() {
     std::vector<PopRow> v;
@@ -517,6 +522,57 @@ void DrawPopover() {
         if (kw) DrawText1(r.keys, p.r - 12.f * u - kw, t, kRowH * u, kw + 2.f * u, 12.5f * u, hc && r.current ? P_ONACCENT : P_MUTED);
     }
 }
+
+// ------------------------------------------------------------------------------------------------ popups (§9.1, §2.4)
+// The panel of a source popup - under the object it edits (above when there is no room), as wide as the text column but
+// at least 420 u, scrolling with the document - and of the link and code-language popovers, under their bar button: a
+// title, the field boxes the EDITs of the input thread sit in, a picture's labels, the hint, the error line, buttons.
+const float kFieldH = 28.f, kLineH = 18.f, kLabelH = 18.f, kPad = 12.f;
+int g_popupHot = -1;  // the panel's hovered button
+int g_bubbleHot = -1;
+
+StrId TitleOf(PopupKind k) {
+    switch (k) {
+    case PK_FORMULA: return S_ED_POP_FORMULA;
+    case PK_FORMULA_BLOCK: return S_ED_POP_FORMULA_BLOCK;
+    case PK_DIAGRAM: return S_ED_POP_DIAGRAM;
+    case PK_HTML: return S_ED_POP_HTML;
+    case PK_FRONT: return S_ED_POP_FRONT;
+    case PK_IMAGE: return S_ED_POP_IMAGE;
+    case PK_LINK: return S_ED_TIP_LINK;
+    default: return S_ED_POP_LANG;
+    }
+}
+UINT OpenerOf(PopupKind k) { return k == PK_LINK ? CMD_LINK : CMD_BLOCK_MENU; }
+StrId ButtonLabel(UINT cmd) {
+    return cmd == CMD_INS_IMAGE ? S_ED_POP_CHOOSE : cmd == CMD_LINK_REMOVE ? S_ED_LINK_REMOVE : S_ED_POP_DONE;
+}
+void Rect4(float* r, float l, float t, float rr, float b) {
+    r[0] = l;
+    r[1] = t;
+    r[2] = rr;
+    r[3] = b;
+}
+// a button of the settings window's look (as the strips' are)
+void DrawButton(const float* r, StrId label, bool hot) {
+    const float u = U();
+    const bool hc = HighContrast();
+    g.canvas->FillRoundRect(r[0], r[1], r[2], r[3], 6.f * u, hot && !hc ? P_HOVER : P_PANEL);
+    g.canvas->StrokeRoundRect(r[0], r[1], r[2], r[3], 6.f * u, (hot && hc ? 2.f : 1.f) * u, hc ? P_OVERLAY_TEXT : P_BORDER);
+    DrawText1(Tr(label), r[0] + 14.f * u, r[1], r[3] - r[1], r[2] - r[0], 13.f * u, P_TEXT);
+}
+// text of several lines at a width (a link's notice), its height
+float Wrapped(const std::wstring& s, float x, float y, float w, float size, uint8_t pal, bool draw) {
+    IDWriteTextLayout* L = UiText(s, size);
+    if (!L) return 0.f;
+    L->SetMaxWidth(std::max(10.f, w));
+    DWRITE_TEXT_METRICS m{};
+    L->GetMetrics(&m);
+    if (draw) g.canvas->Text(L, x, y, pal);
+    L->Release();
+    return std::ceil(m.height);
+}
+bool Inside(const float* r, float x, float y) { return x >= r[0] && x < r[2] && y >= r[1] && y < r[3]; }
 
 // a row runs: the popover closes first (the command may open another one, or a dialog)
 void RunRow(int hot) {
@@ -913,8 +969,256 @@ bool PopoverMouse(float x, float y, bool click) {
     return true;
 }
 
+// ------------------------------------------------------------------------------------------------ popups: API
+bool PopupGeometry(PopupRects* o) {
+    const PopupView* v = EditPopup();
+    *o = PopupRects{};
+    if (!v || !g.editing || g.firstFrame) return false;
+    const float u = U(), pad = kPad * u;
+    const bool source = v->kind < PK_LINK, image = v->kind == PK_IMAGE;
+    float W = source ? std::min(std::max(g.textW, 420.f * u), std::max(g.availW, 240.f * u)) : (v->notice.empty() ? 360.f : 440.f) * u;
+    W = std::max(160.f * u, std::min(W, ViewW() - DocLeft() - 24.f * u));
+    // the rows, from the panel's top: the title, the fields (a picture's with their labels), a notice, the hint, the
+    // error line, a popover's buttons
+    float y = pad + 26.f * u, f0[4], f1[4] = {};
+    if (image) {
+        o->label[0] = y;
+        y += kLabelH * u;
+        Rect4(f0, pad, y, W - pad, y + kFieldH * u);
+        o->label[1] = y += kFieldH * u + 8.f * u;
+        y += kLabelH * u;
+        const float bw = TextW(Tr(S_ED_POP_CHOOSE), 13.f * u) + 28.f * u;
+        Rect4(f1, pad, y, W - pad - bw - 8.f * u, y + kFieldH * u);
+        o->buttons = 1;
+        o->cmd[0] = CMD_INS_IMAGE;
+        Rect4(o->btn[0], W - pad - bw, y, W - pad, y + kFieldH * u);
+        y += kFieldH * u;
+    } else {
+        const int lines = source ? std::clamp(v->lines, v->kind == PK_FORMULA ? 1 : 3, 16) : 0;
+        Rect4(f0, pad, y, W - pad, y + (source ? lines * kLineH + 10.f : kFieldH) * u);
+        y = f0[3];
+    }
+    if (!v->notice.empty()) {
+        o->notice = y += 6.f * u;
+        y += Wrapped(v->notice, 0, 0, W - 2 * pad, 12.f * u, 0, false);
+    }
+    if (source) {
+        o->hint = y += 4.f * u;
+        y += kLabelH * u;
+    }
+    if (!v->error.empty()) {
+        o->error = y;
+        y += kLabelH * u;
+    }
+    if (!source) {  // [Remove link] [Done], at the right
+        y += 10.f * u;
+        float x = W - pad;
+        const UINT cmds[2] = {CMD_POPUP_DONE, CMD_LINK_REMOVE};
+        for (int k = 0; k < (v->remove ? 2 : 1); k++) {
+            const float bw = TextW(Tr(ButtonLabel(cmds[k])), 13.f * u) + 28.f * u;
+            o->cmd[k] = cmds[k];
+            Rect4(o->btn[k], x - bw, y, x, y + kFieldH * u);
+            x -= bw + 8.f * u;
+            o->buttons = k + 1;
+        }
+        y += kFieldH * u;
+    }
+    const float H = y + pad;
+    // where: under the object it edits (above when there is no room below), or under its popover's button
+    float l, t;
+    if (source) {
+        float a[4];
+        if (!EditPopupAnchor(a) || a[3] < EditRevealTop() || a[1] > ViewH()) {
+            o->off = true;
+            return true;
+        }
+        l = a[0];
+        t = a[3] + 6.f * u;
+        if (t + H > ViewH() - 8.f * u && a[1] - 6.f * u - H >= EditRevealTop()) t = a[1] - 6.f * u - H;
+        // an object taller than the room on either side (a long front matter): the panel over its lower part
+        t = std::max(std::min(t, ViewH() - 8.f * u - H), EditRevealTop() + 4.f * u);
+    } else {
+        Layout L = Compute(Level());
+        int k = 0;
+        while (k < kCount && kDefs[k].cmd != OpenerOf(v->kind)) k++;
+        if (k >= kCount || !L.items[k].shown) k = kMore;
+        l = L.items[k].shown ? L.items[k].l : ViewW() - W;
+        t = BarTop() + (kBarH + 2.f) * u;
+    }
+    l = std::clamp(l, DocLeft() + 8.f * u, std::max(DocLeft() + 8.f * u, ViewW() - W - 16.f * u));
+    o->l = l;
+    o->t = t;
+    o->r = l + W;
+    o->b = t + H;
+    auto place = [&](float* r) {
+        r[0] += l;
+        r[2] += l;
+        r[1] += t;
+        r[3] += t;
+    };
+    place(f0);
+    memcpy(o->field[0], f0, sizeof f0);
+    if (image) {
+        place(f1);
+        memcpy(o->field[1], f1, sizeof f1);
+    }
+    for (int k = 0; k < o->buttons; k++) place(o->btn[k]);
+    for (float* r : {&o->label[0], &o->label[1], &o->notice, &o->hint, &o->error}) *r += t;
+    for (int f = 0; f < (image ? 2 : 1); f++) {  // the EDIT inside its box (a multi-line one's scrollbar at the edge)
+        const float* b = o->field[f];
+        if (v->multi) Rect4(o->edit[f], b[0] + 6.f * u, b[1] + 5.f * u, b[2] - 2.f * u, b[3] - 5.f * u);
+        else Rect4(o->edit[f], b[0] + 8.f * u, b[1] + 2.f * u, b[2] - 8.f * u, b[3] - 2.f * u);
+    }
+    return true;
+}
+
+bool PopupMouse(float x, float y, bool click) {
+    PopupRects p;
+    if (!PopupGeometry(&p) || p.off) return false;
+    if (x < p.l || x >= p.r || y < p.t || y >= p.b) {
+        if (g_popupHot >= 0) {
+            g_popupHot = -1;
+            BarChanged();
+        }
+        if (!click) return false;
+        const PopupView* v = EditPopup();
+        bool opener = false;  // a popover's own button only closes it
+        if (v->kind >= PK_LINK) {
+            Layout L = Compute(Level());
+            const float u = U(), bt = BarTop() + (kBarH - kBtn) * 0.5f * u;
+            for (int k = 0; k < kCount; k++)
+                opener |= L.items[k].shown && kDefs[k].cmd == OpenerOf(v->kind) && x >= L.items[k].l && x < L.items[k].r &&
+                          y >= bt && y < bt + kBtn * u;
+        }
+        EditPopupClickOutside(opener);  // a source popup keeps its text, a popover closes
+        return opener;
+    }
+    int hot = -1;
+    for (int k = 0; k < p.buttons; k++)
+        if (Inside(p.btn[k], x, y)) hot = k;
+    if (hot != g_popupHot) {
+        g_popupHot = hot;
+        BarChanged();
+    }
+    SetCursor(LoadCursorW(nullptr, hot >= 0 ? IDC_HAND : IDC_ARROW));
+    if (click && hot >= 0) Command(p.cmd[hot]);
+    return true;
+}
+
+// The panel on the canvas: its frame, title, the boxes the fields' EDITs sit in (while the EDITs are away because the
+// panel moves, their text drawn there), a picture's labels, the notice, the hint, the error line, the buttons. Then the
+// EDITs are told where the boxes are now.
+static void DrawPopup() {
+    PopupRects p;
+    if (!PopupGeometry(&p)) return;
+    if (p.off) {  // the object went out of sight: the popup closes, keeping its text (§9.2)
+        EditPopupPlaced(p.edit, true);
+        return;
+    }
+    const PopupView* v = EditPopup();
+    const float u = U(), pad = kPad * u, w = p.r - p.l - 2 * pad;
+    const bool hc = HighContrast();
+    g.canvas->FillRoundRect(p.l, p.t, p.r, p.b, 8.f * u, P_OVERLAY_BG);
+    g.canvas->StrokeRoundRect(p.l, p.t, p.r, p.b, 8.f * u, 1.f * u, hc ? P_OVERLAY_TEXT : P_OVERLAY_BORDER);
+    DrawText1(Tr(TitleOf(v->kind)), p.l + pad, p.t + pad, 20.f * u, w, 13.f * u, P_OVERLAY_TEXT, true);
+    if (v->kind == PK_IMAGE)
+        for (int f = 0; f < 2; f++) DrawText1(Tr(f ? S_ED_POP_PATH : S_ED_POP_ALT), p.l + pad, p.label[f], kLabelH * u, w, 12.f * u, P_MUTED);
+    for (int f = 0; f < v->fields; f++) {
+        const float *b = p.field[f], *e = p.edit[f];
+        const bool focus = v->focus == f;
+        g.canvas->FillRoundRect(b[0], b[1], b[2], b[3], 5.f * u, P_BG);
+        g.canvas->StrokeRoundRect(b[0], b[1], b[2], b[3], 5.f * u, (focus ? 1.5f : 1.f) * u, focus ? P_ACCENT : hc ? P_OVERLAY_TEXT : P_BORDER);
+        if (!v->hidden) continue;
+        std::wstring t;
+        PopupFieldText(f, &t);
+        IDWriteTextLayout* L = nullptr;
+        if (!v->multi) DrawText1(t, e[0], e[1], e[3] - e[1], e[2] - e[0], 13.f * u, P_TEXT);
+        else if (SUCCEEDED(g.dwf->CreateTextLayout(t.data(), (UINT32)t.size(), g.typo.fmt[R_CODE], 1e5f, 1e5f, &L))) {
+            L->SetFontSize(13.f * u, DWRITE_TEXT_RANGE{0, (UINT32)t.size()});
+            g.canvas->PushClip(e[0], e[1], e[2], e[3]);
+            g.canvas->Text(L, e[0] + 1.f * u, e[1], P_TEXT);
+            g.canvas->PopClip();
+            L->Release();
+        }
+    }
+    if (!v->notice.empty()) Wrapped(v->notice, p.l + pad, p.notice, w, 12.f * u, P_OVERLAY_TEXT, true);
+    if (v->kind < PK_LINK) DrawText1(Tr(S_ED_POP_HINT), p.l + pad, p.hint, kLabelH * u, w, 12.f * u, P_MUTED);
+    if (!v->error.empty()) DrawText1(v->error, p.l + pad, p.error, kLabelH * u, w, 12.f * u, P_ALERT_CAUTION);
+    for (int k = 0; k < p.buttons; k++) DrawButton(p.btn[k], ButtonLabel(p.cmd[k]), k == g_popupHot);
+    EditPopupPlaced(p.edit, false);
+}
+
+// ---- the link bubble (§2.11): under the caret's link - its address cut to 48 characters, [Edit] [Remove] [Open]
+namespace {
+const UINT kBubbleCmd[3] = {CMD_LINK, CMD_LINK_REMOVE, CMD_LINK_OPEN};
+const StrId kBubbleLabel[3] = {S_ED_BUBBLE_EDIT, S_ED_BUBBLE_REMOVE, S_ED_BUBBLE_OPEN};
+struct Bubble { float l, t, r, b; float btn[3][4]; std::wstring dest; };
+bool BubbleGeometry(Bubble* o) {
+    float box[4];
+    if (!BarShown() || !EditBubble(box, &o->dest)) return false;
+    const float u = U(), h = 30.f * u;
+    if (o->dest.size() > 48) o->dest = o->dest.substr(0, 47) + L"…";
+    float W = 10.f * u + TextW(o->dest, 12.5f * u) + 10.f * u, bw[3];
+    for (int k = 0; k < 3; k++) W += (bw[k] = TextW(Tr(kBubbleLabel[k]), 12.5f * u) + 16.f * u) + 2.f * u;
+    W += 2.f * u;
+    o->l = std::clamp(box[0], DocLeft() + 4.f * u, std::max(DocLeft() + 4.f * u, ViewW() - W - 16.f * u));
+    o->t = std::min(box[1] + 4.f * u, ViewH() - h - 4.f * u);
+    o->r = o->l + W;
+    o->b = o->t + h;
+    float x = o->r - 4.f * u;
+    for (int k = 3; k-- > 0;) {
+        Rect4(o->btn[k], x - bw[k], o->t + 3.f * u, x, o->b - 3.f * u);
+        x -= bw[k] + 2.f * u;
+    }
+    return true;
+}
+void DrawBubble() {
+    Bubble b;
+    g_bubbleOn = BubbleGeometry(&b);
+    if (!g_bubbleOn) return;
+    const float u = U();
+    const bool hc = HighContrast();
+    g.canvas->FillRoundRect(b.l, b.t, b.r, b.b, 8.f * u, P_OVERLAY_BG);
+    g.canvas->StrokeRoundRect(b.l, b.t, b.r, b.b, 8.f * u, 1.f * u, hc ? P_OVERLAY_TEXT : P_OVERLAY_BORDER);
+    DrawText1(b.dest, b.l + 10.f * u, b.t, b.b - b.t, b.btn[0][0] - b.l - 16.f * u, 12.5f * u, P_MUTED);
+    for (int k = 0; k < 3; k++) {
+        const float* r = b.btn[k];
+        if (k == g_bubbleHot) {
+            if (hc) g.canvas->StrokeRoundRect(r[0], r[1], r[2], r[3], 6.f * u, 1.f * u, P_OVERLAY_TEXT);
+            else g.canvas->FillRoundRect(r[0], r[1], r[2], r[3], 6.f * u, P_HOVER);
+        }
+        DrawText1(Tr(kBubbleLabel[k]), r[0] + 8.f * u, r[1], r[3] - r[1], r[2] - r[0], 12.5f * u, hc ? P_OVERLAY_TEXT : P_ACCENT);
+    }
+}
+}  // namespace
+
+bool BubbleMouse(float x, float y, bool click) {
+    Bubble b;
+    int hot = -1;
+    const bool on = BubbleGeometry(&b) && x >= b.l && x < b.r && y >= b.t && y < b.b;
+    for (int k = 0; on && k < 3; k++)
+        if (Inside(b.btn[k], x, y)) hot = k;
+    if (hot != g_bubbleHot) {
+        g_bubbleHot = hot;
+        BarChanged();
+    }
+    if (!on) return false;
+    SetCursor(LoadCursorW(nullptr, hot >= 0 ? IDC_HAND : IDC_ARROW));
+    if (click && hot >= 0) Command(kBubbleCmd[hot]);
+    return true;
+}
+
 LRESULT BarToolCenter(UINT cmd, UINT row) {
     const float s = Scale();
+    auto center = [&](const float* r) { return MAKELONG(std::lround((r[0] + r[2]) * 0.5f * s), std::lround((r[1] + r[3]) * 0.5f * s)); };
+    PopupRects pr;  // a popup's buttons ([Choose file…]: CMD_INS_IMAGE with row 1); the bubble's (its [Edit]: CMD_LINK, row 1)
+    if (PopupGeometry(&pr) && !pr.off)
+        for (int k = 0; k < pr.buttons; k++)
+            if (pr.cmd[k] == cmd && row == (cmd == CMD_INS_IMAGE ? 1u : 0u)) return center(pr.btn[k]);
+    Bubble bb;
+    if ((cmd == CMD_LINK_REMOVE || cmd == CMD_LINK_OPEN || (cmd == CMD_LINK && row == 1)) && BubbleGeometry(&bb))
+        for (int k = 0; k < 3; k++)
+            if (kBubbleCmd[k] == cmd) return center(bb.btn[k]);
     float l, t, r, b;
     if (row) {  // a popover's row (from 1) - the grid's cell: rows << 4 | columns
         if (!g_pop || g_pop != cmd || !BarShown()) return -1;
@@ -976,6 +1280,15 @@ int EditChromeButtons(ChromeButton* out, int max) {
             }
         }
     }
+    // a popup's buttons and the bubble's ([Choose file…] and the bubble's [Edit] carry an argument: the bar has buttons
+    // of their commands too)
+    PopupRects pr;
+    if (PopupGeometry(&pr) && !pr.off)
+        for (int k = 0; k < pr.buttons; k++)
+            add(pr.cmd[k] | (pr.cmd[k] == CMD_INS_IMAGE ? 1u << 16 : 0u), pr.btn[k][0], pr.btn[k][1], pr.btn[k][2], pr.btn[k][3], true);
+    Bubble bb;
+    if (BubbleGeometry(&bb))
+        for (int k = 0; k < 3; k++) add(kBubbleCmd[k] | (k ? 0u : 1u << 16), bb.btn[k][0], bb.btn[k][1], bb.btn[k][2], bb.btn[k][3], true);
     if (int kind = TopStrip(); kind && !g.firstFrame)
         for (const StripButton& b : Buttons(kind)) add(b.cmd, b.l, b.t, b.r, b.b, true);
     float l, t, r, b;
@@ -990,6 +1303,13 @@ std::wstring EditChromeName(UINT cmd, std::wstring* keys) {
     if (cmd == CMD_EDIT_TOGGLE && !g.editing) {
         *keys = L"F2";
         return Tr(S_ED_PENCIL_TIP);
+    }
+    switch (cmd) {  // a popup's buttons, the bubble's
+    case CMD_INS_IMAGE | 1u << 16: return Tr(S_ED_POP_CHOOSE);
+    case CMD_LINK | 1u << 16: return Tr(S_ED_BUBBLE_EDIT);
+    case CMD_POPUP_DONE: return Tr(S_ED_POP_DONE);
+    case CMD_LINK_REMOVE: return Tr(EditPopup() ? S_ED_LINK_REMOVE : S_ED_BUBBLE_REMOVE);
+    case CMD_LINK_OPEN: return Tr(S_ED_BUBBLE_OPEN);
     }
     if (g_pop) {  // a popover's row, by its command and argument; the grid's cell by its size
         if (g_grid && (cmd & 0xFFFF) == CMD_INS_TABLE && cmd >> 16) {
@@ -1021,7 +1341,10 @@ void DrawEditChrome(int layer) {
     if (g.firstFrame) return;
     if (layer == 1) {
         DrawPopover();
+        DrawPopup();
+        DrawBubble();
         DrawBarTip();
+        OverText();
         return;
     }
     float l, t, r, b;
@@ -1049,3 +1372,6 @@ int EditChromeRects(float (*rc)[4], int max) {
     if (PencilRect(&l, &t, &r, &b)) add(l, t, r, b);
     return n;
 }
+
+// Back to the compiler's own inlining for the templates instantiated at the end of the file (see editcore.cpp's end)
+#pragma inline_depth()

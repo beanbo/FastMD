@@ -253,6 +253,8 @@ void SelectionRichFormats(std::wstring& text, std::string& cfHtml, std::string& 
 
 // text + CF_HTML + RTF in one go
 bool CopySelectionRich() {
+    // edit mode: FastMD's own format too - the selection's source, balanced - which a paste in FastMD takes first (§7.11)
+    const std::wstring md = EditPrivateSlice();
     std::wstring text;
     std::string cfHtml, rtf;
     SelectionRichFormats(text, cfHtml, rtf);
@@ -274,6 +276,7 @@ bool CopySelectionRich() {
     static UINT fmtRtf = RegisterClipboardFormatW(L"Rich Text Format");
     set(fmtHtml, cfHtml.c_str(), cfHtml.size() + 1);
     set(fmtRtf, rtf.c_str(), rtf.size() + 1);
+    if (!md.empty()) set(RegisterClipboardFormatW(L"FastMD Markdown"), md.c_str(), (md.size() + 1) * sizeof(wchar_t));
     CloseClipboard();
     return ok;
 }

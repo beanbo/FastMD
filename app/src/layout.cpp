@@ -301,6 +301,7 @@ struct InlineImage final : IDWriteInlineObject {
         Image& im = const_cast<Doc*>(doc)->images[index];
         if (im.state == RS_OK) {
             c->DrawImage(im, x, y, x + w, y + h);
+            if (im.renderFailed) c->StrokeRoundRect(x - 1.f, y - 1.f, x + w + 1.f, y + h + 1.f, 2.f, 1.f, P_ALERT_CAUTION);  // (§2.10)
         } else if (im.state == RS_FAILED && im.mathKind && !im.alt.empty() && factory && fmt) {
             // a formula the engine could not typeset: its source, as the author wrote it
             IDWriteTextLayout* L = nullptr;

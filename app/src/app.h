@@ -167,6 +167,7 @@ struct RenderResult {
     FILETIME failTime{};
     uint64_t failSize = 0;
     std::string error;
+    bool keep = false;                       // the preview worker's (§9.4): a failure keeps the last good picture shown
 };
 
 // FASTMD_TEST_SLOW=images:<ms>,scale:<ms>,preview:<ms>,fullparse:<ms>,save:<ms> (tests: every job of that worker
@@ -401,6 +402,9 @@ bool HitTestDocAt(float x, float y, DocHit* h);
 // height. relayout = false never lays out (the paint path).
 bool CaretGeomAt(uint32_t pos, int32_t block, int32_t cell, float* cx, float* docY, float* h, bool relayout);
 float SpaceAdvance(uint32_t block);  // a blank in the block's font (DIP)
+// an object atom's box (l, t, r, b) in client DIP: a picture or formula in a line (image >= 0) or a block of its own;
+// false while it is not laid out (the paint path never lays out)
+bool AtomRect(int32_t block, int32_t image, float box[4]);
 float EditInset();                   // edit mode's bar over the top of the page, times its slide (0 when printing)
 float EditRevealTop();               // the caret counts as hidden above this line (bar, strip, find bar)
 float ScrollTrackTop();              // the scrollbar's track starts under the bar and a strip
@@ -463,6 +467,8 @@ bool FindTypeChar(wchar_t c);                 // WM_CHAR on the document while t
 bool FindInputFocused();
 void FindFocusInput();
 HWND FindEditHwnd();                          // the box's EDIT (tests type into it)
+// fn(arg) on the input thread, which edit mode's popups share (editpop.cpp); false = there is none (arg stays the caller's)
+bool InputCall(void (*fn)(void*), void* arg);
 
 // ------------------------------------------------------------------------------------------------ toc.cpp
 bool TocAvailable();                 // the document has headings (while editing: whether it had them at entry)
@@ -504,6 +510,10 @@ void OnFullDoc();
 void StartImages();
 void OnImagesLoaded(std::vector<RenderResult>* batch);  // WM_APP_IMAGES
 std::wstring ImageRenderKey(const Image& im);  // the render-table key of an entry in the current render context
+uint32_t MathContext();              // the render context of formulas and diagrams: text size, colour, theme
+// a formula (kind 1, 2) or a diagram (3) as pixels at `scale` per DIP (any thread); r: its size in DIP, ok
+bool RenderMath(uint8_t kind, const std::string& src, float fontPx, uint32_t rgb, bool dark, float scale, Pixels& pix,
+                RenderResult& r);
 void RetryChangedPictures();         // the window was activated: retry pictures whose failed file has changed since
 bool RemoteImagesAllowed();          // the privacy setting, plus a one-off allowance for this document
 bool DocHasRemoteImages();           // something is waiting to be fetched
@@ -661,6 +671,7 @@ void EditOnFullDoc();                // a big document's full parse arrived: an 
 void EditSlideStep();                // one animation step of the bar (message loop)
 void EditSync();                     // the re-parse a big document's typing deferred (§5.7), now
 void EditThemeChanged();             // the palette changed: re-parse the source instead of reloading the file
+void EditPaletteChanged();           // any palette change: popovers close, a source popup's fields take the new colours
 LRESULT EditOwnerMessage(WPARAM vol, LPARAM index);  // FastMD.EditOwner: is this window editing that file?
 bool EditDeferred(UINT msg, WPARAM wp, LPARAM lp);  // inside a modal loop: queued for WM_APP_REPLAY (§10.10)
 void EditReplay();                   // WM_APP_REPLAY: what waited, in order, then a close that was asked for
@@ -686,6 +697,33 @@ std::wstring EditStripText(int kind);  // the conflict, encoding, leave and jour
 // 5 raw text, 0 not built yet / nothing to say
 bool EditCmdEnabled(UINT cmd, int* why);
 bool EditCmdActive(UINT cmd);        // the format, list, quote or code block at the caret is on (Q_EDIT_ACTIVE's bits)
+// the source popups (§9) and the link and code-language popovers (§2.4): what editbar.cpp draws of the one open
+struct PopupView {
+    PopupKind kind = PK_NONE;
+    uint8_t fields = 0;              // EDIT fields: 1, or 2 (a picture's alt text and path)
+    bool multi = false;              // a source: one multi-line field
+    bool fixed1 = false;             // field 1 shows, read-only (a reference picture's address)
+    bool hidden = false;             // the fields are hidden while the panel moves (R18): the canvas draws their text
+    bool remove = false;             // the link popover offers [Remove link]
+    int focus = -1;                  // the field with the keyboard
+    int lines = 1;                   // what the source field shows now
+    std::wstring error, notice;      // the error line; a reference link's notice (a reference picture's note)
+};
+const PopupView* EditPopup();        // the one open, nullptr = none
+bool EditPopupAnchor(float box[4]);  // the object a source popup edits, client DIP (false: a popover under the bar)
+void EditPopupPlaced(const float fields[2][4], bool offscreen);  // editbar drew the panel: the fields go where it is
+void EditPopupClickOutside(bool onOpener);  // a click beside the panel keeps a source popup's text, closes a popover
+void EditPopupDismiss();             // the wheel, a resize, deactivation: a popover with a field closes
+void EditOnInput(WPARAM ev, LPARAM lp);  // WM_APP_EDITINPUT
+bool EditPopupCommit();              // §9.2's commit points: what the popup holds is in the source (false: none open)
+struct PreviewResult;
+void EditOnPreview(PreviewResult* r);    // WM_APP_PREVIEW
+bool EditPreviewClaim(const Image& im, const std::wstring& key);  // StartImages: the popup's formula goes to the preview worker
+bool EditPopupHolds(const Image& im);  // a formula or a diagram in the lines a source popup edits
+bool EditDropFiles(HANDLE drop);     // WM_DROPFILES in edit mode: pictures go in at the drop point (false: not editing)
+// the link bubble (§2.11): the caret's link, its box (client DIP) and address; false = not shown
+bool EditBubble(float box[4], std::wstring* dest);
+std::wstring EditPrivateSlice();     // the selection in FastMD's own clipboard format (§7.11), "" = none
 
 // ------------------------------------------------------------------------------------------------ editbar.cpp
 enum StripId : int { STRIP_NONE, STRIP_CONFLICT, STRIP_ENCODING, STRIP_LEAVE, STRIP_READONLY, STRIP_MISSING,
@@ -720,6 +758,50 @@ bool PopoverMouse(float x, float y, bool click);  // true = the point is on it (
 struct ChromeButton { UINT cmd; float l, t, r, b; bool enabled; };  // client DIP
 int EditChromeButtons(ChromeButton* out, int max);
 std::wstring EditChromeName(UINT cmd, std::wstring* keys);
+// the open popup's panel (§9.1): its box, its fields' boxes and where their EDITs go (client DIP); false = none
+struct PopupRects {
+    float l = 0, t = 0, r = 0, b = 0;
+    bool off = false;                // a source popup whose object is out of sight (it closes)
+    float field[2][4] = {}, edit[2][4] = {};
+    int buttons = 0;
+    UINT cmd[2] = {};
+    float btn[2][4] = {};
+    float label[2] = {}, notice = 0, hint = 0, error = 0;  // the tops of a picture's labels, the notice, hint, error
+};
+bool PopupGeometry(PopupRects* out);
+bool PopupMouse(float x, float y, bool click);   // true = the point is on the panel (or a click beside it closed a popover)
+bool BubbleMouse(float x, float y, bool click);  // the link bubble's buttons (§2.11)
+
+// ------------------------------------------------------------------------------------------------ editpop.cpp
+// A popup's fields live on the input thread (§9.1): the UI thread only posts to them, and they write their text into the
+// popup buffer and post WM_APP_EDITINPUT back - EI_TEXT (lp = the buffer's change count), EI_KEY (lp = vk | mods << 16),
+// EI_FOCUS (lp = 1 in, 0 out) - never a SendMessage between the threads. EI_OFFSCREEN: the object left the screen.
+enum EditInputEvent : WPARAM { EI_TEXT = 1, EI_KEY, EI_FOCUS, EI_OFFSCREEN };
+enum : int { KM_CTRL = 1, KM_SHIFT = 2, KM_ALT = 4 };  // the modifiers EI_KEY and WM_APP_TESTKEY carry
+struct PopupFields {
+    int n = 1;                       // 1, or 2 (a picture's alt text and path)
+    bool multi = false;              // a source: one multi-line field (with a scrollbar: scroll); else single-line fields
+    bool scroll = false, fixed1 = false, selectAll = false;
+    int tab = 0;                     // the blanks Tab types (TeX, YAML 2; Mermaid, HTML 4); 0: Tab goes to the other field
+    std::wstring text[2];            // what they start with, lines "\n"
+    RECT rc[2] = {};                 // client px
+    int fontPx = 13;
+    std::wstring face;
+    COLORREF fg = 0, bg = 0;
+    bool dark = false, show = true;
+};
+bool PopupFieldsOpen(const PopupFields& f);      // false: there is no input thread (§9.3)
+void PopupFieldsMove(const RECT rc[2], bool show);  // the panel moved (the fields hide while it moves, R18)
+void PopupFieldsStyle(const PopupFields& f);     // the theme changed: colours and scrollbars
+void PopupFieldsSetText(int field, const std::wstring& text);  // as if typed ([Choose file…])
+void PopupFieldsClose();
+HWND PopupFieldHwnd(int field);                  // Q_EDIT_POPUP; 0 until the input thread has made it
+uint32_t PopupFieldText(int field, std::wstring* text);  // the buffer: the field's latest text (lines "\n"), change count
+// the preview worker (§9.4): one detached thread, the latest job only - a newer one replaces a job not begun yet
+struct PreviewResult { uint32_t seq = 0; RenderResult r; std::string good; };  // good: the source, when it rendered
+// good: the popup's last source that rendered - drawn in its place, for the context of now, when this one does not
+void PreviewRequest(uint32_t seq, const std::wstring& key, const Image& im, const std::string& good);
+void PreviewWarm(int what);                      // 1 TeX, 2 Mermaid: loaded on the worker, once per process
 
 // ------------------------------------------------------------------------------------------------ settings_ui.cpp
 void SettingsOpen();

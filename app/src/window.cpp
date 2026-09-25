@@ -133,6 +133,7 @@ void ApplyTheme() {
     }
     FindRelayoutInput();
     SettingsRefresh();
+    EditPaletteChanged();
     // a <picture> chose its source by the old theme: read the document again to pick the other one - or, in edit mode,
     // parse the source again (the file on disk may be behind the edits)
     if (g.doc.themed && !g.path.empty() && g.ready && !g.firstFrame) {
@@ -629,8 +630,10 @@ static void OnMouseMove(int mx, int my) {
     int fpart = FindPartAt(x, y);
     int tocItem = -1;
     bool drawer = fpart == FP_NONE && TocOverlayOpen() && TocHit(x, y, &tocItem);
-    bool onPop = fpart == FP_NONE && !drawer && PopoverMouse(x, y, false);  // edit mode's popover lies over the strip
+    // edit mode's popup panel and popover lie over the strip, the link bubble over the text
+    bool onPop = fpart == FP_NONE && !drawer && (PopupMouse(x, y, false) || PopoverMouse(x, y, false));
     bool onStrip = fpart == FP_NONE && !drawer && !onPop && StripMouse(x, y, false);
+    onPop |= fpart == FP_NONE && !drawer && !onStrip && BubbleMouse(x, y, false);
     bool onBar = fpart == FP_NONE && !drawer && !onPop && !onStrip && BarMouse(x, y, false);
     if (!onBar) BarMouse(-1.f, -1.f, false);  // leaves the bar's hover
     if (onPop || onStrip || onBar) {
@@ -708,8 +711,10 @@ static void OnLButtonDown(int mx, int my, WPARAM keys) {
     if (fpart != FP_NONE) { FindClick(fpart); return; }
     int item;
     if (TocOverlayOpen() && TocHit(x, y, &item)) { TocClick(item); return; }  // the drawer lies over the bar
+    if (PopupMouse(x, y, true)) return;    // edit mode's popup panel (a click beside it keeps a source popup's text)
     if (PopoverMouse(x, y, true)) return;  // edit mode's popover: a row runs; a click outside closes it
     if (StripMouse(x, y, true)) return;  // a strip's button, or the strip itself over the document
+    if (BubbleMouse(x, y, true)) return;  // the link bubble's buttons
     if (BarMouse(x, y, true)) return;    // edit mode's toolbar
     if (TocHit(x, y, &item)) { TocClick(item); return; }
     if (TocButtonHit(x, y)) { TocSetOpen(true); return; }
@@ -870,6 +875,7 @@ static void OnWheel(int delta, WORD keys, int sx, int sy, bool horizontal) {
     ScreenToClient(g.hwnd, &p);
     float x = p.x / Scale(), y = p.y / Scale(), notches = (float)delta / WHEEL_DELTA;
     PopoverClose();  // the wheel closes edit mode's popover (§2.4)
+    EditPopupDismiss();
     if (!horizontal && (keys & MK_CONTROL)) { ZoomStep(delta > 0 ? 1 : -1); return; }
     int item;
     if (!horizontal && TocHit(x, y, &item)) { TocWheel(-notches * 84.f); return; }
@@ -1112,6 +1118,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.pxW = w;
         g.pxH = h;
         PopoverClose();  // (edit mode's popover: anchored to a button that may have moved)
+        EditPopupDismiss();
         g.canvas->Resize(w, h);
         g.offscreenValid = false;
         float tw = g.textW, ww = g.wideW;
@@ -1164,8 +1171,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (g.findOpen) FindTypeChar((wchar_t)wp);
         return 0;
     case WM_ACTIVATE:
-        if (LOWORD(wp) == WA_INACTIVE) g_findHadFocus = FindInputFocused();
-        else {
+        if (LOWORD(wp) == WA_INACTIVE) {
+            g_findHadFocus = FindInputFocused();
+            EditPopupDismiss();  // (deactivation closes a popover, §2.4)
+        } else {
             // back from another program: a picture that could not be read is tried again if its file changed; a file
             // edit mode could not write to is looked at again
             if (g.ready && !g.firstFrame) {
@@ -1223,9 +1232,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SETCURSOR:
         if (LOWORD(lp) == HTCLIENT && (HWND)wp == hwnd) return TRUE;  // set in WM_MOUSEMOVE (children: their own)
         break;
-    case WM_DROPFILES: {
+    case WM_DROPFILES: {  // edit mode: pictures go in where they were dropped (§2.8); a document is opened
         wchar_t file[MAX_PATH * 4];
-        if (DragQueryFileW((HDROP)wp, 0, file, (UINT)std::size(file))) OpenDocument(file, true, 0, true);
+        if (!EditDropFiles((HDROP)wp) && DragQueryFileW((HDROP)wp, 0, file, (UINT)std::size(file))) OpenDocument(file, true, 0, true);
         DragFinish((HDROP)wp);
         SetForegroundWindow(hwnd);
         return 0;
@@ -1284,6 +1293,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_APP_SAVED:  // the save worker is done (inside a modal loop: later)
         if (!EditDeferred(msg, wp, lp)) EditOnSaved(wp);
+        return 0;
+    case WM_APP_EDITINPUT:  // a popup's field (the input thread): its text, a key, its focus (inside a modal loop: later)
+        if (!EditDeferred(msg, wp, lp)) EditOnInput(wp, lp);
+        return 0;
+    case WM_APP_PREVIEW:  // the preview worker's picture of the formula or diagram a popup edits
+        if (!EditDeferred(msg, wp, lp)) EditOnPreview((PreviewResult*)lp);
         return 0;
     case WM_APP_UPDATE: OnUpdateMessage(wp, lp); return 0;
     case WM_APP_SCALED: OnScaledImages((std::vector<ScaledImage>*)lp); return 0;

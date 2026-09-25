@@ -9,8 +9,8 @@
 
 namespace {
 const wchar_t kInputClass[] = L"FastMD.FindInput";
-enum : UINT { IM_SETUP = WM_APP + 1 /* lp = InputSetup* */, IM_SETTEXT /* lp = std::wstring* */, IM_FOCUS /* wp = select all */ };
-enum : int { KM_CTRL = 1, KM_SHIFT = 2, KM_ALT = 4 };  // key modifiers posted with FI_KEY
+enum : UINT { IM_SETUP = WM_APP + 1 /* lp = InputSetup* */, IM_SETTEXT /* lp = std::wstring* */, IM_FOCUS /* wp = select all */,
+              IM_CALL /* wp = a function, lp = its argument: edit mode's popups (editpop.cpp) run on this thread too */ };
 
 struct InputSetup {
     RECT rc;
@@ -152,6 +152,9 @@ LRESULT CALLBACK HostProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case IM_FOCUS:
         SetFocus(s_edit);
         if (wp) SendMessageW(s_edit, EM_SETSEL, 0, -1);
+        return 0;
+    case IM_CALL:
+        ((void (*)(void*))wp)((void*)lp);
         return 0;
     case WM_COMMAND:
         if (HIWORD(wp) == EN_CHANGE && !g_echoOff) {
@@ -395,6 +398,10 @@ void FindRelayoutInput() {
 }
 
 bool FindInputFocused() { return g_host && g_fieldFocused; }
+
+bool InputCall(void (*fn)(void*), void* arg) {
+    return EnsureInput() && PostMessageW(g_host, IM_CALL, (WPARAM)fn, (LPARAM)arg);
+}
 
 void FindFocusInput() {
     if (g_host) PostMessageW(g_host, IM_FOCUS, 0, 0);

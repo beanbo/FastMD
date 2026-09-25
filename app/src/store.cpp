@@ -119,8 +119,11 @@ bool WriteEntries(const std::wstring& dir, const std::vector<PosEntry>& list) {
     return ok && MoveFileExW(tmp.c_str(), dst.c_str(), MOVEFILE_REPLACE_EXISTING);
 }
 
+// Most recently opened first, in a stable insertion sort: the file is written in this order, so the list comes nearly
+// sorted - and std::stable_sort's code is kilobytes of the exe
 void SortAndTrim(std::vector<PosEntry>& list) {
-    std::stable_sort(list.begin(), list.end(), [](const PosEntry& a, const PosEntry& b) { return a.opened > b.opened; });
+    for (size_t i = 1; i < list.size(); i++)
+        for (size_t k = i; k > 0 && list[k].opened > list[k - 1].opened; k--) std::swap(list[k], list[k - 1]);
     if (list.size() > kMaxPositions) list.resize(kMaxPositions);
 }
 
