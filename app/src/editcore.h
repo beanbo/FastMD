@@ -133,6 +133,37 @@ EditResult OpTable(const EditCtx&, const EditState&, int op /* CMD_TABLE_* − C
 EditResult OpTaskToggle(const EditCtx&, const EditState&, int task);
 EditResult OpAtomSource(const EditCtx&, const EditState&, int atom, int field, std::wstring_view text);
 
+// ---- links (§8.3), source popups (§9), pictures from files (§8.8) - Phase 3b
+// The link the caret (the selection's start) stands in: its address - an inline link's destination, a reference link's
+// definition's (label: the label that defines it) -, and whether it is an autolink. False: none there.
+bool LinkOfCaret(const EditCtx&, const EditState&, std::wstring* dest, std::wstring* label, bool* autolink);
+enum PopupKind : uint8_t { PK_NONE, PK_FORMULA, PK_FORMULA_BLOCK, PK_DIAGRAM, PK_HTML, PK_FRONT, PK_IMAGE, PK_LINK, PK_CODELANG };
+// What a source popup edits (§9.1, §9.2): the source of each field - the TeX, the Mermaid lines, the HTML, the YAML; a
+// picture's alt text and its destination (with its <…>) - and what the popup shows of it: its lines without their
+// container prefixes, joined by "\n". The glue keeps a binding while the popup is open; AtomSplice moves it along.
+struct AtomBinding {
+    PopupKind kind = PK_NONE;
+    uint8_t fields = 0;                    // 1; a picture 2
+    bool fixed1 = false;                   // a reference picture: field 1 shows its definition's address, read-only
+    uint32_t beg[2] = {}, end[2] = {};     // the source each field replaces
+    uint32_t outerBeg = 0, outerEnd = 0;   // the object's whole source, delimiters and fences included
+    uint32_t fence[2] = {UINT32_MAX, UINT32_MAX};  // a diagram's opening and closing fence runs (UINT32_MAX: none)
+    uint8_t fenceLen = 0, closeLen = 0;
+    wchar_t fenceCh = 0;
+    std::wstring prefix;                   // what the lines after a field's first start with (ContPrefix)
+    std::wstring text[2];
+};
+bool BindAtom(const Doc&, const std::wstring& src, int32_t atom, AtomBinding*);
+// A field's new text as its source (§9.2): line ends the file's, lines 2…n with the prefix, an inline formula's and a
+// picture's alt text on one line, a destination as §8.8 writes it, a diagram's fences made longer than a fence-like line
+// of the text. The binding follows the splice. False (why) when the text cannot be written there: a front matter line
+// "---" or "..." would end the block ("front").
+bool AtomSplice(const std::wstring& src, AtomBinding&, int field, std::wstring_view text, const wchar_t* eol, Splice* out,
+                std::string* why);
+// A picture file as its destination from the document's folder (§8.8, UX-14): relative with '/' on the same volume,
+// else absolute with '/'; '%' written %25; the <…> form for blanks, parentheses, '<' and '>'.
+std::wstring PictureDest(const std::wstring& docDir, const std::wstring& file);
+
 // ---- typing's check (§7.3 step 5): an ordinary character (none of the Markdown-significant ones) must render as
 // itself at the caret, and its neighbours must keep their formatting. When it does not, the glue tries the other places
 // TypeFallbacks names, in order; if none renders right, the first splice stays (typing is never blocked).

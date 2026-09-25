@@ -18,9 +18,12 @@
 //          Paste("…"), Cut, Phantom (the caret into the phantom row), click(t,b[,c]) (the caret at a text position),
 //          TaskToggle(n); the commands of §8: Bold, Italic, Strike, Code, P, H1…H6, Bullet, Number, Task, Quote,
 //          Fence, Lang("…"), Table(r,c), Table.<RowAbove|RowBelow|ColLeft|ColRight|DelRow|DelCol|AlignL|AlignC|AlignR|
-//          Del>, Formula, FormulaBlock, Diagram(n), Image("dest","alt"), Hr; src may hold a selection ⟦ … ⟧ (anchor
-//          first) instead of the ‸. A step that wrote delimiters is checked as the glue checks it (Verified), and typed
-//          text with a pending format goes in plain, the format still pending, when that check fails.
+//          Del>, Formula, FormulaBlock, Diagram(n), Image("dest","alt"), Hr; Phase 3b's Link("url") (Link!("url"): a
+//          reference link's notice confirmed), Unlink, Copy (the selection's private format, §7.11), PastePrivate (what
+//          Copy took), AtomSource(<image> | b<block>,field,"…") (a source popup's text, §9.2); src may hold a selection
+//          ⟦ … ⟧ (anchor first) instead of the ‸. A step that wrote delimiters is checked as the glue checks it
+//          (Verified), and typed text with a pending format goes in plain, the format still pending, when that check fails.
+//   clip:  (operation cases) what Copy put in the private format
 //   want:  the expected source with its ‸ (or ⟦ … ⟧)
 //   state: (operation cases) refused=<why>, atom=<none|blkN|N> and pending=<on>[/<off>] (B I S C, ! sticky; none),
 //          `;`-separated: what the last operation left besides the source
@@ -689,7 +692,7 @@ std::vector<std::string> SplitOps(const std::string& s) {  // on ';' outside quo
     return out;
 }
 
-struct OpRun { std::wstring src; EditState st; std::string refused; int dir = 1; TextPos click{0, -1, -1}; };
+struct OpRun { std::wstring src; EditState st; std::string refused; int dir = 1; TextPos click{0, -1, -1}; std::wstring clip; };
 
 bool InPhantom(const EditState& st) { return st.phantom.kind != PH_NONE && st.phantom.in; }
 
@@ -779,6 +782,23 @@ bool DoOp(OpRun& r, const std::string& op, const std::string& what) {
         if (!Check(q != std::string::npos && op.size() > q + 5, "%s: %s: want Image(\"dest\",\"alt\")", what.c_str(), op.c_str()))
             return false;
         res = OpInsertImage(c, r.st, Unescape(op.substr(7, q - 7)), Unescape(op.substr(q + 3, op.size() - q - 5)));
+    } else if (QuotedArg(op, "Link", &arg) || QuotedArg(op, "Link!", &arg)) {  // §8.3 (Link!: the notice confirmed)
+        res = OpLink(c, r.st, arg, op[4] == '!');
+    } else if (op == "Unlink") {
+        res = OpLinkRemove(c, r.st);
+    } else if (op == "Copy") {  // §7.11: the private format of the selection, kept for PastePrivate
+        r.clip = BalancedSlice(c, r.st);
+        return true;
+    } else if (op == "PastePrivate") {
+        res = OpPaste(c, r.st, r.clip, true);
+    } else if (op.rfind("AtomSource(", 0) == 0) {  // AtomSource(<image> | b<block>,field,"…"): a popup's text (§9.2)
+        size_t q = op.find(",\"");
+        int field = 0;
+        if (!Check(q != std::string::npos && q > 13 && op.size() > q + 3, "%s: %s: want AtomSource(n,field,\"…\")", what.c_str(), op.c_str()))
+            return false;
+        int32_t atom = op[11] == 'b' ? (kAtomBlock | atoi(op.c_str() + 12)) : atoi(op.c_str() + 11);
+        field = atoi(op.c_str() + op.find(',') + 1);
+        res = OpAtomSource(c, r.st, atom, field, Unescape(op.substr(q + 2, op.size() - q - 4)));
     } else {
         Fail("%s: unknown op \"%s\"", what.c_str(), op.c_str());
         return false;
@@ -915,6 +935,12 @@ void OpVariant(const Case& c, const std::string& what, const std::wstring& srcMa
     std::wstring got = Marked(r.src, r.st.anchor, r.st.focus);
     Check(got == wantMarked, "%s: the result differs\n  want: %s\n  got:  %s", what.c_str(), Esc(wantMarked, 200).c_str(),
           Esc(got, 200).c_str());
+    if (const std::string* clip = c.Get("clip")) {  // what Copy put in the private format (its line ends the file's)
+        std::wstring want = Unescape(*clip);
+        if (what.find("[crlf]") != std::string::npos) want = ToCrlf(want);
+        Check(r.clip == want, "%s: the private format differs\n  want: %s\n  got:  %s", what.c_str(), Esc(want, 200).c_str(),
+              Esc(r.clip, 200).c_str());
+    }
     Parsed fin;
     ParseMap(fin, r.src);
     const std::string* ph = c.Get("phantom");
@@ -1071,6 +1097,22 @@ void UnitTests() {
     for (auto& c : clusters)
         Check(GraphemeLite(c.text, c.pos, c.dir, nullptr) == c.want, "GraphemeLite(\"%s\", %u, %d) = %u, want %u",
               Esc(c.text).c_str(), c.pos, c.dir, GraphemeLite(c.text, c.pos, c.dir, nullptr), c.want);
+
+    // ---- picture files as destinations (§8.8, UX-14)
+    struct Pd { const wchar_t *dir, *file, *want; } dests[] = {
+        {L"C:\\docs\\", L"C:\\docs\\img\\a.png", L"img/a.png"},
+        {L"C:\\docs\\", L"C:\\docs\\img\\Снимок экрана.png", L"<img/Снимок экрана.png>"},
+        {L"C:\\docs\\", L"D:\\pics\\x.png", L"<D:/pics/x.png>"},
+        {L"C:\\docs\\sub\\", L"c:\\DOCS\\pic.png", L"../pic.png"},
+        {L"C:\\docs\\", L"C:\\other\\a (1).png", L"<../other/a (1).png>"},
+        {L"C:\\docs\\", L"C:\\docs\\50%.png", L"50%25.png"},
+        {L"C:\\docs\\", L"\\\\srv\\share\\p.png", L"<//srv/share/p.png>"},
+        {L"\\\\srv\\share\\d\\", L"\\\\srv\\share\\p.png", L"../p.png"},
+        {L"\\\\srv\\share\\", L"\\\\srv\\other\\p.png", L"<//srv/other/p.png>"},
+    };
+    for (auto& t : dests)
+        Check(PictureDest(t.dir, t.file) == t.want, "PictureDest(%s, %s) = %s, want %s", Esc(t.dir).c_str(), Esc(t.file).c_str(),
+              Esc(PictureDest(t.dir, t.file)).c_str(), Esc(t.want).c_str());
 }
 
 // ------------------------------------------------------------------------------------------------ undo (§11)

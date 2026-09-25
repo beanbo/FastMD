@@ -1371,15 +1371,22 @@ EditResult OpInsertDiagram(const EditCtx& c, const EditState& st, int tmpl) {
     return InsertBlock(c, st, lines, 1, 0, false);
 }
 
-// A picture: in the line at the caret, or a paragraph of its own in a phantom, after code or an object
+// A picture: in the line at the caret, or a paragraph of its own in a phantom, after code or an object. Several
+// (dropped or pasted files): dest and alt hold one per line, and they go in one after the other, blank-separated.
 EditResult OpInsertImage(const EditCtx& c, const EditState& st, std::wstring_view dest, std::wstring_view alt) {
     const Doc& d = c.doc;
-    std::wstring a;
-    for (wchar_t ch : alt) {
-        if (ch == L'[' || ch == L']' || ch == L'\\') a += L'\\';
-        a += EolChar(ch) ? L' ' : ch;
+    std::wstring t;
+    for (size_t i = 0, j = 0; i <= dest.size();) {
+        size_t e = std::min(dest.find(L'\n', i), dest.size()), ae = std::min(alt.find(L'\n', j), alt.size());
+        std::wstring a;
+        for (wchar_t ch : alt.substr(std::min(j, alt.size()), ae - std::min(j, alt.size()))) {
+            if (ch == L'[' || ch == L']' || ch == L'\\') a += L'\\';
+            a += EolChar(ch) ? L' ' : ch;
+        }
+        t += (t.empty() ? L"![" : L" ![") + a + L"](" + std::wstring(dest.substr(i, e - i)) + L")";
+        i = e + 1;
+        j = ae + 1;
     }
-    const std::wstring t = L"![" + a + L"](" + std::wstring(dest) + L")";
     uint16_t tr = 0;
     TextPos f = FocusOf(c, st, &tr);
     if (!InPh(st) && (st.atom >= 0 || !ValidBlock(d, f.block) || d.blocks[f.block].kind == BK_CODE))
@@ -1509,6 +1516,487 @@ EditResult OpTable(const EditCtx& c, const EditState& st, int op) {
         if (s != UINT32_MAX) res.after.focus = res.after.anchor = MapThrough(res.splices, s, !end);
     }
     return res;
+}
+
+// ------------------------------------------------------------------------------------------------ links (§8.3)
+namespace {
+// the Markdown link or autolink whose text holds text position p, its edges included (the innermost)
+const SpanSrc* LinkSpan(const Doc& d, const TextPos& p) {
+    TRange rg;
+    if (!ValidBlock(d, p.block) || !RangeOf(d, p, &rg)) return nullptr;
+    const SpanSrc* best = nullptr;
+    for (const SpanSrc* sp : SpansIn(d, p, rg))
+        if (sp->type == MD_SPAN_A && !(sp->flags & SF_UNCLOSED) && sp->tBeg <= p.t && p.t <= sp->tEnd &&
+            (!best || sp->tBeg >= best->tBeg))
+            best = sp;
+    return best;
+}
+// The destination in `(dest "title")` from p on (up to end): its token, <…> included
+bool DestToken(const std::wstring& src, uint32_t p, uint32_t end, uint32_t* tb, uint32_t* te) {
+    while (p < end && (Blank(src[p]) || EolChar(src[p]))) p++;
+    *tb = p;
+    if (p < end && src[p] == L'<') {
+        while (++p < end && src[p] != L'>' && !EolChar(src[p])) {}
+        *te = p + 1;
+        return p < end && src[p] == L'>';
+    }
+    for (int depth = 0; p < end; p++) {
+        wchar_t ch = src[p];
+        if (ch == L'\\' && p + 1 < end) p++;
+        else if (Blank(ch) || EolChar(ch) || (ch == L')' && depth-- == 0)) break;
+        else if (ch == L'(') depth++;
+    }
+    *te = p;
+    return true;
+}
+std::wstring Unwrap(const std::wstring& src, uint32_t tb, uint32_t te) {
+    return te >= tb + 2 && src[tb] == L'<' && src[te - 1] == L'>' ? Sub(src, tb + 1, te - 1) : Sub(src, tb, te);
+}
+// An address as a destination: <…> when it holds blanks, '<' or '>', or parentheses that do not balance - or, a picture's
+// path, any (§8.8) - with '<' and '>' percent-encoded inside; bare otherwise
+std::wstring DestOf(std::wstring_view url, bool path) {
+    bool angle = false;
+    int depth = 0;
+    std::wstring in;
+    for (wchar_t ch : url) {
+        if (EolChar(ch)) continue;
+        angle |= Blank(ch) || ch == L'<' || ch == L'>' || (path && (ch == L'(' || ch == L')'));
+        if (ch == L'(') depth++;
+        if (ch == L')' && --depth < 0) angle = true;
+        in += ch == L'<' ? L"%3C" : ch == L'>' ? L"%3E" : std::wstring(1, ch);
+    }
+    return angle || depth ? L"<" + in + L">" : in;
+}
+// labels match without regard to case and runs of blanks (CommonMark)
+std::wstring LabelKey(std::wstring_view l) {
+    std::wstring k;
+    for (wchar_t ch : l) {
+        if (SpaceChar(ch) || EolChar(ch)) {
+            if (!k.empty() && k.back() != L' ') k += L' ';
+        } else {
+            k += (wchar_t)towlower(ch);
+        }
+    }
+    while (!k.empty() && k.back() == L' ') k.pop_back();
+    return k;
+}
+// The definition `[label]: dest` of a label (on a line of its own, after quote markers and up to three blanks): the
+// destination's token - on the same line or the next
+bool Definition(const std::wstring& src, std::wstring_view label, uint32_t* tb, uint32_t* te) {
+    const std::wstring key = LabelKey(label);
+    for (uint32_t l = 0; l < src.size();) {
+        uint32_t le = LineEndOf(src, l), p = l, q;
+        while (p < le && (Blank(src[p]) || src[p] == L'>')) p++;
+        for (q = p + 1; p < le && src[p] == L'[' && q < le && src[q] != L']'; q++) q += src[q] == L'\\';
+        if (p < le && src[p] == L'[' && q + 1 < le && src[q] == L']' && src[q + 1] == L':' && LabelKey(Sub(src, p + 1, q)) == key) {
+            uint32_t e = q + 2;
+            while (e < le && Blank(src[e])) e++;
+            if (e == le) e = SkipEol(src, le);  // (the destination on the next line)
+            return DestToken(src, e, LineEndOf(src, e), tb, te) && *te > *tb;
+        }
+        uint32_t nx = SkipEol(src, le);
+        if (nx <= l) break;
+        l = nx;
+    }
+    return false;
+}
+// the label of a reference link or picture: `[t][label]`, else its text (`[t][]`, `[t]`)
+std::wstring RefLabel(const std::wstring& src, const SpanSrc& sp) {
+    std::wstring close = Sub(src, sp.closeBeg, sp.closeEnd);
+    return close.size() > 3 && close[1] == L'[' ? close.substr(2, close.size() - 3) : Sub(src, sp.openEnd, sp.closeBeg);
+}
+std::wstring EscapeBrackets(std::wstring_view t) {
+    std::wstring o;
+    for (wchar_t ch : t) {
+        if (ch == L'[' || ch == L']') o += L'\\';
+        if (!EolChar(ch)) o += ch;
+    }
+    return o;
+}
+}  // namespace
+
+bool LinkOfCaret(const EditCtx& c, const EditState& st, std::wstring* dest, std::wstring* label, bool* autolink) {
+    TextPos A, B;
+    Ends(c, st, &A, &B);
+    const SpanSrc* sp = st.atom < 0 && !InPh(st) ? LinkSpan(c.doc, A) : nullptr;
+    if (!sp) return false;
+    const std::wstring& src = c.src;
+    uint32_t tb, te;
+    label->clear();
+    dest->clear();
+    *autolink = (sp->flags & SF_AUTOLINK) != 0;
+    if (*autolink) *dest = Sub(src, sp->openEnd, sp->closeBeg);
+    else if (!(sp->flags & SF_REF)) { if (DestToken(src, sp->closeBeg + 2, sp->closeEnd - 1, &tb, &te)) *dest = Unwrap(src, tb, te); }
+    else if (Definition(src, *label = RefLabel(src, *sp), &tb, &te)) *dest = Unwrap(src, tb, te);
+    return true;
+}
+
+// Ctrl+K's link (§8.3): a selection in one block becomes `[text](url)` - links inside it lose their delimiters, spans it
+// cuts in two are taken in whole, brackets of the text are escaped; with no selection the link at the caret gets the
+// address (a reference link's definition once the notice was confirmed; an autolink becomes a link of its own), else
+// `[url](url)` is put in at the caret.
+EditResult OpLink(const EditCtx& c, const EditState& st, std::wstring_view url, bool confirmRefDef) {
+    const Doc& d = c.doc;
+    const std::wstring& src = c.src;
+    std::wstring u(url);
+    while (!u.empty() && Ws(u.back())) u.pop_back();
+    while (!u.empty() && Ws(u.front())) u.erase(0, 1);
+    if (u.empty() || st.atom >= 0) return Refuse(st, "link");
+    const std::wstring dest = DestOf(u, false);
+    TextPos A, B;
+    Ends(c, st, &A, &B);
+    if (st.anchor == st.focus || InPh(st)) {
+        const SpanSrc* sp = InPh(st) ? nullptr : LinkSpan(d, A);
+        if (!sp) return Carry(Insert(c, st, L"[" + EscapeBrackets(u) + L"](" + dest + L")", false, EK_FORMAT));
+        uint32_t tb, te;
+        std::vector<Ed> eds;
+        if (sp->flags & SF_AUTOLINK) {  // its text stays, and gets the address; the caret stays in it
+            eds.push_back(Ed{sp->openBeg, sp->closeEnd, L"[" + Sub(src, sp->openEnd, sp->closeBeg) + L"](" + dest + L")"});
+            EditResult r = Built(c, st, std::move(eds), EK_FORMAT);
+            r.after.focus = r.after.anchor = sp->openBeg + 1 + std::clamp(st.focus, sp->openEnd, sp->closeBeg) - sp->openEnd;
+            return r;
+        } else if (sp->flags & SF_REF) {  // the definition, for every link that uses it: only once the notice was seen
+            if (!confirmRefDef) return Refuse(st, "refdef");
+            if (!Definition(src, RefLabel(src, *sp), &tb, &te)) return Refuse(st, "link");
+            eds.push_back(Ed{tb, te, dest});
+        } else {
+            if (!DestToken(src, sp->closeBeg + 2, sp->closeEnd - 1, &tb, &te)) return Refuse(st, "link");
+            eds.push_back(Ed{tb, te, dest});
+        }
+        return Built(c, st, std::move(eds), EK_FORMAT);
+    }
+    TRange rg;
+    if (A.block != B.block || A.cell != B.cell || !RangeOf(d, A, &rg) || d.blocks[A.block].kind == BK_CODE)
+        return Refuse(st, "format");
+    uint32_t sA = SrcOfText(d, src, A, MAP_OUTER_START), sB = SrcOfText(d, src, B, MAP_OUTER_END), tA = A.t, tB = B.t;
+    if (sA == UINT32_MAX || sB == UINT32_MAX || sB <= sA) return Refuse(st, "format");
+    const std::vector<const SpanSrc*> spans = SpansIn(d, A, rg);
+    for (bool grew = true; grew;) {  // a span half in and half out comes in whole, and so does a link around the text
+        grew = false;
+        for (const SpanSrc* sp : spans) {
+            bool meets = !(sp->flags & SF_UNCLOSED) && sp->openBeg < sB && sp->closeEnd > sA;
+            bool whole = sp->openBeg >= sA && sp->closeEnd <= sB, around = sp->openBeg < sA && sp->closeEnd > sB;
+            if (meets && !whole && (sp->type == MD_SPAN_A || !around)) {
+                sA = std::min(sA, sp->openBeg);
+                sB = std::max(sB, sp->closeEnd);
+                tA = std::min(tA, sp->tBeg);
+                tB = std::max(tB, sp->tEnd);
+                grew = true;
+            }
+        }
+    }
+    std::vector<Ed> eds{Ed{sA, sA, L"["}};
+    for (const SpanSrc* sp : spans)  // the links inside lose their delimiters: links do not nest
+        if (sp->type == MD_SPAN_A && !(sp->flags & SF_UNCLOSED) && sp->openBeg >= sA && sp->closeEnd <= sB) {
+            eds.push_back(Ed{sp->openBeg, sp->openEnd, L""});
+            eds.push_back(Ed{sp->closeBeg, sp->closeEnd, L""});
+        }
+    SegSpan ss = SegsIn(d, A.block, rg);  // a bracket of the text itself would end the link's text
+    for (const SrcSeg* g = ss.b; g < ss.e; g++)
+        for (uint32_t k = std::max(g->s, sA); g->kind == SEG_PLAIN && k < std::min(g->s + g->sLen, sB); k++)
+            if (src[k] == L'[' || src[k] == L']') eds.push_back(Ed{k, k, L"\\"});
+    eds.push_back(Ed{sB, sB, L"](" + dest + L")"});
+    EditResult r = Built(c, st, std::move(eds), EK_FORMAT);
+    if (!r.refused.empty()) return r;
+    r.verify.push_back(EditResult::Expect{tA, tB, FMT_LINK, true});
+    r.keep = EditResult::Keep{true, tA, tB, d.text.substr(tA, tB - tA)};
+    r.selA = A;
+    r.selB = B;
+    return r;
+}
+
+// The link at the caret loses its delimiters, its text stays (a definition stays too); an autolink stays text by an
+// escape where it would link again: `<http://x>` → `http\://x`, `www.x.com` → `www\.x.com`, `a@b.c` → `a\@b.c`
+EditResult OpLinkRemove(const EditCtx& c, const EditState& st) {
+    const std::wstring& src = c.src;
+    uint16_t tr = 0;
+    const SpanSrc* sp = st.atom < 0 && !InPh(st) ? LinkSpan(c.doc, FocusOf(c, st, &tr)) : nullptr;
+    if (!sp) return Refuse(st, "link");
+    std::vector<Ed> eds{Ed{sp->openBeg, sp->openEnd, L""}, Ed{sp->closeBeg, sp->closeEnd, L""}};
+    if (sp->flags & SF_AUTOLINK) {
+        std::wstring t = Sub(src, sp->openEnd, sp->closeBeg);
+        size_t k = t.find(L"://");
+        if (k == std::wstring::npos) k = t.find(L'@');
+        if (k == std::wstring::npos && t.size() > 4 && !_wcsnicmp(t.c_str(), L"www.", 4)) k = 3;
+        if (k == std::wstring::npos) return Refuse(st, "link");
+        eds.push_back(Ed{sp->openEnd + (uint32_t)k, sp->openEnd + (uint32_t)k, L"\\"});
+    }
+    EditResult r = Built(c, st, std::move(eds), EK_FORMAT);
+    if (!r.refused.empty()) return r;
+    r.verify.push_back(EditResult::Expect{sp->tBeg, sp->tEnd, FMT_LINK, false});
+    r.keep = EditResult::Keep{true, sp->tBeg, sp->tEnd, c.doc.text.substr(sp->tBeg, sp->tEnd - sp->tBeg)};
+    return r;
+}
+
+// ------------------------------------------------------------------------------------------------ the private format (§7.11)
+// What FastMD puts on the clipboard for itself: the selection's source, balanced - the openers of the spans its start
+// cuts in front, the closers of those its end cuts behind (`**br⟦own** fox⟧` → `**own** fox`); blocks it covers whole
+// with their markers, and every line without the prefixes of the containers both ends share. Line ends: the file's.
+std::wstring BalancedSlice(const EditCtx& c, const EditState& st) {
+    const Doc& d = c.doc;
+    const std::wstring& src = c.src;
+    TextPos A, B;
+    Ends(c, st, &A, &B);
+    TRange ra;
+    if (st.anchor == st.focus || st.atom >= 0 || InPh(st) || !ValidBlock(d, A.block) || !ValidBlock(d, B.block) ||
+        !RangeOf(d, A, &ra))
+        return L"";
+    uint32_t sA = SrcOfText(d, src, A, MAP_OUTER_START), sB = SrcOfText(d, src, B, MAP_OUTER_END);
+    if (sA == UINT32_MAX || sB == UINT32_MAX || sB <= sA) return L"";
+    const std::vector<const ContainerSrc*> ca = Chain(d, A.block), cb = Chain(d, B.block);
+    size_t common = 0;
+    while (common < ca.size() && common < cb.size() && ca[common] == cb[common]) common++;
+    const bool multi = A.block != B.block;
+    if (multi && A.t == ra.beg && A.cell < 0) PrefixN(d, src, A.block, (int)common, &sA);  // the first block whole
+    const std::wstring pc = PrefixN(d, src, A.block, (int)common, nullptr);
+    std::wstring head, tail;
+    auto cut = [&](const TextPos& p, bool start, bool end) {
+        TRange rg;
+        if (!RangeOf(d, p, &rg)) return;
+        for (const SpanSrc* sp : SpansIn(d, p, rg)) {
+            if (sp->flags & SF_UNCLOSED) continue;
+            std::wstring close = Sub(src, sp->closeBeg, sp->closeEnd);
+            if ((sp->flags & SF_REF) && (close == L"]" || close == L"][]")) close = L"][" + RefLabel(src, *sp) + L"]";
+            if (start && sp->openEnd <= sA && sp->closeBeg >= sA) head += Sub(src, sp->openBeg, sp->openEnd);
+            if (end && sp->openEnd <= sB && sp->closeBeg >= sB && (sp->openBeg >= sA || !multi)) tail.insert(0, close);
+        }
+    };
+    cut(A, true, !multi);
+    if (multi) cut(B, false, true);
+    std::wstring out = head;
+    for (uint32_t i = sA; i < sB;) {
+        uint32_t le = std::min(LineEndOf(src, i), sB);
+        out += Sub(src, i, le);
+        if (le >= sB) break;
+        uint32_t nx = std::min(SkipEol(src, le), sB);
+        out += c.eol;
+        for (size_t k = 0; nx < sB && k < pc.size() && src[nx] == pc[k]; k++) nx++;  // the shared containers' prefix
+        i = nx;
+    }
+    return out + tail;
+}
+
+// ------------------------------------------------------------------------------------------------ source popups (§9)
+namespace {
+// a field's source as the popup shows it: its lines without the prefix they share, joined by "\n"
+std::wstring Shown(const std::wstring& src, uint32_t a, uint32_t b, const std::wstring& pre) {
+    std::wstring o;
+    for (uint32_t i = a; i < b;) {
+        uint32_t le = std::min(LineEndOf(src, i), b);
+        o += Sub(src, i, le);
+        if (le >= b) break;
+        o += L'\n';
+        i = std::min(SkipEol(src, le), b);
+        for (size_t k = 0; i < b && k < pre.size() && src[i] == pre[k]; k++) i++;
+    }
+    return o;
+}
+// a fence's run of backticks or tildes at p (its length)
+uint8_t RunOf(const std::wstring& src, uint32_t p, wchar_t ch) {
+    uint32_t q = p;
+    while (q < src.size() && src[q] == ch) q++;
+    return (uint8_t)std::min<uint32_t>(q - p, 255);
+}
+}  // namespace
+
+bool BindAtom(const Doc& d, const std::wstring& src, int32_t atom, AtomBinding* out) {
+    AtomBinding& b = *out;
+    b = AtomBinding{};
+    const int32_t blk = AtomBlockOf(d, atom);
+    if (!ValidBlock(d, blk)) return false;
+    const BlockSrc& bs = d.blockSrc[blk];
+    auto one = [&](PopupKind k, uint32_t x, uint32_t y) {
+        b.kind = k;
+        b.fields = 1;
+        b.beg[0] = x;
+        b.end[0] = y;
+    };
+    const Image* im = nullptr;
+    if (atom & kAtomBlock) {
+        if (bs.flags & BS_RAW) {  // an HTML block (all the blocks drawn from it), front matter: its lines
+            one(bs.flags & BS_FRONT ? PK_FRONT : PK_HTML, bs.beg, bs.end);
+            b.outerBeg = bs.line;
+            b.outerEnd = BlockEnd(d, blk);
+        } else if (d.blocks[blk].kind == BK_IMAGE && d.blocks[blk].aux < d.images.size()) {
+            im = &d.images[d.blocks[blk].aux];
+        } else {
+            return false;  // a rule: nothing to edit
+        }
+    } else if ((uint32_t)atom < d.images.size()) {
+        im = &d.images[atom];
+    }
+    if (im) {
+        if (im->outerBeg == UINT32_MAX || im->outerEnd > src.size()) return false;
+        b.outerBeg = im->outerBeg;
+        b.outerEnd = im->outerEnd;
+        if (im->mathKind && im->srcBeg == UINT32_MAX) return false;
+        if (im->mathKind == 1) {
+            one(PK_FORMULA, im->srcBeg, im->srcEnd);
+        } else if (im->mathKind == 2) {  // between `$$` and `$$`: without the line ends and prefixes around the TeX
+            uint32_t x = im->srcBeg, y = im->srcEnd, ls = LineStartOf(src, y);
+            if (x < y && EolChar(src[x])) {  // (the TeX from the next line on, after its container prefix)
+                const std::wstring pre = ContPrefix(d, src, blk);
+                x = SkipEol(src, x);
+                for (size_t k = 0; x < y && k < pre.size() && src[x] == pre[k]; k++) x++;
+            }
+            if (ls > x && BlankLine(src, ls, y)) y = BackEol(src, ls);  // (the closing `$$` on a line of its own)
+            one(PK_FORMULA_BLOCK, x, std::max(x, y));
+        } else if (im->mathKind == 3) {  // the content lines; the fences, to make them longer when the text needs it
+            one(PK_DIAGRAM, im->srcBeg, im->srcEnd);
+            if (im->outerBeg < src.size() && (src[im->outerBeg] == L'`' || src[im->outerBeg] == L'~')) {
+                b.fenceCh = src[im->outerBeg];
+                b.fence[0] = im->outerBeg;
+                b.fenceLen = RunOf(src, im->outerBeg, b.fenceCh);
+                if (!(bs.flags & BS_UNCLOSED)) {
+                    uint32_t e = bs.outerEnd;
+                    while (e > b.end[0] && Blank(src[e - 1])) e--;
+                    uint32_t q = e;
+                    while (q > b.end[0] && src[q - 1] == b.fenceCh) q--;
+                    if (q < e) {
+                        b.fence[1] = q;
+                        b.closeLen = (uint8_t)std::min<uint32_t>(e - q, 255);
+                    }
+                }
+            }
+        } else if (src[im->outerBeg] == L'<') {  // an HTML <img>: its tag
+            one(PK_HTML, im->outerBeg, im->outerEnd);
+        } else {  // a picture: its alt text and its destination, with its <…>
+            if (im->altBeg == UINT32_MAX) return false;
+            b.kind = PK_IMAGE;
+            b.fields = 2;
+            b.beg[0] = im->altBeg;
+            b.end[0] = im->altEnd;
+            if (im->srcBeg != UINT32_MAX) {
+                b.beg[1] = im->srcBeg;
+                b.end[1] = im->srcEnd;
+                if (b.beg[1] > 0 && src[b.beg[1] - 1] == L'<' && b.end[1] < src.size() && src[b.end[1]] == L'>') b.beg[1]--, b.end[1]++;
+            } else {  // a reference picture: its definition's address is shown, not edited here
+                b.fixed1 = true;
+                b.beg[1] = b.end[1] = im->outerEnd;
+                for (uint32_t k = bs.spanOff; k < bs.spanOff + bs.spanCount && k < d.spans.size(); k++) {
+                    const SpanSrc& sp = d.spans[k];
+                    uint32_t tb, te;
+                    if (sp.type == MD_SPAN_IMG && sp.openBeg == im->outerBeg && Definition(src, RefLabel(src, sp), &tb, &te))
+                        b.text[1] = Unwrap(src, tb, te);
+                }
+            }
+        }
+    }
+    b.prefix = ContPrefix(d, src, blk);
+    b.text[0] = Shown(src, b.beg[0], b.end[0], b.prefix);
+    if (b.kind == PK_IMAGE && !b.fixed1) b.text[1] = Unwrap(src, b.beg[1], b.end[1]);
+    return b.kind != PK_NONE;
+}
+
+bool AtomSplice(const std::wstring& src, AtomBinding& b, int f, std::wstring_view text, const wchar_t* eol, Splice* out,
+                std::string* why) {
+    if (f < 0 || f >= b.fields || (f == 1 && b.fixed1) || b.beg[f] > b.end[f] || b.end[f] > src.size()) {
+        *why = "field";
+        return false;
+    }
+    const std::wstring E = LineEol(src, b.beg[f], eol);
+    const bool oneLine = b.kind == PK_FORMULA || b.kind == PK_IMAGE;
+    std::wstring ins, line;
+    uint32_t longest = 0;  // the longest fence-like run a line of a diagram starts with
+    for (size_t i = 0, k = 0; i <= text.size(); i++) {
+        wchar_t ch = i < text.size() ? text[i] : L'\n';
+        if (ch != L'\r' && ch != L'\n') {
+            line += (b.kind == PK_IMAGE && f == 0 && (ch == L'[' || ch == L']') && (line.empty() || line.back() != L'\\'))
+                        ? std::wstring{L'\\', ch} : std::wstring(1, ch);
+            continue;
+        }
+        if (ch == L'\r' && i + 1 < text.size() && text[i + 1] == L'\n') i++;
+        if (b.kind == PK_FRONT && (Strip(line) == L"---" || Strip(line) == L"...")) {
+            *why = "front";
+            return false;
+        }
+        if (b.kind == PK_DIAGRAM && b.fenceCh) {
+            size_t p = 0, q;
+            while (p < line.size() && p < 3 && line[p] == L' ') p++;
+            for (q = p; q < line.size() && line[q] == b.fenceCh;) q++;
+            if (q > p && AllBlank(line, (uint32_t)q, (uint32_t)line.size())) longest = std::max<uint32_t>(longest, (uint32_t)(q - p));
+        }
+        if (k++) ins += oneLine ? std::wstring(L" ") : E + (line.empty() ? Strip(b.prefix) : b.prefix);
+        ins += line;
+        line.clear();
+    }
+    if (b.kind == PK_IMAGE && f == 1) ins = DestOf(ins, true);
+    const uint32_t at = b.beg[f], oldEnd = b.end[f];
+    const int64_t delta = (int64_t)ins.size() - (oldEnd - at);
+    if (b.kind == PK_DIAGRAM && b.fence[0] != UINT32_MAX && longest >= b.fenceLen) {
+        // a line of the text would close the fence: both fences get longer than any such line (§9.2)
+        const std::wstring run(longest + 1, b.fenceCh);
+        const bool closed = b.fence[1] != UINT32_MAX;
+        const uint32_t o = b.fence[0], ce = closed ? b.fence[1] + b.closeLen : oldEnd;
+        std::wstring all = run + Sub(src, o + b.fenceLen, at) + ins;
+        if (closed) all += Sub(src, oldEnd, b.fence[1]) + run;
+        *out = Replace(src, o, ce, all);
+        const int grow = (int)run.size() - b.fenceLen, closeGrow = closed ? (int)run.size() - b.closeLen : 0;
+        b.beg[f] = at + grow;
+        b.end[f] = b.beg[f] + (uint32_t)ins.size();
+        if (closed) b.fence[1] = b.end[f] + (b.fence[1] - oldEnd);
+        b.outerEnd = (uint32_t)((int64_t)b.outerEnd + delta + grow + closeGrow);
+        b.fenceLen = b.closeLen = (uint8_t)run.size();
+        return true;
+    }
+    *out = Replace(src, at, oldEnd, ins);
+    b.end[f] = at + (uint32_t)ins.size();
+    if (f == 0 && b.fields > 1) {
+        b.beg[1] = (uint32_t)(b.beg[1] + delta);
+        b.end[1] = (uint32_t)(b.end[1] + delta);
+    }
+    if (b.fence[1] != UINT32_MAX && b.fence[1] >= oldEnd) b.fence[1] = (uint32_t)(b.fence[1] + delta);
+    b.outerEnd = (uint32_t)((int64_t)b.outerEnd + delta);
+    return true;
+}
+
+// the popup's change as an operation (the goldens' AtomSource): the atom bound afresh, the field's text put in
+EditResult OpAtomSource(const EditCtx& c, const EditState& st, int atom, int field, std::wstring_view text) {
+    AtomBinding b;
+    Splice sp;
+    std::string why;
+    if (!BindAtom(c.doc, c.src, atom, &b)) return Refuse(st, "atom");
+    if (!AtomSplice(c.src, b, field, text, c.eol, &sp, &why)) return Refuse(st, why.c_str());
+    EditResult r = Nothing(st, EK_POPUP);
+    if (sp.removed != sp.inserted) r.splices.push_back(std::move(sp));
+    r.after.focus = MapThrough(r.splices, st.focus, false);
+    r.after.anchor = MapThrough(r.splices, st.anchor, false);
+    return r;
+}
+
+// ------------------------------------------------------------------------------------------------ picture files (§8.8)
+std::wstring PictureDest(const std::wstring& docDir, const std::wstring& file) {
+    auto parts = [](const std::wstring& p) {
+        std::vector<std::wstring> v;
+        for (size_t i = 0; i < p.size();) {
+            size_t e = p.find_first_of(L"\\/", i);
+            if (e == std::wstring::npos) e = p.size();
+            if (e > i) v.push_back(p.substr(i, e - i));
+            i = e + 1;
+        }
+        return v;
+    };
+    auto same = [](const std::wstring& x, const std::wstring& y) {
+        return CompareStringOrdinal(x.c_str(), (int)x.size(), y.c_str(), (int)y.size(), TRUE) == CSTR_EQUAL;
+    };
+    const std::vector<std::wstring> a = parts(docDir), f = parts(file);
+    const bool unc = file.rfind(L"\\\\", 0) == 0, sameUnc = unc == (docDir.rfind(L"\\\\", 0) == 0);
+    const size_t root = unc ? 2 : 1;  // a drive, or a share: \\server\share
+    size_t k = 0;
+    while (k < a.size() && k + 1 < f.size() && same(a[k], f[k])) k++;
+    std::wstring rel;
+    const bool here = sameUnc && k >= root && a.size() >= root;
+    if (here) {
+        for (size_t i = k; i < a.size(); i++) rel += L"../";
+    } else {
+        k = 0;  // another volume: the whole path, always in <…> (`<D:/pics/x.png>`)
+        if (unc) rel = L"//";
+    }
+    for (size_t i = k; i < f.size(); i++) rel += (i > k ? L"/" : L"") + f[i];
+    std::wstring o;
+    for (wchar_t ch : rel) o += ch == L'%' ? std::wstring(L"%25") : std::wstring(1, ch);
+    o = DestOf(o, true);
+    return here || o[0] == L'<' ? o : L"<" + o + L">";
 }
 
 // Back to the compiler's own inlining for the templates instantiated at the end of the file (see editcore.cpp's end)

@@ -72,11 +72,20 @@ std::wstring Wide(const std::string& s) {
     return w;
 }
 
+// "1.2.3" → {1, 2, 3}: the digits up to each dot; what does not parse stays 0. (By hand: sscanf would bring the CRT's
+// whole scanf and floating-point parser into the exe, ~25 KB.)
+template <class C> void VersionOf(const C* s, int v[3]) {
+    for (int i = 0; i < 3; i++) {
+        while (*s >= '0' && *s <= '9') v[i] = v[i] * 10 + (*s++ - '0');
+        if (*s++ != '.') break;
+    }
+}
+
 // "0.3.1" > "0.2.0"? Anything that does not parse counts as not newer.
 bool Newer(const std::wstring& a, const char* b) {
     int av[3] = {}, bv[3] = {};
-    swscanf_s(a.c_str(), L"%d.%d.%d", &av[0], &av[1], &av[2]);
-    sscanf_s(b, "%d.%d.%d", &bv[0], &bv[1], &bv[2]);
+    VersionOf(a.c_str(), av);
+    VersionOf(b, bv);
     for (int i = 0; i < 3; i++) {
         if (av[i] != bv[i]) return av[i] > bv[i];
     }

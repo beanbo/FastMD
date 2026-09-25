@@ -1343,6 +1343,19 @@ static std::vector<std::wstring> SplitArgs(const wchar_t* cl) {  // CommandLineT
     return out;
 }
 
+// "150", "137.5": a number of the command line, by hand - _wtof and swscanf bring the CRT's whole scanf and
+// floating-point parser into the exe (~25 KB)
+static float ArgNumber(const wchar_t* s, const wchar_t** end) {
+    float v = 0, scale = 0;
+    for (; (*s >= L'0' && *s <= L'9') || (*s == L'.' && !scale); s++) {
+        if (*s == L'.') scale = 1;
+        else if (scale) v += (*s - L'0') * (scale *= 0.1f);
+        else v = v * 10 + (*s - L'0');
+    }
+    if (end) *end = s;
+    return v;
+}
+
 static int MessageLoop() {
     MSG msg;
     for (;;) {
@@ -1419,9 +1432,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         else if (a == L"--dark") g.cfg.theme = TM_DARK;
         else if (a == L"--ime") g.cfg.noIme = false;
         else if (a == L"--anim") g.cfg.noAnim = false;
-        else if (a.rfind(L"--zoom=", 0) == 0) g.cfg.zoom = std::clamp((float)_wtof(a.c_str() + 7) / 100.f, 0.5f, 3.f);
+        else if (a.rfind(L"--zoom=", 0) == 0) g.cfg.zoom = std::clamp(ArgNumber(a.c_str() + 7, nullptr) / 100.f, 0.5f, 3.f);
         else if (a.rfind(L"--size=", 0) == 0) {
-            swscanf_s(a.c_str() + 7, L"%dx%d", &g.cfg.sizeW, &g.cfg.sizeH);
+            const wchar_t* p = a.c_str() + 7;
+            float w = ArgNumber(p, &p), h = *p == L'x' ? ArgNumber(p + 1, nullptr) : 0.f;
+            if (w > 0 && h > 0) { g.cfg.sizeW = (int)w; g.cfg.sizeH = (int)h; }
             g_sizeFromArgs = true;
         }
         else if (a.rfind(L"--scroll-test=", 0) == 0) g.cfg.scrollTest = _wtoi(a.c_str() + 14);
