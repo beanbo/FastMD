@@ -308,7 +308,8 @@ void DrawBar() {
         const Item& it = L.items[k];
         if (!it.shown) continue;
         const Def& d = kDefs[k];
-        bool en = Enabled(k), act = Active(k), hot = k == g_hot;
+        // (a greyed button never looks on: in a table inside a list the bullet is the caret's, but it does nothing)
+        bool en = Enabled(k), act = en && Active(k), hot = k == g_hot;
         if (k == kStatus && L.level < 1) {
             // The status text: the slot is as wide as its short states; a longer one (why a save failed) grows to the
             // left into the free space - the slot's right edge and every button stay where they are - and is cut with
@@ -721,6 +722,8 @@ void DrawStrip() {
     bool hc = HighContrast();
     g.canvas->FillRect(l, top, r, top + h, P_OVERLAY_BG);
     g.canvas->FillRect(l, top + h - 1.f * u, r, top + h, hc ? P_OVERLAY_TEXT : P_OVERLAY_BORDER);
+    if (r < ViewW())  // (reading mode: it stops short of the pencil, and its end is drawn, not cut off)
+        g.canvas->FillRect(r - 1.f * u, top, r, top + h, hc ? P_OVERLAY_TEXT : P_OVERLAY_BORDER);
     g.canvas->FillRect(l, top, l + 3.f * u, top + h, accent);
     for (size_t k = 0; k < b.size(); k++) {  // the settings window's "Button" look
         bool hot = (int)k == g_sHot;
@@ -1036,7 +1039,7 @@ bool PopupGeometry(PopupRects* o) {
             o->off = true;
             return true;
         }
-        l = a[0];
+        l = std::min(a[0], TextLeft());  // (as wide as the column: it lines up with it, not with an inline object)
         t = a[3] + 6.f * u;
         if (t + H > ViewH() - 8.f * u && a[1] - 6.f * u - H >= EditRevealTop()) t = a[1] - 6.f * u - H;
         // an object taller than the room on either side (a long front matter): the panel over its lower part

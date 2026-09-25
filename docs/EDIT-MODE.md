@@ -2742,3 +2742,6 @@ differed from the text above, the code was kept and is described here.
 | "Restart now" inside a modal loop became a plain close | §10.10 | the restart waits for the loop's end as a restart |
 | The settings window below the work area | - | clamped into the monitor's work area |
 | A PDF export crash (1.2.0 too) | - | the paper's layouts are released before `EndDoc` and before the print canvas |
+| The final screenshots (`app/tests/edit_shots.py`, 100 / 150 %, light / dark): a greyed button drawn "on" (the bullet of a table inside a list item) | §2.3 | greyed wins: a button that does nothing never has the active look |
+| … an inline object's popup ran from the object to the window's edge, past the column | §9.1 | the panel lines up with the text column it is as wide as (`min(object left, column left)`); a block object's stays where it was |
+| … a reading-mode strip was cut off where it stops short of the pencil | §2.5 | its end gets the 1 px border its bottom has |
