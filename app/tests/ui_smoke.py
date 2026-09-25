@@ -6265,6 +6265,66 @@ def test_edit_phantom_kept():
     return ok
 
 
+def test_recovery_scanner():
+    """§10.5 (the final gate): a scanner - an antivirus, the indexer - opens every new recovery file for a moment
+    without letting others delete it, so a tick's recovery file cannot be deleted when its save is through. It must not
+    stay behind as an interrupted save: after a change made outside, the reload shows no recovery strip and the next
+    tick is written; the window closed, no recovery file is left. (Before the fix: «Прошлое сохранение прервалось, а
+    файл с тех пор изменён» and the tick refused - test_tasks' rare failure.)"""
+    ok = True
+    rec = DATA / "recovery"
+    clear_recovery()
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.restype = wt.HANDLE
+    kernel.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p, wt.DWORD, wt.DWORD, wt.HANDLE]
+    kernel.CloseHandle.argtypes = [wt.HANDLE]
+    held, stop = [], threading.Event()
+
+    def scanner():  # each new .rec opened as soon as its writer lets go: read, sharing read and write, not delete
+        seen = set()
+        while not stop.is_set():
+            for f in list(rec.glob("*.rec")) if rec.exists() else []:
+                if f.name in seen:
+                    continue
+                h = kernel.CreateFileW(str(f), 0x80000000, 1 | 2, None, 3, 0, None)
+                if h and h != wt.HANDLE(-1).value:
+                    seen.add(f.name)
+                    held.append(f.name)
+                    time.sleep(0.4)
+                    kernel.CloseHandle(h)
+            time.sleep(0.0005)
+
+    th = threading.Thread(target=scanner, daemon=True)
+    th.start()
+    doc = OUT / "tasks-scanner.md"
+    doc.write_bytes(TASKS_MD.encode("utf-8"))
+    proc, hwnd = launch(doc, size="--size=900x800")
+    try:
+        for k in (0, 2, 5):
+            box = task_box(hwnd, k)
+            click(hwnd, box[0], box[1], 0.6)
+        box = task_box(hwnd, 4)
+        changed = doc.read_bytes() + "\nДописано снаружи.\n".encode("utf-8")
+        doc.write_bytes(changed)
+        post(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp(*box), 0)  # (before the watcher's reload: read again, not written)
+        post(hwnd, WM_LBUTTONUP, 0, lp(*box), 0.8)
+        click(hwnd, box[0], box[1], 0.6)
+        ticked = doc.read_bytes() == changed.replace("[ ] Нумерованная".encode("utf-8"), "[x] Нумерованная".encode("utf-8"))
+        ok &= check("final gate: recovery files a scanner held are no interrupted save: after a change made outside no "
+                    "recovery strip, the next tick is written", held and ticked and q(hwnd, "EDIT_STRIP") == 0,
+                    f"held {len(held)}, ticked {ticked}, strip {q(hwnd, 'EDIT_STRIP')}, toast "
+                    f"{q(hwnd, 'LAST_PROMPT', 2) & 0xFFFFFFFF:#x}")
+        time.sleep(0.5)  # (the scanner lets the last one go)
+    finally:
+        close_and_wait(proc, hwnd)
+        stop.set()
+        th.join(2)
+    left = sorted(f.name for f in rec.glob("*")) if rec.exists() else []
+    ok &= check("final gate: the window closed, none of them is left in the recovery folder", not left, f"{left}")
+    clear_recovery()
+    return ok
+
+
 def main():
     OUT.mkdir(exist_ok=True)
     reset_profile()
@@ -6310,7 +6370,7 @@ def main():
              ("edit_race_images", test_edit_race_images), ("edit_bubble", test_edit_bubble),
              ("edit_review4_data", test_edit_review4_data), ("edit_review4_typing", test_edit_review4_typing),
              ("edit_review4_preview", test_edit_review4_preview), ("review4_reading", test_review4_reading),
-             ("edit_phantom_kept", test_edit_phantom_kept)]
+             ("edit_phantom_kept", test_edit_phantom_kept), ("recovery_scanner", test_recovery_scanner)]
     only = [n for n in os.environ.get("FASTMD_ONLY", "").split(",") if n]  # e.g. FASTMD_ONLY=update,settings
     for name, t in tests:
         if not only or name in only:

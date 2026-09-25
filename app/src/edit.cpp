@@ -1097,7 +1097,7 @@ static void ClassifyLeftovers() {
         r.verdict = read ? ClassifyRecovery(r, bytes, mtime) : RV_CHANGED;
         if (r.verdict == RV_DONE || r.verdict == RV_UNTOUCHED) {
             DebugLog("recovery file of a save that %s: deleted", r.verdict == RV_DONE ? "went through" : "never wrote");
-            DeleteFileW(r.file.c_str());
+            DropRecovery(r.file);
             s.recovery.erase(s.recovery.begin() + i);
         } else {
             i++;
@@ -1704,6 +1704,7 @@ void EditOnLoad() {
 // leaves it, and the next open finds it.
 void EditLeaveDocument() {
     WaitJob();
+    RetryDroppedRecovery();
     if (s.pending.file.empty()) return;
     if (!RecoveryFlushPending(s.pending, g.path.c_str())) DebugLog("flush point: the flush failed, the recovery file stays");
     s.pending = RecoveryInfo();
@@ -1832,7 +1833,7 @@ static void RecoveryCommand(UINT id) {
                 ShowToast(Tr(S_ED_RECOVERY_FAILED), 3000);
                 break;
             }
-            DeleteFileW(r.file.c_str());
+            DropRecovery(r.file);
             RecoveryDone();
             ReloadDocument();
             break;

@@ -98,6 +98,13 @@ bool RecoveryRebuild(const RecoveryInfo& r, const wchar_t* current, const wchar_
 // A flush point with a recovery file held between flushes (SaveResult::pending): the target is flushed, then the
 // recovery file deleted. false = the flush failed and the recovery file stays.
 bool RecoveryFlushPending(const RecoveryInfo& r, const wchar_t* target);
+// A recovery file done with (its save went through, was rolled back or superseded) is deleted. A scanner - an
+// antivirus, the indexer - that has the new file open without letting others delete it makes that fail for a moment:
+// the file then goes on a list, is deleted again at the next save, search and flush point, and FindRecovery passes it
+// over meanwhile. (Left as it was, once the document changed it read as an interrupted save: the strip, and every save
+// refused - the final gate.)
+void DropRecovery(const std::wstring& file);
+void RetryDroppedRecovery();
 
 // ---- the write (§10.3)
 struct SaveRequest {

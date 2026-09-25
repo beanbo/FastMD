@@ -345,7 +345,7 @@ bool WriteRecovery(const std::wstring& recoveryDir, uint32_t vol, uint64_t index
     bool ok = WriteAllAt(f, 0, h.data(), h.size(), err) && WriteAllAt(f, h.size(), tail.data(), tail.size(), err);
     if (ok && !FlushFileBuffers(f)) { *err = GetLastError(); ok = false; }
     if (!CloseHandle(f)) ok = false;
-    if (!ok) DeleteFileW(r.file.c_str());
+    if (!ok) DropRecovery(r.file);
     r.written = NowFileTime();
     return ok;
 }
@@ -522,6 +522,7 @@ SaveResult SaveSource(const SaveRequest& rq) {
     SaveResult r;
     const std::wstring& text = *rq.text;
     DWORD e = 0;
+    RetryDroppedRecovery();  // (what a scanner held at the last save is let go by now)
     // 1. Nobody else may write while the file is checked and changed; reading it stays allowed.
     HANDLE f = INVALID_HANDLE_VALUE;
     if (Fires(FK_BUSY)) e = ERROR_SHARING_VIOLATION;
@@ -572,7 +573,7 @@ SaveResult SaveSource(const SaveRequest& rq) {
         base = &r.disk;
         // Written outside meanwhile: a recovery file held for the last flush describes bytes that are not there
         // any more (the whole file was rewritten), so it goes.
-        if (pend) DeleteFileW(pend->file.c_str());
+        if (pend) DropRecovery(pend->file);
         pend = nullptr;
     }
     const std::wstring& old = base->text;
@@ -698,7 +699,7 @@ SaveResult SaveSource(const SaveRequest& rq) {
     const bool inPlace = newLen == oldLen;
     const uint64_t pe = inPlace ? oldLen - sb : oldLen;
     if (pend && (pend->pb > oldLen || pend->pe > pend->preSize || (pend->pe < pend->preSize && oldLen != pend->preSize))) {
-        DeleteFileW(pend->file.c_str());  // not the file it was kept for: it cannot restore anything here
+        DropRecovery(pend->file);  // not the file it was kept for: it cannot restore anything here
         pend = nullptr;
     }
     RecoveryInfo rec;
@@ -746,11 +747,11 @@ SaveResult SaveSource(const SaveRequest& rq) {
     // The recovery files that are not needed any more go; the one still needed is kept - as the file of a torn save, or
     // as the one standing for the last flush.
     auto settle = [&](bool torn, bool flushed, uint64_t len, uint64_t h) {
-        if (fresh && pend) DeleteFileW(pend->file.c_str());  // the fresh one holds all it held
+        if (fresh && pend) DropRecovery(pend->file);  // the fresh one holds all it held
         if (torn) {
             r.recoveryKept = rec.file;
         } else if (flushed || (!pend && len == oldLen && h == curHash && fresh)) {
-            DeleteFileW(rec.file.c_str());  // on disk for good, or back to a flushed version
+            DropRecovery(rec.file);  // on disk for good, or back to a flushed version
         } else {
             if (!fresh || len != rec.newLen || h != rec.newHash) WriteResult(rec, len, h);
             r.pending = rec;
@@ -902,11 +903,44 @@ bool ReadRecovery(const std::wstring& file, RecoveryInfo& out) {
     return ReadTail(out, tail) && RangeHash(tail.data(), tail.size()) == out.tailHash;
 }
 
+// Recovery files done with that could not be deleted yet (a save's worker and the UI thread both drop them)
+static SRWLOCK g_droppedLock = SRWLOCK_INIT;
+static std::vector<std::wstring> g_dropped;
+
+static bool Gone(const std::wstring& file) {
+    if (DeleteFileW(file.c_str())) return true;
+    DWORD e = GetLastError();
+    return e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND;
+}
+
+void DropRecovery(const std::wstring& file) {
+    if (file.empty() || Gone(file)) return;
+    AcquireSRWLockExclusive(&g_droppedLock);
+    g_dropped.push_back(file);
+    ReleaseSRWLockExclusive(&g_droppedLock);
+}
+
+void RetryDroppedRecovery() {
+    AcquireSRWLockExclusive(&g_droppedLock);
+    std::erase_if(g_dropped, Gone);
+    ReleaseSRWLockExclusive(&g_droppedLock);
+}
+
+static bool Dropped(const std::wstring& file) {
+    AcquireSRWLockShared(&g_droppedLock);
+    bool in = std::any_of(g_dropped.begin(), g_dropped.end(), [&](const std::wstring& f) {
+        return CompareStringOrdinal(f.c_str(), (int)f.size(), file.c_str(), (int)file.size(), TRUE) == CSTR_EQUAL;
+    });
+    ReleaseSRWLockShared(&g_droppedLock);
+    return in;
+}
+
 std::vector<RecoveryInfo> FindRecovery(const std::wstring& dir, uint32_t volume, uint64_t index, const std::wstring& path) {
     std::vector<RecoveryInfo> out;
     std::wstring d = dir;
     if (d.empty()) return out;
     if (d.back() != L'\\') d += L'\\';
+    RetryDroppedRecovery();
     wchar_t pat[64];
     swprintf_s(pat, L"%08x-%016llx-*.rec", volume, (unsigned long long)index);
     WIN32_FIND_DATAW fd{};
@@ -914,7 +948,8 @@ std::vector<RecoveryInfo> FindRecovery(const std::wstring& dir, uint32_t volume,
     if (h == INVALID_HANDLE_VALUE) return out;
     do {
         RecoveryInfo ri;
-        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !ReadRecovery(d + fd.cFileName, ri)) continue;
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || Dropped(d + fd.cFileName) || !ReadRecovery(d + fd.cFileName, ri))
+            continue;
         // The identity alone is not enough: on FAT a file made later in the same place gets the same index.
         if (CompareStringOrdinal(ri.path.c_str(), (int)ri.path.size(), path.c_str(), (int)path.size(), TRUE) != CSTR_EQUAL)
             continue;
@@ -977,7 +1012,7 @@ bool RecoveryRestore(const RecoveryInfo& r, const wchar_t* target, const std::ws
               WriteAllAt(f, r.pb, tail.data(), tail.size(), err) && SetLength(f, r.preSize, err);
     if (ok && !FlushFileBuffers(f)) { *err = GetLastError(); ok = false; }
     CloseHandle(f);
-    if (ok) DeleteFileW(own.file.c_str());
+    if (ok) DropRecovery(own.file);
     return ok;
 }
 
@@ -1003,7 +1038,7 @@ bool RecoveryFlushPending(const RecoveryInfo& r, const wchar_t* target) {
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     bool ok = f != INVALID_HANDLE_VALUE && FlushFileBuffers(f);
     if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
-    if (ok) DeleteFileW(r.file.c_str());
+    if (ok) DropRecovery(r.file);
     return ok;
 }
 
