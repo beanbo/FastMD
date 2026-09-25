@@ -9,7 +9,7 @@ The stack: **C++20, Win32, DirectWrite, md4c**.
 - The first frame is drawn on the CPU (DirectWrite → GDI DIB), with no GPU device.
 - Only the first screen is laid out at first.
 - Everything else is done on background threads after the first frame.
-- One small exe (≈0.7 MB), static CRT, no runtimes.
+- One small exe (≈1.4 MB with edit mode), static CRT, no runtimes.
 
 ## Building
 
@@ -36,7 +36,8 @@ FastMD.exe file.md
   - theme, text font (Segoe UI, or the Sitka book font with optical sizes), text size;
   - column width, line wrapping in code, smooth scrolling;
   - the editor for Ctrl+E (VS Code, Cursor, Void, Notepad++, Sublime Text and Notepad are found automatically, or point it at your own exe);
-  - interface language (Russian or English).
+  - interface language (Russian or English);
+  - autosave of edits (on by default; see [Edit mode](#edit-mode)).
 
   Settings and the window position live in `HKCU\Software\FastMD`, reading positions and the recent list in `%LOCALAPPDATA%\FastMD\positions.bin`.
 - `publish.ps1` can be run with documents open: the running exe is renamed (`FastMD.old-*.exe`, removed on the next publish), and new windows start the new version.
@@ -47,7 +48,7 @@ FastMD.exe file.md
 |---|---|
 | Scrolling | wheel, ↑ ↓, PgUp / PgDn, Space / Shift+Space, Home / End |
 | Wide code and tables sideways | Shift+wheel, touchpad, wheel tilt, or the slider at the bottom of the block |
-| Selection | mouse; a double click selects a word, a triple click a paragraph or a cell; Shift+click extends the selection |
+| Selection | mouse; a triple click selects a paragraph or a cell (a double click starts editing there, see [Edit mode](#edit-mode)); Shift+click extends the selection |
 | Selection from the keyboard | Shift+arrows (by character), Ctrl+Shift+arrows (by word), Shift+Home / End (to the end of the line), Ctrl+Shift+Home / End (to the ends of the document), Shift+PgUp / PgDn |
 | Copy / select all | Ctrl+C / Ctrl+A |
 | Copy as Markdown | Ctrl+Shift+C — the clipboard gets the source as the author wrote it |
@@ -63,12 +64,35 @@ FastMD.exe file.md
 | Task lists | a click on a box ticks it in the file (`- [ ]` ↔ `- [x]`); a press let go outside the box does nothing |
 | Column width | Ctrl+Alt+← / → (narrow, normal, wide, full width) |
 | Zoom | Ctrl+wheel, Ctrl + / Ctrl −, Ctrl+0 |
-| Back / forward | Alt+← / Alt+→, Backspace, the side mouse buttons |
-| Open / refresh | Ctrl+O, dragging a file into the window / F5 or Ctrl+R (a change on disk refreshes by itself) |
-| Open in editor | Ctrl+E |
+| Back / forward | Alt+← / Alt+→, Backspace (not in edit mode, where it deletes), the side mouse buttons |
+| Open / refresh | Ctrl+O, dragging a file into the window / F5 or Ctrl+R (a change on disk refreshes by itself; in edit mode the edits are saved first) |
+| Edit | F2, a double click on the text, the pencil icon at the top right, or "Edit here" in the menu — see [Edit mode](#edit-mode) |
+| Open in an external editor | Ctrl+E (in edit mode the edits are saved first, then edit mode is left) |
 | Settings | Ctrl+, or the gear icon at the top right |
-| Close | Esc (when there is no selection, no search and no focused link), Ctrl+W |
-| Menu | right click: theme, zoom, column width, code wrapping, "Show in folder", settings, the association |
+| Close | Esc (when there is no selection, no search and no focused link; in edit mode Esc leaves edit mode instead, and a second Esc right after it does not close the window), Ctrl+W |
+| Menu | right click: "Edit here", theme, zoom, column width, code wrapping, "Show in folder", settings, the association |
+
+### Edit mode
+
+The page keeps its look: the caret moves over the rendered text, and every change is written into the Markdown source (only the changed part of the file, in its own encoding and line ends). What is saved when, the recovery of an interrupted save and the limits are described in the [project README](../README.md#editing).
+
+| Action | Keys |
+|---|---|
+| Enter / leave | F2, a double click on the text (the caret lands there), the pencil icon, "Edit here" in the menu / Esc, F2, the ✕ at the right end of the toolbar. Esc first closes what is open: a source editor, a popover, the search, the outline, a selected object |
+| Move | arrows; Ctrl+← / → by word; Ctrl+↑ / ↓ by block; Home / End, Ctrl+Home / End; PgUp / PgDn. With Shift they select; Ctrl+A selects everything; a double click selects a word, a triple click a paragraph or a cell |
+| Type | letters go in at the caret. Markdown at the start of a line becomes formatting: `# `, `- `, `1. `, `> `; ```` ``` ```` + Enter opens a code block, `$$` + Enter a formula block, `---` + Enter a rule |
+| Delete | Backspace / Delete; Ctrl+Backspace / Ctrl+Delete by word. Next to a formula, picture, diagram or rule the first press selects it, the second deletes it; at the start of a heading, list item or quote Backspace takes the heading, marker or quote away |
+| New lines | Enter: a new paragraph or list item (in a table: the cell below, a new row after the last one); Shift+Enter: a line break; Ctrl+Enter: a new paragraph after the block (after a table, code block or picture too) |
+| Tab | in a list: nest the item / Shift+Tab: lift it out; in a table: the next / previous cell; in code: indent |
+| Format | Ctrl+B bold, Ctrl+I italic, Ctrl+Shift+X strikethrough, Ctrl+` (Ctrl+Ё on the Russian layout) inline code, Ctrl+K a link; with no selection the format applies to what is typed next |
+| Blocks | Ctrl+1…6 heading 1–6 (the same again: back to text); Ctrl+Shift+8 / 7 / 9 bulleted, numbered, task list; Ctrl+Shift+Q quote; Ctrl+Shift+K code block |
+| Insert | Ctrl+T a 3×3 table (or any size from the toolbar's grid); Ctrl+M a formula in the line, Ctrl+Shift+M a formula block; the toolbar also inserts diagrams (nine templates), pictures (or drop a picture file into the window) and a horizontal rule |
+| Objects | a click on a formula, diagram, picture, HTML block or front matter opens its source under it, and the page redraws it as you type; Ctrl+Enter keeps the change, Esc takes it back. Enter or F2 opens a selected object's source |
+| Links | Ctrl+click opens a link; with the caret in a link a bubble offers "Edit", "Remove" and "Open" |
+| Undo / save | Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z); Ctrl+S saves now (with autosave on this is rarely needed) |
+| Clipboard | Ctrl+C / Ctrl+X / Ctrl+V; Ctrl+Shift+C copies as Markdown. A paste from FastMD keeps its formatting, from elsewhere it goes in as plain text |
+| Menu | right click: undo, cut, copy, paste, the link and table actions, "Edit source…" on an object, save, "Save as…", "Finish editing" |
+| Search, outline, zoom | Ctrl+F, Ctrl+Shift+O, Ctrl+wheel work as in reading mode; the toolbar's first button opens the outline |
 
 ## What is supported
 
@@ -100,6 +124,7 @@ FastMD.exe file.md
 - Animated GIFs are shown as their first frame.
 - There is no print preview window of our own.
 - A `sequenceDiagram` with activation (`A->>+B`) is not drawn yet — its source is shown instead.
+- Edit mode: CJK input methods, the emoji panel and dictation work only in the source editors of objects (the document window runs without IME, for its startup speed); the Explorer preview pane and thumbnails only show.
 
 The detailed plan of every remaining step is in [../docs/PLAN.md](../docs/PLAN.md), the history of changes in [../CHANGELOG.md](../CHANGELOG.md).
 
@@ -119,6 +144,12 @@ The detailed plan of every remaining step is in [../docs/PLAN.md](../docs/PLAN.m
 | `src/copy.cpp` | copying the selection: HTML and RTF with formatting, the Markdown source through the `Doc::srcMap` map |
 | `src/drag.cpp` | dragging out: a data object with text, a link or an image (COM only for the duration of the drag) |
 | `src/tasks.cpp` | ticking a task box in the file: one character between the brackets, overwritten in place in the file's own encoding, and only while the file on disk decodes to exactly the text on screen; the file watcher does not reload for this write |
+| `src/edit.cpp` | edit mode's glue: entering and leaving, input, the model swap after every change, autosave and its retries, conflicts with other programs, the journal of unsaved edits, the questions before leaving a document |
+| `src/editcore.cpp` | edit mode's core, window-free: where a caret may stand, a position in the text ↔ an offset in the source, typing, Enter, Backspace and Delete, selections, the clipboard, undo |
+| `src/editops.cpp` | the formatting commands and inserts: bold and the other inline formats, headings, lists, quotes, code blocks, tables, formulas, diagrams, pictures, rules |
+| `src/editfile.cpp` | edit mode's file half: the encoding checks, the byte-exact write of only the changed part, the recovery file around it |
+| `src/editbar.cpp` | the toolbar, its popovers, the source editors' panels, the strips that say what is wrong with the file, the pencil button |
+| `src/editpop.cpp` | the source editors of formulas, diagrams, pictures, HTML and front matter (real EDIT controls on the input thread, with IME) and the worker that redraws the object as you type |
 | `src/print.cpp` | printing and PDF export: layout for paper, splitting into pages, headers and footers |
 | `src/canvas_print.cpp` | a canvas over the printer DC: glyphs go to GDI, so text stays text in the PDF |
 | `src/settings_ui.cpp` | the settings window, drawn by the same engine, and the gear icon that opens it |
@@ -152,10 +183,15 @@ Everything added since stage 1 stands off the critical path of the first frame. 
   python bench/harness/bench.py run fastmd-app,baseline-win32 --doc small,medium,large --runs 12
   ```
   The rule: FastMD is no slower than `baseline-win32` on medium, and no more than +15 ms behind on large.
-- **The UI test** starts real windows and checks 95 things (including a local http server for images from the network and SVG): selection, copying, search, links, zoom, the theme, history, live reload, the window position, the settings icon, screen-size copies of images, the partial scroll frame matching a full redraw, footnotes and callouts, and every stage 1 task against its readiness criterion from the plan. State is read through `WM_APP_QUERY`. The test works in a profile of its own (`FASTMD_REGKEY`, `FASTMD_DATA`) and does not touch your settings. Screenshots are saved to `app/tests/out/`.
+- **The UI test** starts real windows and checks about 500 things (including a local http server for images from the network and SVG): selection, copying, search, links, zoom, the theme, history, live reload, the window position, the settings icon, screen-size copies of images, the partial scroll frame matching a full redraw, footnotes and callouts, every stage 1 task against its readiness criterion from the plan, and edit mode — typing in four encodings, the toolbar's commands, the source editors, saving, conflicts, recovery. State is read through `WM_APP_QUERY`. The test works in a profile of its own (`FASTMD_REGKEY`, `FASTMD_DATA`) and does not touch your settings. Screenshots are saved to `app/tests/out/`; `FASTMD_ONLY=name,name` runs a part of it.
   ```
-  python app/tests/ui_smoke.py
+  python -X utf8 app/tests/ui_smoke.py
   ```
+- **Edit mode's core** has tests of its own, with no window: golden cases (Markdown before, a key or a command, Markdown after — each also with CRLF, in a quote and in a list), a walk over every caret stop of the test documents, the undo stack and the byte-exact save. The fuzzer (`tests/fuzz/run.ps1`) also drives random edits through the core.
+  ```
+  pwsh -File app/tests/edit/run.ps1
+  ```
+- **Edit mode's pictures:** `app/tests/edit_shots.py` photographs the toolbar, every popover, source editor and strip, at 100 % and 150 %, light and dark, into `app/tests/out/edit-final/`, for a look before a release.
 - **Real READMEs.** A corpus of 15 popular repositories (the list is in `app/tests/readmes.txt`) is downloaded, opened one by one and compared against an accepted picture: it shows when an edit has unexpectedly changed how real documents look. `--update` accepts the current look as the reference.
   ```
   python app/tests/readme_check.py

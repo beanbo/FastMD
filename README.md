@@ -36,7 +36,7 @@ The techniques that matter:
 
 - the first frame is drawn on the CPU (DirectWrite → GDI DIB), because a GPU device created before the first frame would have cost +150–250 ms;
 - only the first screen is laid out at first, the rest is done in the background after the first frame;
-- one small exe (~0.7 MB), static CRT, no runtimes;
+- one small exe (~1.4 MB with edit mode), static CRT, no runtimes;
 - when the window is first shown, IME initialization on the UI thread and the open animation are both off; the search box, which needs IME, lives on a thread of its own.
 
 ### When a launch takes longer than usual
@@ -67,7 +67,8 @@ To be rid of it entirely, add the program's folder to the antivirus exclusions. 
   - copying with formatting (HTML and RTF) and as Markdown source (Ctrl+Shift+C);
   - dragging text, links and images into other applications;
   - printing and PDF export (Ctrl+P, Ctrl+Shift+P) — as text, not as a picture;
-  - task list boxes tick with a click, in the file itself (`- [ ]` ↔ `- [x]`): only the character between the brackets changes, and only while the file on disk is exactly what is on screen. This is the one time FastMD writes to a document.
+  - task list boxes tick with a click, in the file itself (`- [ ]` ↔ `- [x]`): only the character between the brackets changes, and only while the file on disk is exactly what is on screen. Outside edit mode this is the one time FastMD writes to a document.
+- **Editing in place:** a double click puts a caret into the rendered page, a toolbar slides down from the top, and the edits are saved into the file as you type — see [Editing](#editing).
 - **Search:** Ctrl+F, case sensitivity, whole words, match marks on the scrollbar, IME input.
 - **Memory:**
   - a document opens at the place where you closed it;
@@ -84,6 +85,20 @@ To be rid of it entirely, add the program's folder to the antivirus exclusions. 
 
   A 3.7 MB document shows its first screen in the same ~66 ms.
 
+## Editing
+
+FastMD edits a document where it shows it: the page keeps its look, with no switch to a text editor.
+
+- **In and out.** Double-click the text, press F2, click the pencil at the top right, or pick "Edit here" in the context menu: a caret appears there and a toolbar slides down from the top. Esc (once whatever is open is closed), F2 or the ✕ at the right end of the toolbar leave edit mode.
+- **The toolbar:** undo and redo, the paragraph style (text, headings 1–6), bold, italic, strikethrough, inline code, link, bulleted, numbered and task lists, quote, code block, table, formula, diagram, image, horizontal rule, and the save status. In a narrow window the rest goes under "…". Markdown typed at the start of a line works as well: `# `, `- `, `1. `, `> `, ```` ``` ````, `---`.
+- **Formulas, diagrams, pictures, HTML blocks and front matter** are edited as source: a click opens a small editor under the object, and the page redraws it as you type. Ctrl+Enter keeps the change, Esc takes it back.
+- **Keys:** Ctrl+B / Ctrl+I, Ctrl+K a link, Ctrl+1…6 headings, Ctrl+Shift+7 / 8 / 9 lists, Ctrl+Shift+Q a quote, Ctrl+Shift+K a code block, Ctrl+T a table, Ctrl+M a formula, Ctrl+Enter a new paragraph, Ctrl+Z / Ctrl+Y undo and redo, Ctrl+S save. The full list is in [app/README.md](app/README.md#edit-mode).
+- **Saving.** Edits are saved by themselves 0.8 s after the last one (2–5 s for files over a million characters), and always when you leave edit mode, the document or the program. Autosave is turned off in Settings → "Autosave edits": then Ctrl+S saves, and so does leaving edit mode. The undo history lasts while the document is open, across saves and across leaving and re-entering edit mode.
+- **What is written.** Only the part of the file that changed is rewritten, in place: the encoding (UTF-8 with or without a BOM, UTF-16 LE, the ANSI code page), the BOM, the line ends and every byte outside the edit stay as they were. A file of pure ASCII counts as UTF-8 without a BOM, so the first non-ASCII character typed into it makes it UTF-8. A character the file's code page cannot hold is not written: a strip offers to save the file as UTF-8 or to remove the character. A file that could not be written back exactly (binary, UTF-16 BE, text that does not decode cleanly) is not opened for editing.
+- **When the file changes elsewhere.** With nothing unsaved, the new version is taken in (Ctrl+Z brings yours back); with unsaved edits, a strip asks whether to load the version on disk or to overwrite it. A read-only file can be edited and saved under another name. One file is edited in one FastMD window at a time.
+- **Recovery.** Before a save overwrites anything, the bytes it replaces are copied to `%LOCALAPPDATA%\FastMD\recovery`, and the copy is deleted once the save has gone through. While edits cannot be saved (autosave off, a conflict, a read-only or missing file), a journal of them is written to the same folder 3 s after the last change. If a save was cut short, or edits were left in the journal, the next open of the file shows a strip: open the copy (it goes to `%LOCALAPPDATA%\FastMD\copies`), restore it, or delete it (to the Recycle Bin). Recovery files older than 14 days are removed. For a file encrypted with EFS they are encrypted too; a BitLocker To Go or VeraCrypt volume cannot be told apart, so the recovery files of a document there lie unencrypted in your profile.
+- **Limits.** CJK input methods, the emoji panel (Win+.) and dictation do not type into the page itself: the window starts without IME, for speed. Latin, Cyrillic, dead keys and AltGr work, and all of them work in the source editors of formulas and diagrams. The Explorer preview pane and thumbnails stay read-only.
+
 ## Privacy
 
 FastMD neither collects nor sends anything about you: no telemetry, no identifiers, no analytics. It goes to the network in exactly two cases, and both are visible:
@@ -93,7 +108,7 @@ FastMD neither collects nor sends anything about you: no telemetry, no identifie
 | Images from the document | if the document has an `http(s)` image and the setting is "Always" (the default) or you allowed it | to the addresses in the document itself, https only, no cookies and no authentication |
 | Update check | once a day after the first frame, unless turned off in settings | `api.github.com`, one GET; the installer is downloaded only after you agree to it and is verified against a SHA-256 |
 
-Everything else stays on the machine: settings in `HKCU\Software\FastMD`, reading positions and recent documents in `%LOCALAPPDATA%\FastMD\positions.bin`, the image cache in `%LOCALAPPDATA%\FastMD\cache`, crash reports in `%LOCALAPPDATA%\FastMD\crashes` (they are sent nowhere). The Explorer preview pane does not go to the network at all.
+Everything else stays on the machine: settings in `HKCU\Software\FastMD`, reading positions and recent documents in `%LOCALAPPDATA%\FastMD\positions.bin`, the image cache in `%LOCALAPPDATA%\FastMD\cache`, crash reports in `%LOCALAPPDATA%\FastMD\crashes` (they are sent nowhere), the recovery copies and the journal of unsaved edits in `%LOCALAPPDATA%\FastMD\recovery` (see [Editing](#editing)). The Explorer preview pane does not go to the network at all.
 
 Keys, settings and how the code is put together are described in [app/README.md](app/README.md), the limitations of the current version and the roadmap in [docs/PLAN.md](docs/PLAN.md), the history of changes in [CHANGELOG.md](CHANGELOG.md).
 
@@ -114,6 +129,7 @@ pwsh -File app/build.ps1    # → app/build/Release/FastMD.exe
 | `research/` | six background reports: native UI, web engines, GPU stacks, the Markdown pipeline, Windows application startup, a survey of the products |
 | `bench/` | the measurement harness and protocol, the test corpus, the results, descriptions of the 12 prototypes |
 | `docs/PLAN.md` | the roadmap |
+| `docs/EDIT-MODE.md` | the design of edit mode, the rule book its tests are written from |
 
 ## License
 
