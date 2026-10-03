@@ -68,7 +68,7 @@ Q.update({"EDITING": 42, "EDIT_DIRTY": 43, "EDIT_CARET_SRC": 44, "EDIT_ANCHOR_SR
           "EDIT_CONFLICT": 59, "EDIT_ENC": 60, "EDIT_EOL": 61, "EDIT_ACTIVE": 62, "LAST_PROMPT": 63,
           "RELAYOUT_ALL": 64, "FRAME_STATS": 65, "RENDERS": 66, "EDIT_STATS": 67, "EDIT_CARET_VISIBLE": 68,
           "EDIT_CARET_PHASE": 69, "EDIT_POPUP_STATE": 70, "EDIT_ATOM": 71, "EDIT_STRIP": 72, "EDIT_RAW": 73,
-          "EDIT_BUBBLE": 74, "EDIT_COLLAPSE": 75})
+          "EDIT_BUBBLE": 74, "EDIT_COLLAPSE": 75, "TSF": 76})
 FP_NEXT, FP_CASE = 7, 3  # FindPart
 US_CHECKING, US_LATEST, US_AVAILABLE, US_CHECK_FAILED = 1, 2, 3, 7  # UpdateStatus
 ACCENT = (0x09, 0x69, 0xDA)  # P_ACCENT, light theme
@@ -439,6 +439,11 @@ def test_basics(doc):
     ok = True
     proc, hwnd = launch(doc)
     try:
+        # the UI thread starts without IME, and TSF comes up after the first frame: without it the keyboard layout
+        # cannot be switched over the page (Ctrl+Shift did nothing in edit mode in 1.3.0). The switch itself needs
+        # real keys and the foreground, so it was checked by hand; this guards the activation.
+        ok &= check("1.3.1 the UI thread runs TSF after the first frame (the keyboard layout switch)",
+                    wait_for(lambda: q(hwnd, "TSF") == 1, 3.0), f"Q_TSF {q(hwnd, 'TSF')}")
         shot(hwnd, "01-initial")
         drag(hwnd, 180, 150, 700, 175)
         shot(hwnd, "02-drag-selection")

@@ -398,8 +398,12 @@ the destination elided to 48 characters in `P_MUTED`, then [Изменить] / 
 ### 2.13 Input methods
 
 The document window's UI thread runs with `ImmDisableIME(0)` for its whole life (a startup speed measure; cannot be
-undone). Latin, Cyrillic, dead keys and AltGr arrive through `WM_CHAR` and work. CJK composition, the emoji panel and
-dictation do not reach the document; they do work in the source popups, which are EDIT controls on the input thread.
+undone). Latin, Cyrillic, dead keys and AltGr arrive through `WM_CHAR` and work. The language hotkey of Windows'
+settings (Ctrl+Shift or Alt+Shift) reaches a thread only through TSF, which `ImmDisableIME` keeps out, so in 1.3.0 it
+did nothing over the page (Win+Space, the shell's own switcher, worked). Since 1.3.1 the UI thread activates a TSF
+thread manager of its own from a timer right after the first frame (`StartTextServices` in window.cpp, ≈5 ms;
+measured with real keys: the hotkey switches the layout under `ImmDisableIME` then). No document manager is ever pushed to it, so CJK composition, the emoji panel and dictation
+still do not reach the document; they do work in the source popups, which are EDIT controls on the input thread.
 This is an accepted limit of v1 and is stated in the README (RU + EN).
 
 ---

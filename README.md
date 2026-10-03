@@ -37,7 +37,7 @@ The techniques that matter:
 - the first frame is drawn on the CPU (DirectWrite → GDI DIB), because a GPU device created before the first frame would have cost +150–250 ms;
 - only the first screen is laid out at first, the rest is done in the background after the first frame;
 - one small exe (~1.4 MB with edit mode), static CRT, no runtimes;
-- when the window is first shown, IME initialization on the UI thread and the open animation are both off; the search box, which needs IME, lives on a thread of its own.
+- when the window is first shown, IME initialization on the UI thread and the open animation are both off; the search box, which needs IME, lives on a thread of its own, and the text services that switch the keyboard layout start right after the first frame.
 
 ### When a launch takes longer than usual
 
@@ -97,7 +97,7 @@ FastMD edits a document where it shows it: the page keeps its look, with no swit
 - **What is written.** Only the part of the file that changed is rewritten, in place: the encoding (UTF-8 with or without a BOM, UTF-16 LE, the ANSI code page), the BOM, the line ends and every byte outside the edit stay as they were. A file of pure ASCII counts as UTF-8 without a BOM, so the first non-ASCII character typed into it makes it UTF-8. A character the file's code page cannot hold is not written: a strip offers to save the file as UTF-8 or to remove the character. A file that could not be written back exactly (binary, UTF-16 BE, text that does not decode cleanly) is not opened for editing.
 - **When the file changes elsewhere.** With nothing unsaved, the new version is taken in (Ctrl+Z brings yours back); with unsaved edits, a strip asks whether to load the version on disk or to overwrite it. A read-only file can be edited and saved under another name. One file is edited in one FastMD window at a time.
 - **Recovery.** Before a save overwrites anything, the bytes it replaces are copied to `%LOCALAPPDATA%\FastMD\recovery`, and the copy is deleted once the save has gone through. While edits cannot be saved (autosave off, a conflict, a read-only or missing file), a journal of them is written to the same folder 3 s after the last change. If a save was cut short, or edits were left in the journal, the next open of the file shows a strip: open the copy (it goes to `%LOCALAPPDATA%\FastMD\copies`), restore it, or delete it (to the Recycle Bin). Recovery files older than 14 days are removed. For a file encrypted with EFS they are encrypted too; a BitLocker To Go or VeraCrypt volume cannot be told apart, so the recovery files of a document there lie unencrypted in your profile.
-- **Limits.** CJK input methods, the emoji panel (Win+.) and dictation do not type into the page itself: the window starts without IME, for speed. Latin, Cyrillic, dead keys and AltGr work, and all of them work in the source editors of formulas and diagrams. The Explorer preview pane and thumbnails stay read-only.
+- **Limits.** CJK input methods, the emoji panel (Win+.) and dictation do not type into the page itself: the window starts without IME, for speed. Latin, Cyrillic, dead keys, AltGr and switching the keyboard layout work, and all of them work in the source editors of formulas and diagrams. The Explorer preview pane and thumbnails stay read-only.
 
 ## Privacy
 
