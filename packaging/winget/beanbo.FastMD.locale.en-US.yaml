@@ -7,7 +7,7 @@ PublisherUrl: https://github.com/beanbo
 PublisherSupportUrl: https://github.com/beanbo/FastMD/issues
 PackageName: FastMD
 PackageUrl: https://github.com/beanbo/FastMD
-License: GPL-3.0-or-later
+License: MIT
 LicenseUrl: https://github.com/beanbo/FastMD/blob/main/LICENSE
 ShortDescription: Instant Markdown reader for Windows
 Description: |-

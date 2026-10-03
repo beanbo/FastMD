@@ -19,7 +19,7 @@ BEGIN
             VALUE "FileDescription", "FastMD"
             VALUE "FileVersion", FASTMD_VERSION_STR
             VALUE "InternalName", "FastMD"
-            VALUE "LegalCopyright", "© 2026 seka. GPL-3.0"
+            VALUE "LegalCopyright", "© 2026 seka. MIT License"
             VALUE "OriginalFilename", "FastMD.exe"
             VALUE "ProductName", "FastMD"
             VALUE "ProductVersion", FASTMD_VERSION_STR

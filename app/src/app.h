@@ -41,7 +41,8 @@ enum : UINT {
 enum : UINT_PTR { TIMER_TOAST = 1, TIMER_RELOAD = 2, TIMER_AUTOSCROLL = 3, TIMER_HBAR = 4, TIMER_UPDATE = 5,
                   // edit mode (§13.3); the bar slide runs in the message loop's animation branch, not on a timer
                   TIMER_CARET = 6, TIMER_EDIT_SAVE = 7, TIMER_EDIT_RETRY = 8, TIMER_EDIT_IDLE = 9, TIMER_EDIT_REPARSE = 10,
-                  TIMER_EDIT_JOURNAL = 11, TIMER_EDIT_POPUP = 12, TIMER_EDIT_UI = 13 };
+                  TIMER_EDIT_JOURNAL = 11, TIMER_EDIT_POPUP = 12, TIMER_EDIT_UI = 13,
+                  TIMER_TSF = 14 };  // once, after the first frame: the keyboard layout switch (window.cpp)
 
 // WM_COMMAND ids (menus; tests and automation drive the viewer with them too — keep the numbers stable)
 enum Cmd : UINT {
@@ -96,6 +97,7 @@ enum Query : UINT {
     Q_EDIT_SAVE_STATE, Q_EDIT_CONFLICT, Q_EDIT_ENC, Q_EDIT_EOL, Q_EDIT_ACTIVE, Q_LAST_PROMPT, Q_RELAYOUT_ALL,
     Q_FRAME_STATS, Q_RENDERS, Q_EDIT_STATS, Q_EDIT_CARET_VISIBLE, Q_EDIT_CARET_PHASE, Q_EDIT_POPUP_STATE,
     Q_EDIT_ATOM, Q_EDIT_STRIP, Q_EDIT_RAW, Q_EDIT_BUBBLE, Q_EDIT_COLLAPSE = 75,
+    Q_TSF = 76 /* 1 once the UI thread's own TSF thread manager is active (the layout switch, TIMER_TSF), else 0 */,
 };
 
 // what can be dragged out of the window, and the formats it is offered in (drag.cpp)
@@ -107,6 +109,7 @@ enum LangSetting : uint8_t { LANG_AUTO = 0, LANG_RU, LANG_EN };
 
 struct Config {
     bool noIme = true;          // ImmDisableIME(0) on the UI thread: ~10–30 ms saved; the find box lives on its own thread
+                                // (TSF itself, for the layout switch, is started after the first frame: TIMER_TSF)
     bool noAnim = true;         // DWMWA_TRANSITIONS_FORCEDISABLED: document visible at once, no fade/zoom-in
     ThemeMode theme = TM_SYSTEM;
     float zoom = 1.f;

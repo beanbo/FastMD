@@ -224,7 +224,8 @@ try {
     $esc = if ($close) { $close.Current.AcceleratorKey } else { '' }
     if ($close) { $close.GetCurrentPattern($IP::Pattern).Invoke() }
     $left = WaitFor { (Query EDITING) -eq 0 -and (Query EDIT_BAR) -eq 0 }  # (and the bar slid away)
-    $gone = $null -eq (Button 'Отменить' 'Undo')
+    # (EDIT_BAR rounds: it reads 0 for the slide's last ≈25 ms while a sliver of the bar - and its buttons - is still there)
+    $gone = WaitFor { $null -eq (Button 'Отменить' 'Undo') } 1000
     Check '2c Invoke on the ✕ (Esc) leaves edit mode; the text is read-only again, the bar''s buttons are gone' `
         ($esc -eq 'Esc' -and $left -and (ReadOnly) -eq $true -and $gone) ("key {0}, left {1}, buttons gone {2}" -f $esc, $left, $gone)
 } finally {

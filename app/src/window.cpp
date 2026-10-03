@@ -4,6 +4,7 @@
 #include "editcore.h"
 #include <dwmapi.h>
 #include <imm.h>
+#include <msctf.h>
 #include <shellapi.h>
 #include <shlobj.h>
 
@@ -502,6 +503,20 @@ static void ScrollTest() {  // steady-state cost of a scrolling frame, logged to
     PostMessageW(g.hwnd, WM_CLOSE, 0, 0);
 }
 
+// The language hotkey of Windows' settings (Ctrl+Shift or Alt+Shift) reaches a thread only through TSF, and
+// ImmDisableIME(0) keeps TSF out of this thread: the hotkey did nothing over the page, and edit mode typed on in the
+// same layout (Win+Space, the shell's own switcher, did work). A thread manager of our own brings the hotkey back
+// even under ImmDisableIME (measured: ≈5 ms). It starts from a timer after the first frame, so start-up still pays
+// nothing. No document is ever given to it: IME composition stays in the EDITs of the input thread (find, popups).
+static bool g_tsf = false;  // Q_TSF
+static void StartTextServices() {
+    ITfThreadMgr* tm = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_TF_ThreadMgr, nullptr, CLSCTX_INPROC_SERVER, IID_ITfThreadMgr, (void**)&tm))) return;
+    TfClientId id;
+    g_tsf = SUCCEEDED(tm->Activate(&id));
+    if (!g_tsf) tm->Release();  // (an active one is kept for the life of the thread)
+}
+
 static void AfterFirstFrame() {
     g.firstFrame = false;
     Invalidate();  // the icon buttons (settings, outline, its close icon) were left out of the first frame
@@ -512,6 +527,7 @@ static void AfterFirstFrame() {
     // and the shell call goes on with state that has just been freed. So this thread takes an apartment before any
     // worker starts and never releases it; after the first frame, so start-up pays nothing.
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (g.cfg.noIme) SetTimer(g.hwnd, TIMER_TSF, USER_TIMER_MINIMUM, nullptr);  // (fires after the icons' paint)
     StartBackgroundWork();
     DragAcceptFiles(g.hwnd, TRUE);
     if (!g.path.empty()) SHAddToRecentDocs(SHARD_PATHW, g.path.c_str());
@@ -1078,6 +1094,7 @@ static LRESULT Query(WPARAM q, LPARAM lp) {
         return MAKELONG(std::lround((l + r) * 0.5f * s), std::lround((t + b) * 0.5f * s));
     }
     case Q_DOC_SERIAL: return g.docSerial;
+    case Q_TSF: return g_tsf;
     case Q_BLOCK_COUNT: return (LRESULT)n;
     case Q_RENDERS: return (LRESULT)g.rendersStarted.load();
     case Q_MAP_SELFCHECK: {  // edit mode's map (EDIT-MODE.md §4.5), on a map parse of the whole source made just for this
@@ -1251,6 +1268,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             else OnFileChanged();
         }
         else if (wp == TIMER_UPDATE) UpdateCheckAsync();  // hourly: asks GitHub only once a day has passed
+        else if (wp == TIMER_TSF) { KillTimer(hwnd, TIMER_TSF); StartTextServices(); }
         else if (wp >= TIMER_CARET && wp <= TIMER_EDIT_UI) EditTimer(wp);
         else if (wp == TIMER_AUTOSCROLL && g.selecting) {
             POINT p;

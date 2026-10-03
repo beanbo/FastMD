@@ -50,7 +50,7 @@ The files beside the exe are loaded only when a document needs them: fastmd-svg.
 formulas, fastmd-mermaid.dll for diagrams, fastmd-preview.dll for the Explorer preview pane and thumbnails.
 
 The exe is not code-signed yet: Windows SmartScreen may warn on the first run (More info -> Run anyway).
-License: GNU GPL v3.0 (LICENSE.txt). Source code: https://github.com/beanbo/FastMD/tree/v$ver
+License: MIT (LICENSE.txt). Source code: https://github.com/beanbo/FastMD/tree/v$ver
 md4c (Markdown parser): MIT (THIRD-PARTY-md4c.txt). Formulas: RaTeX, MIT, with KaTeX fonts under the
 SIL Open Font License. Diagrams: mermaid-rs-renderer, MIT. Pictures: lunasvg and plutovg, MIT.
 
@@ -69,7 +69,7 @@ Ctrl+Alt+←/→ ширина колонки. Режим правки: двой�
 fastmd-mermaid.dll для диаграмм, fastmd-preview.dll для панели просмотра и эскизов в Проводнике.
 
 Exe пока не подписан: при первом запуске SmartScreen может предупредить («Подробнее» -> «Выполнить в любом случае»).
-Лицензия: GNU GPL v3.0 (LICENSE.txt). Исходный код: https://github.com/beanbo/FastMD/tree/v$ver
+Лицензия: MIT (LICENSE.txt). Исходный код: https://github.com/beanbo/FastMD/tree/v$ver
 "@
 Set-Content -Path (Join-Path $stage 'README.txt') -Value $readme -Encoding utf8
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
