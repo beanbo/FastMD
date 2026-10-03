@@ -133,7 +133,9 @@ pwsh -File app/build.ps1    # → app/build/Release/FastMD.exe
 
 ## License
 
-FastMD © 2026 seka. Distributed under the [GNU GPL v3.0](LICENSE).
+FastMD © 2026 seka. Distributed under the [MIT License](LICENSE): the code may be used, changed and passed on
+freely, in open and closed projects alike, commercial ones included, as long as the copyright notice and the license
+text stay with it. Releases up to 1.3.0 came out under the GNU GPL v3.0.
 
 Third-party libraries are bundled, all of them under MIT:
 

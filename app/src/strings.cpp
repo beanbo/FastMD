@@ -115,7 +115,7 @@ const Pair kStr[] = {
     {L"Как в системе", L"System"},
     {L"Файлы .md", L".md files"},
     {L"Открывать .md в FastMD…", L"Open .md files with FastMD…"},
-    {L"FastMD %s · лицензия GPL-3.0", L"FastMD %s · GPL-3.0 license"},
+    {L"FastMD %s · лицензия MIT", L"FastMD %s · MIT license"},
     {L"Картинки из сети", L"Pictures from the web"},
     {L"Всегда", L"Always"},
     {L"Спрашивать", L"Ask"},
