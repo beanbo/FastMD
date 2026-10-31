@@ -46,6 +46,12 @@ $rt = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\
     -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($rt) { $env:PATH = "$($rt.DirectoryName);$env:PATH" }
 
+# libFuzzer's own runtime is built against an older MSVC standard library than the one this target compiles with, and
+# the two disagree about container annotations: ASan then reports a "container-overflow" inside libFuzzer's mutator
+# (fuzzer::MutationDispatcher) after a few dozen inputs, with no frame of ours on the stack. Only that check is off;
+# heap, stack and use-after-free errors are still caught.
+$env:ASAN_OPTIONS = 'detect_container_overflow=0'
+
 $work = Join-Path $app 'tests\out\libfuzzer'
 $corpus = Join-Path $work 'corpus'
 New-Item -ItemType Directory -Force $corpus | Out-Null
