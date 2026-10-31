@@ -44,6 +44,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.ref }}
+      # the formula and diagram DLLs are Rust and the installer embeds them: the runner has no cargo of its own
+      - uses: dtolnay/rust-toolchain@stable
       - name: Version
         id: version
         shell: pwsh
