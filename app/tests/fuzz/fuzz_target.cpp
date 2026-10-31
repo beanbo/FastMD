@@ -10,12 +10,8 @@
 //   bits 2-3    the ANSI code page bytes that are not UTF-8 fall back to: 1252, 1251, 932 (DBCS) or 936
 // A broken invariant aborts, so libFuzzer keeps the input as a crash.
 //
-// Windows, clang-cl (Visual Studio's "C++ Clang tools" component, or LLVM):
-//   cmake -S app -B app\build\LibFuzzer -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl ^
-//         -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFASTMD_LIBFUZZER=ON -DFASTMD_RUST=OFF -DFASTMD_SETUP=OFF ^
-//         -DFASTMD_TESTS=OFF -DFASTMD_PREVIEW=OFF
-//   cmake --build app\build\LibFuzzer --target fastmd-libfuzzer
-//   app\build\LibFuzzer\fastmd-libfuzzer.exe -max_total_time=600 -max_len=65536 -timeout=10 corpus-dir bench\corpus
+// Windows, clang-cl (Visual Studio's "C++ Clang tools" component), five minutes:
+//   pwsh -File app/tests/fuzz/libfuzzer.ps1 -Seconds 300
 // Without libFuzzer (mingw, MSVC): built with FASTMD_FUZZ_STANDALONE, the same target replays the files and folders it
 // is given - the regression inputs in tests/fuzz/regress among them - or mutates them blindly (see the end of the file):
 //   fastmd-fuzz-target.exe app\tests\fuzz\regress

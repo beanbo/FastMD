@@ -138,7 +138,7 @@ app/tests/mingw/build.sh fuzz --seconds 900 --edit
 app/tests/mingw/build.sh target --seconds 900 # byte-level fuzzing of the decoder and the parser
 ```
 
-There is a libFuzzer target as well (`app/tests/fuzz/fuzz_target.cpp`, `-DFASTMD_LIBFUZZER=ON` with clang-cl). CI runs
+There is a libFuzzer target as well (`app/tests/fuzz/fuzz_target.cpp`, built with clang-cl by `app/tests/fuzz/libfuzzer.ps1`). CI runs
 it for five minutes on every pull request.
 
 `fastmd-bench` times four steps for each document: decoding the file's bytes, the reading parse, the edit-mode parse

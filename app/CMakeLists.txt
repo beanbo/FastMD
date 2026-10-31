@@ -194,31 +194,18 @@ if(FASTMD_FUZZ)
     target_link_libraries(fastmd-fuzz PRIVATE user32 advapi32 shlwapi)
 endif()
 
-# libFuzzer: the same parser and decoder under coverage-guided fuzzing (tests/fuzz/fuzz_target.cpp). Needs clang-cl
-# (-DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl), which brings libFuzzer and AddressSanitizer for Windows.
-# Without it, FASTMD_FUZZ also builds fastmd-fuzz-target, the same target as a plain exe that replays inputs
-# (tests/fuzz/regress) or mutates them blindly.
-option(FASTMD_LIBFUZZER "Build the libFuzzer target (clang-cl only)" OFF)
-set(FASTMD_FUZZ_TARGET_SOURCES tests/fuzz/fuzz_target.cpp src/parse.cpp src/html.cpp src/highlight.cpp src/util.cpp
-    src/theme.cpp src/editcore.cpp src/editops.cpp src/editfile.cpp third_party/md4c/md4c.c)
-if(FASTMD_LIBFUZZER OR FASTMD_FUZZ)
-    if(FASTMD_LIBFUZZER)
-        add_executable(fastmd-libfuzzer ${FASTMD_FUZZ_TARGET_SOURCES})
-        set(fuzz_target fastmd-libfuzzer)
-        target_compile_options(fastmd-libfuzzer PRIVATE /fsanitize=fuzzer,address)
-        target_link_options(fastmd-libfuzzer PRIVATE /fsanitize=fuzzer,address)
-    else()
-        add_executable(fastmd-fuzz-target ${FASTMD_FUZZ_TARGET_SOURCES})
-        set(fuzz_target fastmd-fuzz-target)
-        target_compile_definitions(fastmd-fuzz-target PRIVATE FASTMD_FUZZ_STANDALONE)
-        target_compile_options(fastmd-fuzz-target PRIVATE $<$<BOOL:${FASTMD_ASAN}>:/fsanitize=address>)
-    endif()
-    target_include_directories(${fuzz_target} PRIVATE ${CMAKE_BINARY_DIR}/generated src)
-    target_compile_definitions(${fuzz_target} PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
-        _CRT_SECURE_NO_WARNINGS MD4C_USE_UTF16 FASTMD_NO_APP)
-    target_compile_options(${fuzz_target} PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus /EHsc /Zi)
-    target_link_options(${fuzz_target} PRIVATE /DEBUG /INCREMENTAL:NO)
-    target_link_libraries(${fuzz_target} PRIVATE user32 advapi32 shlwapi)
+# The libFuzzer target as a plain exe (tests/fuzz/fuzz_target.cpp built with FASTMD_FUZZ_STANDALONE): it replays inputs
+# (tests/fuzz/regress) or mutates file bytes blindly. Under libFuzzer itself it is built by tests/fuzz/libfuzzer.ps1.
+if(FASTMD_FUZZ)
+    add_executable(fastmd-fuzz-target tests/fuzz/fuzz_target.cpp src/parse.cpp src/html.cpp src/highlight.cpp src/util.cpp
+        src/theme.cpp src/editcore.cpp src/editops.cpp src/editfile.cpp third_party/md4c/md4c.c)
+    target_include_directories(fastmd-fuzz-target PRIVATE ${CMAKE_BINARY_DIR}/generated src)
+    target_compile_definitions(fastmd-fuzz-target PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        _CRT_SECURE_NO_WARNINGS MD4C_USE_UTF16 FASTMD_NO_APP FASTMD_FUZZ_STANDALONE)
+    target_compile_options(fastmd-fuzz-target PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus /EHsc /Zi
+        $<$<BOOL:${FASTMD_ASAN}>:/fsanitize=address>)
+    target_link_options(fastmd-fuzz-target PRIVATE /DEBUG /INCREMENTAL:NO)
+    target_link_libraries(fastmd-fuzz-target PRIVATE user32 advapi32 shlwapi)
 endif()
 
 # ------------------------------------------------------------------------------------------------- fastmd-bench

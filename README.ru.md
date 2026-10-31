@@ -138,7 +138,7 @@ app/tests/mingw/build.sh fuzz --seconds 900 --edit
 app/tests/mingw/build.sh target --seconds 900 # фаззинг байтов файла: декодер и разборщик
 ```
 
-Есть и цель для libFuzzer (`app/tests/fuzz/fuzz_target.cpp`, `-DFASTMD_LIBFUZZER=ON` с clang-cl): CI гоняет её пять
+Есть и цель для libFuzzer (`app/tests/fuzz/fuzz_target.cpp`, собирается clang-cl через `app/tests/fuzz/libfuzzer.ps1`): CI гоняет её пять
 минут на каждом пул-реквесте.
 
 `fastmd-bench` меряет для каждого документа четыре шага: декодирование байтов, разбор для чтения, разбор для правки (с

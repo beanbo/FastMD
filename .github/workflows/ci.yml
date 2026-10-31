@@ -22,6 +22,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      # the formula and diagram DLLs are Rust; the installer embeds them, so the build needs cargo
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@v4
         with:
           path: |
@@ -57,36 +59,15 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Build
+      - name: Build and fuzz for 5 minutes
         shell: pwsh
-        run: |
-          $msvc = 'app\tools\msvc.cmd'
-          & $msvc cmake -S app -B app/build/LibFuzzer -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo `
-              -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DFASTMD_LIBFUZZER=ON -DFASTMD_RUST=OFF `
-              -DFASTMD_SETUP=OFF -DFASTMD_TESTS=OFF -DFASTMD_PREVIEW=OFF -DFASTMD_BENCH=OFF
-          if ($LASTEXITCODE -ne 0) { throw 'configure failed' }
-          & $msvc cmake --build app/build/LibFuzzer --target fastmd-libfuzzer
-          if ($LASTEXITCODE -ne 0) { throw 'build failed' }
-      - name: Fuzz for 5 minutes
-        shell: pwsh
-        run: |
-          # the AddressSanitizer runtime DLL lives with the compiler, not on PATH
-          $rt = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\x64\lib\clang\*\lib\windows\clang_rt.asan_dynamic-x86_64.dll',
-                              'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\clang_rt.asan_dynamic-x86_64.dll' `
-                -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($rt) { $env:PATH = "$($rt.DirectoryName);$env:PATH" }
-          New-Item -ItemType Directory -Force fuzz-corpus, fuzz-crashes | Out-Null
-          Copy-Item bench/corpus/small.md, bench/corpus/medium.md, app/tests/*.md, app/tests/fuzz/*.md fuzz-corpus/
-          if (Test-Path app/tests/fuzz/regress) { Copy-Item app/tests/fuzz/regress/* fuzz-corpus/ -ErrorAction SilentlyContinue }
-          & app/build/LibFuzzer/fastmd-libfuzzer.exe -max_total_time=300 -max_len=65536 -timeout=20 -rss_limit_mb=4096 `
-              -artifact_prefix=fuzz-crashes/ -print_final_stats=1 fuzz-corpus
-          if ($LASTEXITCODE -ne 0) { throw "libFuzzer stopped with code $LASTEXITCODE" }
+        run: pwsh -File app/tests/fuzz/libfuzzer.ps1 -Seconds 300
       - name: Upload crashes
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: libfuzzer-crashes
-          path: fuzz-crashes/
+          path: app/tests/out/libfuzzer/
           if-no-files-found: ignore
 
   # The window-free half cross-built with mingw-w64 and run under Wine: a second compiler over the same code, and a
