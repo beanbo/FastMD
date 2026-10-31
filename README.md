@@ -120,6 +120,53 @@ You need Windows 10/11 x64 and Visual Studio 2022 or newer: any edition, or the 
 pwsh -File app/build.ps1    # → app/build/Release/FastMD.exe
 ```
 
+### Tests, benchmarks and fuzzing
+
+```powershell
+pwsh -File app/tests/edit/run.ps1             # edit mode's core: golden cases and corpus sweeps
+pwsh -File app/tests/bench/run.ps1 -Scaling   # micro-benchmarks + the growth check
+pwsh -File app/tests/fuzz/run.ps1 -Runs 50000 # mutation fuzzing with AddressSanitizer
+```
+
+The window-free half (parser, HTML reader, edit mode's core) also builds on Linux with mingw-w64 and runs under Wine,
+which is what CI's Linux job does (`apt install mingw-w64 wine64`):
+
+```sh
+app/tests/mingw/build.sh test                 # edit tests
+app/tests/mingw/build.sh bench --scaling      # benchmarks
+app/tests/mingw/build.sh fuzz --seconds 900 --edit
+app/tests/mingw/build.sh target --seconds 900 # byte-level fuzzing of the decoder and the parser
+```
+
+There is a libFuzzer target as well (`app/tests/fuzz/fuzz_target.cpp`, `-DFASTMD_LIBFUZZER=ON` with clang-cl). CI runs
+it for five minutes on every pull request.
+
+`fastmd-bench` times four steps for each document: decoding the file's bytes, the reading parse, the edit-mode parse
+(with the text ↔ source map), and the HTML reader. The documents are the three corpus files and 22 generated ones,
+each stressing one thing: deep nesting, one long line, thousands of links, tables, headings, footnotes, code blocks or
+HTML. `--scaling` parses each generated document at two sizes and fails if the time grows faster than size^1.5.
+Results from a cloud container (Xeon @ 2.1 GHz, mingw-w64 GCC 13 `-O2` under Wine 9; MSVC on bare Windows is faster),
+median of runs over at least 0.5 s:
+
+| Document | Size | Parse | Parse with map |
+|---|---:|---:|---:|
+| corpus/small.md | 3.4 KB | 0.04 ms | 0.05 ms |
+| corpus/medium.md | 53 KB | 0.68 ms | 0.79 ms |
+| corpus/large.md | 3.7 MB | 55 ms | 72 ms |
+| 2,000 nested quotes | 3.9 KB | 0.19 ms | 0.30 ms |
+| 20,000 nested `[` | 39 KB | 4.6 ms | 5.3 ms |
+| one 100,000-word line | 488 KB | 2.5 ms | 3.0 ms |
+| one long line of C++ | 291 KB | 5.6 ms | 5.6 ms |
+| 10,000 reference links | 543 KB | 15 ms | 13 ms |
+| 3,000 tables | 185 KB | 5.5 ms | 9.9 ms |
+| 10,000 headings | 195 KB | 8.9 ms | 11 ms |
+| 3,000 HTML blocks | 278 KB | 9.7 ms | 9.6 ms |
+
+All 22 generated cases grow linearly (exponent 0.7–1.2). In the same run, the keyword lookup of the highlighter
+(a `wcsstr` over the whole keyword list for every identifier; now a sorted table per language) was
+the one bottleneck worth fixing: the long C++ line went from 26.1 to 6.7 ms, 3,000 code blocks from 14.1 to 6.6 ms,
+medium.md from 0.96 to 0.66 ms, and large.md from 76 to 55 ms.
+
 ## What is in the repository
 
 | Path | What is there |
