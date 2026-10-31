@@ -127,6 +127,9 @@ if(FASTMD_RUST)
                     ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/fastmd-tex.dll
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RUST_OUT}/fastmd_mermaid.dll
                     ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/fastmd-mermaid.dll
+            # the copies are what the installer's resource script depends on: without them named here, Ninja on a
+            # fresh build tree stops with "fastmd-tex.dll ... missing and no known rule to make it"
+            BYPRODUCTS ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/fastmd-tex.dll ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/fastmd-mermaid.dll
             VERBATIM)
         add_dependencies(FastMD fastmd_rust)
     else()
