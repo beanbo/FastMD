@@ -50,9 +50,11 @@ $work = Join-Path $app 'tests\out\libfuzzer'
 $corpus = Join-Path $work 'corpus'
 New-Item -ItemType Directory -Force $corpus | Out-Null
 # seeds: the corpus documents (large.md is too big to mutate usefully), the test documents and the regression inputs
-$seeds = @(Join-Path $app '..\bench\corpus\small.md'), (Join-Path $app '..\bench\corpus\medium.md')
-$seeds += Get-ChildItem (Join-Path $app 'tests\*.md'), (Join-Path $app 'tests\fuzz\*.md'), (Join-Path $app 'tests\fuzz\regress\*') -File |
-    ForEach-Object FullName
+[string[]]$seeds = @(
+    (Join-Path $app '..\bench\corpus\small.md'),
+    (Join-Path $app '..\bench\corpus\medium.md')
+) + @(Get-ChildItem -Path (Join-Path $app 'tests\*.md'), (Join-Path $app 'tests\fuzz\*.md'), (Join-Path $app 'tests\fuzz\regress\*') -File |
+    ForEach-Object { $_.FullName })
 Copy-Item $seeds $corpus -Force
 & $exe "-max_total_time=$Seconds" -max_len=65536 -timeout=20 -rss_limit_mb=4096 "-artifact_prefix=$($work -replace '\\', '/')/" `
     -print_final_stats=1 @args $corpus
