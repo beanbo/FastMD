@@ -6,6 +6,8 @@
 //
 //   pwsh -File app/tests/fuzz/run.ps1                 # build with ASan and run for a minute
 //   fastmd-fuzz.exe --runs 100000 --seed 7            # or drive it directly
+//   fastmd-fuzz.exe --seconds 900 --edit              # for a time instead of a number of runs
+//   fastmd-fuzz.exe --timeout 30 --slow 1000          # a hang stops the run, a slow input is kept (the defaults)
 //   fastmd-fuzz.exe --file broken.md                  # parse one file and stop (for a case that already failed)
 //
 // The input being parsed is always in app/tests/out/fuzz/last.md, so a crash can be replayed with --file.
@@ -17,10 +19,13 @@
 // as out/fuzz/map-<n>-tex<0|1>.u16 (the exact UTF-16, lone surrogates and all) plus a readable .md copy:
 //   fastmd-fuzz.exe --file out\fuzz\map-123-tex1.u16 --tex 1
 // the standard headers come first: windows.h leaves macros behind that upset them
+#include <atomic>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <random>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -90,7 +95,17 @@ std::wstring Mutate(std::mt19937& rng, const std::wstring& src) {
     int rounds = 1 + (int)(rng() % 8);
     for (int r = 0; r < rounds && !s.empty(); r++) {
         size_t at = rng() % s.size();
-        switch (rng() % 7) {
+        switch (rng() % 8) {
+        case 7: {                                                                          // repeat a short piece
+            // many times over: the shape that turns a parser's quadratic corner into a hang
+            size_t len = std::min<size_t>(s.size() - at, 1 + rng() % 12);
+            std::wstring piece = s.substr(at, len), run;
+            size_t times = 16 + rng() % 4096;
+            run.reserve(len * times);
+            for (size_t k = 0; k < times && run.size() < kMaxInput / 2; k++) run += piece;
+            s.insert(at, run);
+            break;
+        }
         case 0: s[at] = kSpice[rng() % (std::size(kSpice) - 1)]; break;                    // poke a special char in
         case 1: s[at] = (wchar_t)(rng() % 0x10000); break;                                 // any code unit at all
         case 2: s.erase(at, 1 + rng() % 64); break;                                        // cut a piece out
@@ -114,6 +129,27 @@ std::wstring Mutate(std::mt19937& rng, const std::wstring& src) {
 }
 
 bool g_trace = false;  // --file: say which stage is running, so a hang can be placed
+
+// Hangs and slow inputs. The main loop stamps the start of every input; a watchdog thread stops the run when one input
+// has taken longer than --timeout seconds (the input is out/fuzz/last.md, written before the parse), and the loop itself
+// keeps a copy of every input that took longer than --slow milliseconds as out/fuzz/slow-<run>.md. A slow input is not a
+// failure by itself (a large one under AddressSanitizer is slow), but it is where a quadratic case shows first.
+std::atomic<uint64_t> g_inputStart{0};  // GetTickCount64 at the start of the current input, 0 = between inputs
+std::atomic<long> g_inputRun{-1};
+double g_timeout = 30;
+void Watchdog() {
+    for (;;) {
+        Sleep(200);
+        uint64_t t = g_inputStart.load();
+        if (t && GetTickCount64() - t > (uint64_t)(g_timeout * 1000)) {
+            CopyFileW(L"out\\fuzz\\last.md", L"out\\fuzz\\hang.md", FALSE);
+            wprintf(L"run %ld has taken over %.0f s: a hang - the input is app\\tests\\out\\fuzz\\hang.md (replay with --file)\n",
+                    g_inputRun.load(), g_timeout);
+            fflush(stdout);
+            ExitProcess(4);
+        }
+    }
+}
 
 std::wstring ToCrlf(const std::wstring& s) {  // every lone \n becomes \r\n
     std::wstring o;
@@ -182,10 +218,12 @@ bool ParseOnce(const std::wstring& text, std::string* why) {
     }
     if (g_trace) { wprintf(L"  tags...\n"); fflush(stdout); }
     // the tag reader is normally fed by md4c; here it is fed the raw text, which is harsher
-    for (size_t i = 0; i + 1 < text.size(); i++) {
-        if (text[i] != L'<') continue;
+    // at every '<', stepping over what a tag consumed as EmitHtmlBlock does (a '<' at every character would make the
+    // walk itself quadratic: an unclosed tag reads to the end of its block)
+    for (size_t i = 0; i + 1 < text.size();) {
         HtmlTag tag;
-        ParseHtmlTag(text.data() + i, text.size() - i, tag);
+        size_t used = text[i] == L'<' ? ParseHtmlTag(text.data() + i, text.size() - i, tag) : 0;
+        i += used ? used : 1;
     }
     if (g_trace) { wprintf(L"  entities...\n"); fflush(stdout); }
     std::wstring out;
@@ -382,7 +420,8 @@ bool EditWalk(std::mt19937& rng, const std::wstring& input, std::string* why) {
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
-    long runs = 20000;
+    long runs = 20000, slowMs = 1000, slow = 0;
+    double seconds = 0;
     unsigned seed = (unsigned)GetTickCount(), walkSeed = 1;
     std::wstring single, corpus = L"..\\..\\..\\bench\\corpus";
     for (int i = 1; i < argc; i++) {
@@ -394,6 +433,9 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--tex" && i + 1 < argc) g_texOn = wcstol(argv[++i], nullptr, 10) != 0;
         else if (a == L"--edit") g_editWalk = true;  // also the random walk of edit operations (§14.2)
         else if (a == L"--walkseed" && i + 1 < argc) walkSeed = (unsigned)wcstoul(argv[++i], nullptr, 10);
+        else if (a == L"--seconds" && i + 1 < argc) seconds = wcstod(argv[++i], nullptr);  // instead of --runs
+        else if (a == L"--timeout" && i + 1 < argc) g_timeout = wcstod(argv[++i], nullptr);
+        else if (a == L"--slow" && i + 1 < argc) slowMs = wcstol(argv[++i], nullptr, 10);
     }
     if (!single.empty()) {
         g_trace = true;
@@ -423,15 +465,22 @@ int wmain(int argc, wchar_t** argv) {
     }
     CreateDirectoryW(L"out", nullptr);
     CreateDirectoryW(L"out\\fuzz", nullptr);
-    wprintf(L"fuzzing: %zu seeds, %ld runs, seed %u\n", g_seeds.size(), runs, seed);
+    if (seconds > 0) runs = LONG_MAX;
+    wprintf(L"fuzzing: %zu seeds, %ls, seed %u\n", g_seeds.size(),
+            seconds > 0 ? (std::to_wstring((long)seconds) + L" s").c_str() : (std::to_wstring(runs) + L" runs").c_str(), seed);
+    std::thread(Watchdog).detach();
     std::mt19937 rng(seed);
     DWORD t0 = GetTickCount();
-    for (long i = 0; i < runs; i++) {
+    long i = 0;
+    for (; i < runs && (seconds <= 0 || GetTickCount() - t0 < seconds * 1000); i++) {
         std::wstring text = Mutate(rng, g_seeds[rng() % g_seeds.size()]);
         g_texOn = (rng() & 1) != 0;
         if (rng() % 3 == 0) text = ToCrlf(text);
         // the input is written out first: if the parse takes the process down, the file is what reproduces it
         WriteUtf8File(L"out\\fuzz\\last.md", text);
+        g_inputRun = i;
+        const uint64_t started = GetTickCount64();
+        g_inputStart = started;
         std::string why;
         if (!ParseOnce(text, &why)) {
             std::wstring name = L"out\\fuzz\\map-" + std::to_wstring(i) + L"-tex" + (g_texOn ? L"1" : L"0");
@@ -453,9 +502,17 @@ int wmain(int argc, wchar_t** argv) {
                 return 3;
             }
         }
+        g_inputStart = 0;
+        if (GetTickCount64() - started > (uint64_t)slowMs) {
+            std::wstring name = L"out\\fuzz\\slow-" + std::to_wstring(i) + L".md";
+            WriteUtf8File(name, text);
+            wprintf(L"  run %ld took %llu ms (%zu chars): app\\tests\\%ls\n", i, GetTickCount64() - started, text.size(),
+                    name.c_str());
+            slow++;
+        }
         if ((i & 1023) == 1023) wprintf(L"  %ld runs, %.1f s\n", i + 1, (GetTickCount() - t0) / 1000.0);
     }
-    wprintf(L"done: %ld runs in %.1f s, nothing fell over, every map checked%s\n", runs, (GetTickCount() - t0) / 1000.0,
-            g_editWalk ? L", every edit walk undone to the byte" : L"");
+    wprintf(L"done: %ld runs in %.1f s, nothing fell over, every map checked%ls; %ld slower than %ld ms\n", i,
+            (GetTickCount() - t0) / 1000.0, g_editWalk ? L", every edit walk undone to the byte" : L"", slow, slowMs);
     return 0;
 }
