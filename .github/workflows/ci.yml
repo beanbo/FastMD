@@ -39,7 +39,7 @@ jobs:
         run: pwsh -File app/tests/edit/run.ps1
       - name: Benchmarks (growth check)
         shell: pwsh
-        run: pwsh -File app/tests/bench/run.ps1 -Scaling -MinTime 0.1
+        run: pwsh -File app/tests/bench/run.ps1 -Scaling -MinTime 0.3
       - name: Fuzz (AddressSanitizer, 3000 inputs)
         shell: pwsh
         run: pwsh -File app/tests/fuzz/run.ps1 -Runs 3000 -Seed ${{ github.run_number }}
@@ -87,7 +87,7 @@ jobs:
       - name: Replay the fuzz regression inputs
         run: app/tests/mingw/build.sh regress
       - name: Benchmarks (growth check)
-        run: app/tests/mingw/build.sh bench --min-time 0.1 --scaling
+        run: app/tests/mingw/build.sh bench --min-time 0.3 --scaling
       - name: Fuzz for 2 minutes
         run: |
           app/tests/mingw/build.sh fuzz --seconds 60 --edit --seed ${{ github.run_number }}

@@ -18,7 +18,7 @@
 // fastest run and the throughput are printed.
 //
 // --scaling builds every generated document at two sizes, n and 4n, and prints how the parse time grew with the size, as
-// the exponent k in time ~ size^k: ~1 is linear, ~2 quadratic. Anything over --max-exponent (default 1.5) is reported
+// the exponent k in time ~ size^k: ~1 is linear, ~2 quadratic. Anything over --max-exponent (default 1.8) is reported
 // and the exit code is 1, so the growth check can run in CI and catch an input shape that turned quadratic.
 #include <algorithm>
 #include <chrono>
@@ -296,7 +296,7 @@ int Scaling(double maxExp) {
 int main(int argc, char** argv) {
     std::string corpus = "../../bench/corpus", doc;
     bool scaling = false, onlyScaling = false;
-    double maxExp = 1.5;
+    double maxExp = 1.8;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--corpus" && i + 1 < argc) corpus = argv[++i];

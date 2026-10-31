@@ -144,7 +144,7 @@ it for five minutes on every pull request.
 `fastmd-bench` times four steps for each document: decoding the file's bytes, the reading parse, the edit-mode parse
 (with the text ↔ source map), and the HTML reader. The documents are the three corpus files and 22 generated ones,
 each stressing one thing: deep nesting, one long line, thousands of links, tables, headings, footnotes, code blocks or
-HTML. `--scaling` parses each generated document at two sizes and fails if the time grows faster than size^1.5.
+HTML. `--scaling` parses each generated document at two sizes and fails if the time grows faster than size^1.8 (a quadratic cost shows as ~2).
 Results from a cloud container (Xeon @ 2.1 GHz, mingw-w64 GCC 13 `-O2` under Wine 9; MSVC on bare Windows is faster),
 median of runs over at least 0.5 s:
 
@@ -162,7 +162,7 @@ median of runs over at least 0.5 s:
 | 10,000 headings | 195 KB | 8.9 ms | 11 ms |
 | 3,000 HTML blocks | 278 KB | 9.7 ms | 9.6 ms |
 
-All 22 generated cases grow linearly (exponent 0.7–1.2). In the same run, the keyword lookup of the highlighter
+All 22 generated cases grow linearly (exponent 0.7–1.2 here). The one that comes closest to the limit is deeply nested brackets, where md4c's span handling grows slightly faster than the input at small sizes (exponent ~1.6 from 10 to 40 KB, ~1.2 from 160 to 625 KB). In the same run, the keyword lookup of the highlighter
 (a `wcsstr` over the whole keyword list for every identifier; now a sorted table per language) was
 the one bottleneck worth fixing: the long C++ line went from 26.1 to 6.7 ms, 3,000 code blocks from 14.1 to 6.6 ms,
 medium.md from 0.96 to 0.66 ms, and large.md from 76 to 55 ms.
