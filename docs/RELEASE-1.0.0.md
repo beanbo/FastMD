@@ -59,6 +59,24 @@ SHA-256; всё это выключается в настройках.
 
 ## Как выпустить (для владельца)
 
+Начиная с версии после 1.3.1 выпуск собирает GitHub Actions (`.github/workflows/release.yml`): достаточно поднять
+версию в `app/CMakeLists.txt`, положить заметки в `docs/RELEASE-<версия>.md` (или раздел `## [<версия>]` в
+CHANGELOG.md) и отправить тег:
+
+```powershell
+git tag -a v1.4.0 -m "FastMD 1.4.0"
+git push origin v1.4.0
+```
+
+Workflow проверит, что тег совпадает с версией, соберёт `app\package.ps1` на Windows, прогонит тесты правки, сверит
+хеши и создаст **черновик** выпуска с zip, установщиком, обоими `.sha256` и заметками. Выпуск уходит к пользователям,
+когда черновик публикуют на GitHub (проверка обновлений читает `releases/latest`). Переменная репозитория
+`RELEASE_PUBLISH = true` публикует сразу, без черновика; `WINGET_PUBLISH = true` вместе с секретом `WINGET_TOKEN`
+после публикации отправляет пул-реквест в `microsoft/winget-pkgs`. «Run workflow» на вкладке Actions — пробная сборка
+без выпуска.
+
+Вручную, как выпускались версии до 1.3.1:
+
 ```powershell
 pwsh -File app\package.ps1                 # zip + FastMD-Setup.exe + оба .sha256 в app\out\dist
 git tag -a v1.0.0 -m "FastMD 1.0.0"
