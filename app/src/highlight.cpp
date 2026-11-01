@@ -3,8 +3,10 @@
 // Markup (HTML, XML, SVG, XAML) and YAML have small lexers of their own, so the text between tags and YAML's values
 // are not read as code; neither are the bare words of shell and config languages (LangSpec::words).
 #include "doc.h"
+#include <atomic>
 #include <cwchar>
 #include <cwctype>
+#include <string_view>
 
 namespace {
 enum Lang : uint8_t { L_NONE, L_C, L_CPP, L_CS, L_JS, L_RUST, L_PY, L_PS, L_JSON, L_GO, L_JAVA, L_SH, L_SQL, L_CSS, L_XML, L_YAML, L_TOML };
@@ -249,14 +251,42 @@ bool NameMatches(const wchar_t* names, const wchar_t* lang, uint32_t n) {
     return false;
 }
 
-bool InList(const wchar_t* list, const wchar_t* w, size_t n, bool ci) {
+// The keyword and constant lists, split into sorted words on first use: a lookup used to be a wcsstr over the whole
+// list (up to ~1,500 characters) for every identifier, which made a long code block cost ~100 ns per character.
+// Built once per language and list, by whichever thread asks first (a thread that loses the race drops its copy).
+struct WordSet {
+    std::vector<std::wstring_view> words;
+};
+const size_t kLangCount = sizeof(kLangs) / sizeof(kLangs[0]);
+std::atomic<const WordSet*> g_wordSets[kLangCount][2];
+
+const WordSet* WordsOf(int li, int which) {
+    std::atomic<const WordSet*>& slot = g_wordSets[li][which];
+    const WordSet* ws = slot.load(std::memory_order_acquire);
+    if (ws) return ws;
+    const wchar_t* list = which ? kLangs[li].consts : kLangs[li].keywords;
+    WordSet* built = new WordSet;
+    for (const wchar_t* p = list ? list : L""; *p;) {
+        while (*p == L' ') p++;
+        const wchar_t* b = p;
+        while (*p && *p != L' ') p++;
+        if (p > b) built->words.emplace_back(b, (size_t)(p - b));
+    }
+    std::sort(built->words.begin(), built->words.end());
+    const WordSet* expected = nullptr;
+    if (slot.compare_exchange_strong(expected, built, std::memory_order_acq_rel)) return built;
+    delete built;
+    return expected;
+}
+
+// which: 0 = keywords, 1 = constants
+bool InList(int li, int which, const wchar_t* w, size_t n, bool ci) {
+    const wchar_t* list = which ? kLangs[li].consts : kLangs[li].keywords;
     if (!list || !*list || n == 0 || n > 40) return false;
     wchar_t buf[48];
-    buf[0] = L' ';
-    for (size_t i = 0; i < n; i++) buf[i + 1] = ci ? (wchar_t)towlower(w[i]) : w[i];
-    buf[n + 1] = L' ';
-    buf[n + 2] = 0;
-    return wcsstr(list, buf) != nullptr;
+    for (size_t i = 0; i < n; i++) buf[i] = ci ? (wchar_t)towlower(w[i]) : w[i];
+    const WordSet* ws = WordsOf(li, which);
+    return std::binary_search(ws->words.begin(), ws->words.end(), std::wstring_view(buf, n));
 }
 
 inline bool IsIdStart(wchar_t c) { return iswalpha(c) || c == L'_' || c >= 0x80; }
@@ -348,7 +378,7 @@ void LexCode(const Emit& emit, int li, const wchar_t* s, size_t i, size_t n) {
         if (L.dollarVars && c == L'$' && i + 1 < n && (IsIdStart(s[i + 1]) || s[i + 1] == L'{' || s[i + 1] == L'_')) {
             size_t end = i + 1;
             while (end < n && (IsId(s[end]) || s[end] == L':' || s[end] == L'{' || s[end] == L'}')) end++;
-            bool isConst = InList(L.consts, s + i, end - i, true);
+            bool isConst = InList(li, 1, s + i, end - i, true);
             emit(i, end, isConst ? P_CONST : P_VAR);
             i = end;
             continue;
@@ -367,8 +397,8 @@ void LexCode(const Emit& emit, int li, const wchar_t* s, size_t i, size_t n) {
             while (end < n && (IsId(s[end]) || (li == L_PS && s[end] == L'-' && end + 1 < n && iswalpha(s[end + 1])))) end++;
             size_t wl = end - i;
             uint8_t col = 0;
-            if (InList(L.keywords, s + i, wl, L.caseInsensitive)) col = P_KEYWORD;
-            else if (InList(L.consts, s + i, wl, L.caseInsensitive)) col = P_CONST;
+            if (InList(li, 0, s + i, wl, L.caseInsensitive)) col = P_KEYWORD;
+            else if (InList(li, 1, s + i, wl, L.caseInsensitive)) col = P_CONST;
             else {
                 size_t k = end;
                 if (li == L_RUST && k < n && s[k] == L'!') col = P_FUNC;  // macros

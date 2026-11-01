@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The real build: MSVC, the way app/build.ps1 builds a release (exe, DLLs, installer, Rust libraries), then the edit
+  # tests, a short run of the fuzz harness with AddressSanitizer and the benchmarks' growth check.
+  windows:
+    name: Windows (MSVC)
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      # the formula and diagram DLLs are Rust; the installer embeds them, so the build needs cargo
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            app/build/Release/rust
+          key: cargo-${{ runner.os }}-${{ hashFiles('app/rust/Cargo.lock') }}
+      - name: Build
+        shell: pwsh
+        run: pwsh -File app/build.ps1 -Config Release
+      - name: Edit tests
+        shell: pwsh
+        run: pwsh -File app/tests/edit/run.ps1
+      - name: Benchmarks (growth check)
+        shell: pwsh
+        run: pwsh -File app/tests/bench/run.ps1 -Scaling -MinTime 0.3
+      - name: Fuzz (AddressSanitizer, 3000 inputs)
+        shell: pwsh
+        run: pwsh -File app/tests/fuzz/run.ps1 -Runs 3000 -Seed ${{ github.run_number }}
+      - name: Upload the fuzz input on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-windows
+          path: app/tests/out/fuzz/
+          if-no-files-found: ignore
+
+  # libFuzzer with AddressSanitizer through clang-cl (tests/fuzz/fuzz_target.cpp): coverage-guided, so a few minutes
+  # reach further than many more blind runs.
+  libfuzzer:
+    name: libFuzzer (clang-cl)
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and fuzz for 5 minutes
+        shell: pwsh
+        run: pwsh -File app/tests/fuzz/libfuzzer.ps1 -Seconds 300
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: libfuzzer-crashes
+          path: app/tests/out/libfuzzer/
+          if-no-files-found: ignore
+
+  # The window-free half cross-built with mingw-w64 and run under Wine: a second compiler over the same code, and a
+  # check that needs no Windows machine (app/tests/mingw/build.sh).
+  mingw:
+    name: Linux (mingw-w64 + Wine)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mingw-w64 and Wine
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mingw-w64 wine64
+      - name: Build and run the edit tests
+        run: app/tests/mingw/build.sh test
+      - name: Replay the fuzz regression inputs
+        run: app/tests/mingw/build.sh regress
+      - name: Benchmarks (growth check)
+        run: app/tests/mingw/build.sh bench --min-time 0.3 --scaling
+      - name: Fuzz for 2 minutes
+        run: |
+          app/tests/mingw/build.sh fuzz --seconds 60 --edit --seed ${{ github.run_number }}
+          app/tests/mingw/build.sh target --seconds 60 --seed ${{ github.run_number }}
+      - name: Upload the fuzz input on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-mingw
+          path: app/tests/out/fuzz/
+          if-no-files-found: ignore

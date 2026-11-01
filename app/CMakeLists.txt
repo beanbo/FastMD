@@ -197,6 +197,37 @@ if(FASTMD_FUZZ)
     target_link_libraries(fastmd-fuzz PRIVATE user32 advapi32 shlwapi)
 endif()
 
+# The libFuzzer target as a plain exe (tests/fuzz/fuzz_target.cpp built with FASTMD_FUZZ_STANDALONE): it replays inputs
+# (tests/fuzz/regress) or mutates file bytes blindly. Under libFuzzer itself it is built by tests/fuzz/libfuzzer.ps1.
+if(FASTMD_FUZZ)
+    add_executable(fastmd-fuzz-target tests/fuzz/fuzz_target.cpp src/parse.cpp src/html.cpp src/highlight.cpp src/util.cpp
+        src/theme.cpp src/editcore.cpp src/editops.cpp src/editfile.cpp third_party/md4c/md4c.c)
+    target_include_directories(fastmd-fuzz-target PRIVATE ${CMAKE_BINARY_DIR}/generated src)
+    target_compile_definitions(fastmd-fuzz-target PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        _CRT_SECURE_NO_WARNINGS MD4C_USE_UTF16 FASTMD_NO_APP FASTMD_FUZZ_STANDALONE)
+    target_compile_options(fastmd-fuzz-target PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus /EHsc /Zi
+        $<$<BOOL:${FASTMD_ASAN}>:/fsanitize=address>)
+    target_link_options(fastmd-fuzz-target PRIVATE /DEBUG /INCREMENTAL:NO)
+    target_link_libraries(fastmd-fuzz-target PRIVATE user32 advapi32 shlwapi)
+endif()
+
+# ------------------------------------------------------------------------------------------------- fastmd-bench
+# Micro-benchmarks of the window-free half: decoding, the reading parse, the edit-mode parse and the HTML reader over the
+# corpus and over generated pathological documents (tests/bench/bench.cpp). Built in Release with the app's own flags:
+#   pwsh -File tests/bench/run.ps1
+option(FASTMD_BENCH "Build the micro-benchmarks" ON)
+if(FASTMD_BENCH)
+    add_executable(fastmd-bench tests/bench/bench.cpp src/parse.cpp src/html.cpp src/highlight.cpp src/util.cpp
+        src/theme.cpp third_party/md4c/md4c.c)
+    target_include_directories(fastmd-bench PRIVATE ${CMAKE_BINARY_DIR}/generated src)
+    target_compile_definitions(fastmd-bench PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        _CRT_SECURE_NO_WARNINGS MD4C_USE_UTF16 FASTMD_NO_APP)
+    target_compile_options(fastmd-bench PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus /EHsc
+        $<$<CONFIG:Release>:/O2 /Oi /DNDEBUG>)
+    target_link_options(fastmd-bench PRIVATE /INCREMENTAL:NO)
+    target_link_libraries(fastmd-bench PRIVATE user32 advapi32 shlwapi dwmapi)
+endif()
+
 # --------------------------------------------------------------------------------------------- fastmd-edit-tests
 # Edit mode's window-free core (docs/EDIT-MODE.md §14.1): golden cases from tests/edit/cases and property sweeps over
 # the corpus, on the same parser the app uses but with no window and no `g`. The exit code is the number of failures.
