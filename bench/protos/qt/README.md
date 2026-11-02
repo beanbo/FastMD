@@ -1,3 +1,5 @@
+**Русский** | [English](README.en.md)
+
 # FastMD — прототип `qt` (Qt 6.12 Widgets, C++)
 
 **Итог:** Qt Widgets + `QTextBrowser`, в который md4c строит `QTextDocument` напрямую (без HTML/CSS), показывает

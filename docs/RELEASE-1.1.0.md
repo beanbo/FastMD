@@ -1,3 +1,5 @@
+**Русский** | [English](RELEASE-1.1.0.en.md)
+
 # FastMD 1.1.0 — примечания к выпуску
 
 *Текст выпуска, опубликованного 21.09.2026: <https://github.com/beanbo/FastMD/releases/tag/v1.1.0>. Команды

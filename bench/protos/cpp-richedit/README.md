@@ -1,3 +1,5 @@
+**Русский** | [English](README.en.md)
+
 # cpp-richedit — Win32 + встроенный RichEdit 8 (msftedit.dll) + md4c → RTF
 
 Путь «ноль зависимостей, только то, что уже есть в Windows»: markdown разбирается md4c, превращается в RTF и

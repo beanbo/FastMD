@@ -1,3 +1,5 @@
+**Русский** | [English](06-product-ux-landscape.en.md)
+
 # 06. Продукт и UX: что должен уметь быстрый и стильный Markdown-ридер и как с этим справляются конкуренты
 
 - Дата: 2026-09-19. Машина: Windows 11 Pro 26200, Ryzen 9 7950X, 64 GB, NVMe, Defender real-time ON, 2 GPU.

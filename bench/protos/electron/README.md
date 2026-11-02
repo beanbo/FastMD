@@ -1,3 +1,5 @@
+**Русский** | [English](README.en.md)
+
 # FastMD — прототип на Electron
 
 Настоящий Markdown-просмотрщик на Electron (класс Typora / Obsidian / MarkText), измеренный общим харнессом

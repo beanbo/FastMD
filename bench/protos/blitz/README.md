@@ -1,3 +1,5 @@
+**Русский** | [English](README.en.md)
+
 # blitz — FastMD на DioxusLabs Blitz (Stylo + Taffy + Parley + Vello)
 
 Прототип «настоящего CSS без Chromium»: Markdown → HTML (comrak) → DOM (html5ever) → CSS (Stylo, движок

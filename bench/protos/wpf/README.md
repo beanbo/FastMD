@@ -1,3 +1,5 @@
+**Русский** | [English](README.en.md)
+
 # wpf — C# .NET 8 WPF + Markdig → FlowDocument
 
 Прототип FastMD на WPF: Markdig разбирает Markdown, собственный билдер строит `FlowDocument`

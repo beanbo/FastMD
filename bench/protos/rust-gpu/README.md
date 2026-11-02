@@ -1,3 +1,5 @@
+**Русский** | [English](README.en.md)
+
 # rust-gpu — FastMD на Rust GPU-UI (egui / iced)
 
 Прототип просмотрщика Markdown на Rust-фреймворках «immediate-mode / GPU UI»:

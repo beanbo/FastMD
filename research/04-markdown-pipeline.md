@@ -1,3 +1,5 @@
+**Русский** | [English](04-markdown-pipeline.en.md)
+
 # 04. Конвейер Markdown: парсер, подсветка кода, формулы, диаграммы, картинки, огромные документы
 
 - Дата: 2026-09-19. Машина: Windows 11 Pro 26200, Ryzen 9 7950X (16C/32T), 64 GB, NVMe, Defender real-time ON.
