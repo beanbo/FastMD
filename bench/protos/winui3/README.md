@@ -1,3 +1,5 @@
+**Русский** | [English](README.en.md)
+
 # winui3 — C# .NET 8 + WinUI 3 (Windows App SDK 1.8, unpackaged) + Markdig
 
 Нативный XAML-просмотрщик: Markdig парсит Markdown в фоновом потоке, AST превращается **в коде** (без XAML-разметки)

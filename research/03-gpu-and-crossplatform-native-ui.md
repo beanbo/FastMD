@@ -1,3 +1,5 @@
+**Русский** | [English](03-gpu-and-crossplatform-native-ui.en.md)
+
 # 03. GPU / immediate-mode / кроссплатформенные нативные UI-тулкиты и их текст
 
 *FastMD, фаза исследования. Дата: 2026-09-19. Автор: агент-исследователь «GPU & cross-platform native UI».*

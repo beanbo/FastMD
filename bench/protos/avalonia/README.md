@@ -1,3 +1,5 @@
+**Русский** | [English](README.en.md)
+
 # avalonia — C# .NET 8 + Avalonia 12 (Skia) + Markdig, NativeAOT
 
 Прототип FastMD на Avalonia: Markdig AST → обычные контролы Avalonia (TextBlock/SelectableTextBlock с Inlines,

@@ -1,3 +1,5 @@
+**Русский** | [English](README.en.md)
+
 # litehtml-sciter — «лёгкие HTML-движки» для FastMD
 
 Два прототипа одного вопроса: можно ли взять готовую HTML/CSS-вёрстку (и общий `bench/common/style.css`), но без

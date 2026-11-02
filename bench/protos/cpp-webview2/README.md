@@ -1,3 +1,5 @@
+**Русский** | [English](README.en.md)
+
 # cpp-webview2 — C++ Win32 + WebView2 + md4c-html
 
 Прототип FastMD на стеке «тонкий нативный хост + системный Chromium (WebView2)». Markdown парсится в C

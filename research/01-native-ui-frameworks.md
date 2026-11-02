@@ -1,3 +1,5 @@
+**Русский** | [English](01-native-ui-frameworks.en.md)
+
 # 01. Нативные UI-фреймворки Windows для быстрого и стильного Markdown-ридера
 
 > Исследование для FastMD. Дата: 2026-09-19. Машина: Windows 11 Pro 26200, Ryzen 9 7950X, 64 GB, NVMe,

@@ -1,3 +1,5 @@
+**Русский** | [English](README.en.md)
+
 # rust-webview — Rust + wry / Tauri → WebView2
 
 Прототип FastMD на Rust поверх системного WebView2: `pulldown-cmark` превращает Markdown в HTML,

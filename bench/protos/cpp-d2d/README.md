@@ -1,3 +1,5 @@
+**Русский** | [English](README.en.md)
+
 # cpp-d2d — C++20 · raw Win32 · DirectWrite (+Direct2D) · md4c
 
 Прототип FastMD на «голом» Win32 с собственным рендерером Markdown поверх DirectWrite.

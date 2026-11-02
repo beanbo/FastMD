@@ -1,3 +1,5 @@
+**Русский** | [English](CHANGELOG.en.md)
+
 # История изменений FastMD
 
 Формат: [версия] — дата — что изменилось. Планы — в [docs/PLAN.md](docs/PLAN.md).
